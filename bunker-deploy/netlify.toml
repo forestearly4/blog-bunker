@@ -1,0 +1,18 @@
+[build]
+  command   = "npm run build"
+  publish   = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# SPA fallback — all routes serve index.html so React handles routing
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
+
+# Proxy Anthropic API calls through a Netlify Function to keep keys server-side
+[[redirects]]
+  from   = "/api/claude"
+  to     = "/.netlify/functions/claude-proxy"
+  status = 200
