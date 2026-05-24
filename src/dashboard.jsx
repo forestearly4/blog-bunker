@@ -181,6 +181,322 @@ async function callAI(providerId, model, system, userMsg, apiKey) {
   throw new Error("Unknown provider");
 }
 
+// ─── SOCIAL PLATFORMS CONFIG ─────────────────────────────────────────────────
+
+const SOCIAL_PLATFORMS = [
+  {
+    id: "instagram",
+    name: "Instagram",
+    icon: "📸",
+    color: "#e1306c",
+    charLimit: 2200,
+    hashtagLimit: 30,
+    tone: "visual, aspirational, lifestyle-focused",
+    format: "Hook line, 3-4 short paragraphs, line breaks between each, 10-15 relevant hashtags at end",
+    placeholder: "Share to Instagram feed",
+    urlNote: "Links don't work in captions — mention 'link in bio'",
+  },
+  {
+    id: "facebook",
+    name: "Facebook",
+    icon: "📘",
+    color: "#1877f2",
+    charLimit: 63206,
+    hashtagLimit: 5,
+    tone: "conversational, community-friendly, story-driven",
+    format: "Engaging opening question or statement, 2-3 paragraphs, call to action, 2-3 hashtags optional",
+    placeholder: "Share to Facebook page",
+    urlNote: "Include full URL — Facebook shows link preview automatically",
+  },
+  {
+    id: "tiktok",
+    name: "TikTok",
+    icon: "🎵",
+    color: "#fe2c55",
+    charLimit: 2200,
+    hashtagLimit: 10,
+    tone: "punchy, energetic, trend-aware, Gen Z/Millennial",
+    format: "Hook in first line (no more than 8 words), ultra-short sentences, 3-5 trending hashtags",
+    placeholder: "Write TikTok caption",
+    urlNote: "No clickable links in captions — direct to bio link",
+  },
+  {
+    id: "reddit",
+    name: "Reddit",
+    icon: "🔴",
+    color: "#ff4500",
+    charLimit: 40000,
+    hashtagLimit: 0,
+    tone: "authentic, community-first, no marketing speak, conversational",
+    format: "Title line, then body as genuine post. No hashtags. No salesy language. Share value first, mention the blog naturally if relevant.",
+    placeholder: "Write Reddit post",
+    urlNote: "Choose the right subreddit — r/flyfishing, r/whiskey, r/bourbon, r/scotch",
+  },
+  {
+    id: "twitter",
+    name: "X (Twitter)",
+    icon: "𝕏",
+    color: "#000000",
+    charLimit: 280,
+    hashtagLimit: 2,
+    tone: "sharp, witty, opinionated, punchy",
+    format: "Single punchy statement or question. Max 280 chars. 1-2 hashtags max. No filler.",
+    placeholder: "Write a tweet",
+    urlNote: "URLs count as ~23 chars — account for that in length",
+  },
+];
+
+const SOCIAL_KEYS_STORAGE = "bb_social_connections";
+
+function loadSocialConnections() {
+  try { return JSON.parse(localStorage.getItem(SOCIAL_KEYS_STORAGE) || "{}"); } catch { return {}; }
+}
+function saveSocialConnections(data) {
+  try { localStorage.setItem(SOCIAL_KEYS_STORAGE, JSON.stringify(data)); } catch {}
+}
+
+// ─── SOCIAL POST GENERATOR ────────────────────────────────────────────────────
+
+function SocialPostTab({ activeProvider, activeModel, apiKeys, dark }) {
+  const [input,       setInput]       = useState("");
+  const [inputMode,   setInputMode]   = useState("topic"); // "topic" | "blogpost"
+  const [loading,     setLoading]     = useState(false);
+  const [posts,       setPosts]       = useState({});
+  const [error,       setError]       = useState("");
+  const [selected,    setSelected]    = useState({ instagram:true, facebook:true, tiktok:true, reddit:true, twitter:true });
+  const [copied,      setCopied]      = useState({});
+  const [activePlat,  setActivePlat]  = useState("instagram");
+
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  const generate = async () => {
+    if (!input.trim()) return;
+    const targets = SOCIAL_PLATFORMS.filter(p => selected[p.id]);
+    if (!targets.length) { setError("Select at least one platform."); return; }
+    setLoading(true); setPosts({}); setError("");
+
+    try {
+      const results = {};
+      for (const plat of targets) {
+        const system = `You are a social media manager for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "Cast at Dawn. Sip at Dusk." Voice: ${plat.tone}. Write ONLY the post content — no labels, no explanations, no "Here is your post:". Format: ${plat.format}. ${plat.urlNote}.`;
+        const userMsg = inputMode === "topic"
+          ? `Write a ${plat.name} post for Cask & Stream about: ${input}`
+          : `Adapt this blog post content into a ${plat.name} post for Cask & Stream:\n\n${input.slice(0, 1500)}`;
+        results[plat.id] = await callAI(activeProvider, activeModel, system, userMsg, apiKeys[activeProvider]);
+      }
+      setPosts(results);
+      // Switch to first generated platform
+      const firstId = targets[0].id;
+      setActivePlat(firstId);
+    } catch(e) {
+      setError(e.message || "Generation failed.");
+    }
+    setLoading(false);
+  };
+
+  const handleCopy = (platId, text) => {
+    navigator.clipboard.writeText(text);
+    setCopied(c => ({ ...c, [platId]: true }));
+    setTimeout(() => setCopied(c => ({ ...c, [platId]: false })), 2000);
+  };
+
+  const charCount = (platId) => (posts[platId] || "").length;
+  const charLimit = (platId) => SOCIAL_PLATFORMS.find(p => p.id === platId)?.charLimit || 9999;
+  const isOver    = (platId) => charCount(platId) > charLimit(platId);
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+  const hasPosts = Object.keys(posts).length > 0;
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+
+      {/* Input panel */}
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+        <div style={{ display:"flex", gap:4, marginBottom:16, background:"var(--bg-elevated)", borderRadius:8, padding:3, width:"fit-content" }}>
+          {[{id:"topic",label:"From Topic"},{id:"blogpost",label:"From Blog Post"}].map(m=>(
+            <button key={m.id} onClick={()=>setInputMode(m.id)}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:inputMode===m.id?"var(--amber)":"transparent", color:inputMode===m.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {m.label}
+            </button>
+          ))}
+        </div>
+
+        {inputMode === "topic"
+          ? <input style={iS} placeholder="e.g. pairing Islay scotch with a day of dry fly fishing…" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&generate()} />
+          : <textarea rows={5} style={{...iS, resize:"vertical"}} placeholder="Paste your blog post text here to adapt it for social…" value={input} onChange={e=>setInput(e.target.value)} />
+        }
+
+        {/* Platform selector */}
+        <div style={{ marginTop:16 }}>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Generate for</div>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+            {SOCIAL_PLATFORMS.map(plat => (
+              <button key={plat.id} onClick={()=>setSelected(s=>({...s,[plat.id]:!s[plat.id]}))}
+                style={{ padding:"6px 14px", borderRadius:99, border:`1px solid ${selected[plat.id]?plat.color:"var(--border)"}`, background:selected[plat.id]?plat.color+"18":"transparent", color:selected[plat.id]?plat.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                <span>{plat.icon}</span>{plat.name}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display:"flex", alignItems:"center", gap:12, marginTop:16 }}>
+          <button onClick={generate} disabled={!input.trim()||loading}
+            style={{ padding:"10px 24px", borderRadius:8, border:"none", background:input.trim()&&!loading?provider.color:"var(--bg-elevated)", color:input.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:input.trim()&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8, transition:"background 0.2s" }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : <>{provider.logo} Generate Posts</>}
+          </button>
+          {loading && <span style={{fontSize:12,color:"var(--muted)"}}>Writing for {SOCIAL_PLATFORMS.filter(p=>selected[p.id]).length} platform{SOCIAL_PLATFORMS.filter(p=>selected[p.id]).length!==1?"s":""}…</span>}
+          {error && <span style={{fontSize:12,color:"var(--red)"}}>{error}</span>}
+        </div>
+      </div>
+
+      {/* Results */}
+      {hasPosts && (
+        <div style={{ display:"grid", gridTemplateColumns:"160px 1fr", gap:16 }}>
+          {/* Platform tabs */}
+          <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+            {SOCIAL_PLATFORMS.filter(p => posts[p.id]).map(plat => (
+              <button key={plat.id} onClick={()=>setActivePlat(plat.id)}
+                style={{ padding:"10px 12px", borderRadius:8, border:activePlat===plat.id?`1px solid ${plat.color}`:"1px solid var(--border)", background:activePlat===plat.id?plat.color+"12":"var(--bg-elevated)", color:activePlat===plat.id?plat.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textAlign:"left", display:"flex", alignItems:"center", gap:8, transition:"all 0.15s" }}>
+                <span style={{fontSize:16}}>{plat.icon}</span>
+                <div>
+                  <div>{plat.name}</div>
+                  <div style={{fontSize:10,fontWeight:400,color:isOver(plat.id)?"var(--red)":activePlat===plat.id?plat.color+"bb":"var(--muted)"}}>
+                    {charCount(plat.id)}/{plat.charLimit === 40000 ? "∞" : plat.charLimit}
+                    {isOver(plat.id) ? " ⚠" : ""}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Active post editor */}
+          {SOCIAL_PLATFORMS.filter(p => posts[p.id]).map(plat => activePlat === plat.id && (
+            <div key={plat.id} style={{ background:"var(--bg-surface)", border:`1px solid ${plat.color}44`, borderRadius:12, padding:24 }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                  <span style={{ fontSize:20 }}>{plat.icon}</span>
+                  <div>
+                    <div style={{ fontWeight:700, fontSize:14, color:plat.color }}>{plat.name}</div>
+                    <div style={{ fontSize:11, color:"var(--text-secondary)" }}>{plat.urlNote}</div>
+                  </div>
+                </div>
+                <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                  <span style={{ fontSize:11, color:isOver(plat.id)?"var(--red)":"var(--muted)" }}>
+                    {charCount(plat.id)}{plat.charLimit < 40000 ? ` / ${plat.charLimit}` : ""} chars
+                  </span>
+                  <button onClick={()=>generate()}
+                    style={{ padding:"4px 12px", borderRadius:6, border:`1px solid ${plat.color}44`, background:"transparent", color:plat.color, fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    Regenerate
+                  </button>
+                  <button onClick={()=>handleCopy(plat.id, posts[plat.id])}
+                    style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied[plat.id]?"var(--green)":plat.color, color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", transition:"background 0.2s" }}>
+                    {copied[plat.id] ? "✓ Copied" : "Copy"}
+                  </button>
+                </div>
+              </div>
+
+              <textarea
+                value={posts[plat.id] || ""}
+                onChange={e => setPosts(p => ({...p, [plat.id]: e.target.value}))}
+                rows={12}
+                style={{ width:"100%", padding:"14px", borderRadius:8, border:`1px solid ${isOver(plat.id)?"var(--red)":"var(--border)"}`, background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box", resize:"vertical", lineHeight:1.7 }}
+              />
+
+              <div style={{ display:"flex", gap:8, marginTop:12 }}>
+                <button style={{ padding:"7px 16px", borderRadius:7, border:"none", background:plat.color, color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  Schedule Post
+                </button>
+                <button style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  Save as Draft
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SETTINGS: SOCIAL CONNECTIONS ─────────────────────────────────────────────
+
+function SocialSettings() {
+  const [connections, setConnections] = useState(loadSocialConnections);
+  const [saved, setSaved] = useState(false);
+
+  const handleToggle = (platId) => {
+    const updated = { ...connections, [platId]: { ...connections[platId], enabled: !connections[platId]?.enabled } };
+    setConnections(updated);
+    saveSocialConnections(updated);
+  };
+
+  const handleNote = (platId, note) => {
+    setConnections(c => ({ ...c, [platId]: { ...c[platId], note } }));
+  };
+
+  const handleSave = () => {
+    saveSocialConnections(connections);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24 }}>
+      <div>
+        <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Social Media</h3>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+          Mark which platforms you're active on. Direct API publishing is on the roadmap — for now, use the Social tab to generate and copy posts.
+        </p>
+      </div>
+
+      {SOCIAL_PLATFORMS.map(plat => {
+        const conn = connections[plat.id] || {};
+        return (
+          <div key={plat.id} style={{ padding:20, borderRadius:12, border:`1px solid ${conn.enabled?plat.color+"44":"var(--border)"}`, background:conn.enabled?plat.color+"06":"var(--bg-elevated)", transition:"all 0.2s" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom: conn.enabled ? 16 : 0 }}>
+              <div style={{ width:40, height:40, borderRadius:10, background:plat.color+"22", border:`1px solid ${plat.color}44`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20, flexShrink:0 }}>{plat.icon}</div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontWeight:700, fontSize:14 }}>{plat.name}</div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>{plat.urlNote}</div>
+              </div>
+              {/* Toggle */}
+              <div onClick={()=>handleToggle(plat.id)} style={{ width:44, height:24, borderRadius:99, background:conn.enabled?plat.color:"var(--border)", cursor:"pointer", position:"relative", transition:"background 0.3s", flexShrink:0 }}>
+                <div style={{ width:18, height:18, borderRadius:99, background:"#fff", position:"absolute", top:3, left:conn.enabled?23:3, transition:"left 0.3s", boxShadow:"0 1px 4px rgba(0,0,0,0.3)" }} />
+              </div>
+            </div>
+
+            {conn.enabled && (
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+                  Your {plat.name} handle / page (optional)
+                </label>
+                <input
+                  placeholder={`@caskandstream`}
+                  value={conn.note || ""}
+                  onChange={e=>handleNote(plat.id, e.target.value)}
+                  style={{ width:"100%", padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" }}
+                  onFocus={e=>e.target.style.borderColor=plat.color}
+                  onBlur={e=>e.target.style.borderColor="var(--border)"}
+                />
+                <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:8, padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                  ✦ Direct publishing via {plat.name} API coming soon. For now, generate posts in the Social tab and copy them across.
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+        <button onClick={handleSave} style={{ padding:"10px 28px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+          Save
+        </button>
+        {saved && <span style={{ fontSize:12, color:"var(--green)" }}>✓ Saved</span>}
+      </div>
+    </div>
+  );
+}
+
 // ─── SMALL COMPONENTS ─────────────────────────────────────────────────────────
 
 function Sparkline({ data, color, h=40, w=120 }) {
@@ -635,6 +951,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const inputSt = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
 
   const connectedProviders = AI_PROVIDERS.filter(p => p.id === "anthropic" || !!apiKeys[p.id]).length;
+  const connectedSocial    = SOCIAL_PLATFORMS.filter(p => loadSocialConnections()[p.id]?.enabled).length;
 
   const TABS = [
     { id:"posts",     label:"Posts",     icon:"▤" },
@@ -642,12 +959,14 @@ export default function Dashboard({ user, workspace, onLogout }) {
     { id:"calendar",  label:"Calendar",  icon:"▦" },
     { id:"research",  label:"Research",  icon:"◎" },
     { id:"ai",        label:"AI Tools",  icon:"✦" },
+    { id:"social",    label:"Social",    icon:"◈" },
     { id:"settings",  label:"Settings",  icon:"⚙" },
   ];
 
   const SETTINGS_SECTIONS = [
     { id:"general",  label:"General"          },
     { id:"apikeys",  label:"API Keys"         },
+    { id:"social",   label:"Social Media"     },
     { id:"wix",      label:"Wix Integration"  },
     { id:"billing",  label:"Billing & Plan"   },
     { id:"account",  label:"Account"          },
@@ -678,7 +997,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
             {connected?"Wix Connected":"Wix Not Connected"}
           </div>
           <div style={{fontSize:10,marginTop:4,color:"var(--text-secondary)"}}>
-            <span style={{color:fixedGreen}}>◈</span> {connectedProviders} AI provider{connectedProviders!==1?"s":""} connected
+            <span style={{color:fixedGreen}}>◈</span> {connectedProviders} AI · {connectedSocial} social
           </div>
         </div>
 
@@ -933,6 +1252,22 @@ export default function Dashboard({ user, workspace, onLogout }) {
             </div>
           )}
 
+          {/* ══ SOCIAL ══ */}
+          {activeTab==="social"&&(
+            <div>
+              <div style={{marginBottom:24}}>
+                <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:"0 0 4px"}}>Social Media Posts</h2>
+                <p style={{fontSize:13,color:"var(--text-secondary)",margin:0}}>Generate from a topic or blog post — adapted automatically for each platform.</p>
+              </div>
+              <SocialPostTab
+                activeProvider={activeProvider}
+                activeModel={activeModel}
+                apiKeys={apiKeys}
+                dark={dark}
+              />
+            </div>
+          )}
+
           {/* ══ SETTINGS ══ */}
           {activeTab==="settings"&&(
             <div style={{display:"grid",gridTemplateColumns:"180px 1fr",gap:24}}>
@@ -966,6 +1301,10 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
                 {settingsSection==="apikeys"&&(
                   <APIKeysSettings apiKeys={apiKeys} onSave={setApiKeys}/>
+                )}
+
+                {settingsSection==="social"&&(
+                  <SocialSettings/>
                 )}
 
                 {settingsSection==="wix"&&(
