@@ -1335,6 +1335,35 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   );
 }
 
+// ─── SETTINGS: GENERAL ───────────────────────────────────────────────────────
+
+function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
+  const [form,  setForm]  = useState({ name:wsName, url:wsUrl, tagline:wsTagline });
+  const [saved, setSaved] = useState(false);
+
+  const handleSave = () => {
+    onSave(form);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:0 }}>Workspace Settings</h3>
+      {[{label:"Blog Name",key:"name"},{label:"Blog URL",key:"url"},{label:"Tagline",key:"tagline"}].map(f => (
+        <div key={f.label}>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
+          <input style={inputSt} value={form[f.key]} onChange={e => setForm(prev => ({ ...prev, [f.key]: e.target.value }))} />
+        </div>
+      ))}
+      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+        <button onClick={handleSave} style={{ ...btnP, alignSelf:"flex-start" }}>Save Changes</button>
+        {saved && <span style={{ fontSize:12, color:"var(--green)" }}>✓ Saved</span>}
+      </div>
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -2083,26 +2112,16 @@ export default function Dashboard({ user, workspace, onLogout }) {
               </div>
 
               <div style={card}>
-                {settingsSection==="general"&&(()=>{
-                  const [gForm, setGForm] = useState({ name:wsName, url:wsUrl, tagline:wsTagline });
-                  const [gSaved, setGSaved] = useState(false);
-                  const handleGSave = () => { saveWsSettings(gForm); setGSaved(true); setTimeout(()=>setGSaved(false),2000); };
-                  return (
-                    <div style={{display:"flex",flexDirection:"column",gap:20}}>
-                      <h3 style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700,margin:0}}>Workspace Settings</h3>
-                      {[{label:"Blog Name",key:"name"},{label:"Blog URL",key:"url"},{label:"Tagline",key:"tagline"}].map(f=>(
-                        <div key={f.label}>
-                          <label style={{display:"block",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:6}}>{f.label}</label>
-                          <input style={inputSt} value={gForm[f.key]} onChange={e=>setGForm(prev=>({...prev,[f.key]:e.target.value}))}/>
-                        </div>
-                      ))}
-                      <div style={{display:"flex",alignItems:"center",gap:12}}>
-                        <button onClick={handleGSave} style={{...btnP,alignSelf:"flex-start"}}>Save Changes</button>
-                        {gSaved && <span style={{fontSize:12,color:"var(--green)"}}>✓ Saved</span>}
-                      </div>
-                    </div>
-                  );
-                })()}
+                {settingsSection==="general"&&(
+                  <GeneralSettings
+                    wsName={wsName}
+                    wsUrl={wsUrl}
+                    wsTagline={wsTagline}
+                    onSave={saveWsSettings}
+                    btnP={btnP}
+                    inputSt={inputSt}
+                  />
+                )}
 
                 {settingsSection==="apikeys"&&(
                   <APIKeysSettings apiKeys={apiKeys} onSave={setApiKeys}/>
