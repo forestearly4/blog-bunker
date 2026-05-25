@@ -1135,20 +1135,45 @@ function mapWixPost(wp) {
   };
 }
 
+/**
+ * Calls the Wix Blog API directly from the browser.
+ * Wix API keys support CORS — no proxy needed.
+ * Works for any user on any deployment (drag-and-drop or Git).
+ */
 async function wixFetch(endpoint, method = "GET", data = null, cfg = {}) {
-  const res = await fetch("/api/wix", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      endpoint,
-      method,
-      data,
-      apiKey: cfg.apiKey || "",
-      siteId: cfg.siteId || "",
-    }),
-  });
-  const json = await res.json();
-  if (json.error) throw new Error(json.error + (json.detail ? `: ${json.detail}` : "") + (json.hint ? `\n${json.hint}` : ""));
+  const { apiKey, siteId } = cfg;
+
+  if (!apiKey || !siteId) {
+    throw new Error("Wix API key and Site ID are required.");
+  }
+
+  const url = `https://www.wixapis.com${endpoint}`;
+
+  const headers = {
+    "Content-Type":  "application/json",
+    "Authorization": apiKey,
+    "wix-site-id":   siteId,
+  };
+
+  const options = { method, headers };
+  if (data && method !== "GET") options.body = JSON.stringify(data);
+
+  const res = await fetch(url, options);
+
+  // Wix returns non-JSON on auth errors sometimes
+  const text = await res.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error(`Wix returned unexpected response (${res.status}). Check your API key and Site ID.`);
+  }
+
+  if (!res.ok) {
+    const msg = json?.message || json?.error?.message || JSON.stringify(json);
+    throw new Error(`Wix API error ${res.status}: ${msg}`);
+  }
+
   return json;
 }
 
