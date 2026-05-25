@@ -1112,39 +1112,31 @@ function saveWixConfig(cfg) {
   try { localStorage.setItem(WIX_STORAGE, JSON.stringify(cfg)); } catch {}
 }
 
-// Map Wix post → Blog Bunker post format
+// Map Wix post → Blog Bunker post format (handles v2 and v3 response shapes)
 function mapWixPost(wp) {
+  const publishedDate = wp.firstPublishedDate || wp.publishedDate || wp.lastPublishedDate || wp._updatedDate;
   return {
     id:         wp.id || wp._id || String(Date.now() + Math.random()),
     wixId:      wp.id || wp._id,
     title:      wp.title || "Untitled",
-    body:       wp.richContent?.nodes?.map(n => n.textData?.text || "").join("\n") || wp.excerpt || "",
-    excerpt:    wp.excerpt || "",
+    body:       wp.contentText || wp.richContent?.nodes?.map(n => n.textData?.text || "").join("\n") || wp.excerpt || "",
+    excerpt:    wp.excerpt || wp.contentText?.slice(0, 200) || "",
     status:     wp.status === "PUBLISHED" ? "published" : wp.status === "SCHEDULED" ? "scheduled" : "draft",
-    date:       wp.firstPublishedDate
-                  ? new Date(wp.firstPublishedDate).toISOString().split("T")[0]
-                  : wp.lastPublishedDate
-                  ? new Date(wp.lastPublishedDate).toISOString().split("T")[0]
-                  : new Date().toISOString().split("T")[0],
+    date:       publishedDate ? new Date(publishedDate).toISOString().split("T")[0] : new Date().toISOString().split("T")[0],
     views:      wp.stats?.views || 0,
-    category:   wp.tagIds?.length ? "Wix" : "Culture",
+    category:   "Wix",
     slug:       wp.slug || "",
-    coverImage: wp.media?.wixMedia?.image?.imageInfo?.url || wp.coverMedia?.wixMedia?.image?.imageInfo?.url || "",
+    coverImage: wp.heroImage?.url || wp.media?.wixMedia?.image?.imageInfo?.url || wp.coverMedia?.wixMedia?.image?.imageInfo?.url || "",
     url:        wp.url || "",
     fromWix:    true,
   };
 }
 
 /**
- * Calls the Wix Blog API through the Blog Bunker Cloudflare Worker proxy.
- * The worker lives at a fixed URL — works for all users automatically.
- * No Netlify functions or server setup required on the user's end.
- *
- * To update the proxy URL after deploying your Worker:
- *   Change WIX_PROXY_URL below to your worker's URL.
+ * Calls the Wix Blog API through the Blog Bunker Netlify Edge Function proxy.
+ * The proxy lives at /api/wix and is deployed automatically with the site via GitHub.
+ * No Cloudflare account or separate deployment needed.
  */
-const WIX_PROXY_URL = "https://wix-proxy.forestearly4.workers.dev";
-
 async function wixFetch(endpoint, method = "GET", data = null, cfg = {}) {
   const { apiKey, siteId } = cfg;
 
@@ -1152,7 +1144,7 @@ async function wixFetch(endpoint, method = "GET", data = null, cfg = {}) {
     throw new Error("Wix API key and Site ID are required.");
   }
 
-  const res = await fetch(WIX_PROXY_URL, {
+  const res = await fetch("/api/wix", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ endpoint, method, data, apiKey, siteId }),
@@ -1160,10 +1152,9 @@ async function wixFetch(endpoint, method = "GET", data = null, cfg = {}) {
 
   const text = await res.text();
   let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`Proxy returned unexpected response (${res.status}). Is the Cloudflare Worker deployed?`);
+  try { json = JSON.parse(text); }
+  catch {
+    throw new Error(`Proxy returned unexpected response (${res.status}). Make sure the site is deployed via GitHub, not drag-and-drop.`);
   }
 
   if (!res.ok || json.error) {
@@ -1195,8 +1186,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
     setTesting(true);
     addLog("Testing Wix connection…");
     try {
-      const data = await wixFetch("/v3/blog/posts?fieldsets=CONTENT_TEXT&limit=1", "GET", null, { apiKey, siteId });
-      if (data.posts !== undefined || data.blogPosts !== undefined) {
+      const data = await wixFetch("/v3/posts?paging.limit=1", "GET", null, { apiKey, siteId });
+      if (data.posts !== undefined || data.items !== undefined || Array.isArray(data)) {
         const newCfg = { apiKey, siteId, connected: true, lastSync: null, pullCount: 0 };
         saveWixConfig(newCfg);
         setCfg(newCfg);
@@ -1223,11 +1214,11 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
 
       do {
         addLog(`Fetching page ${page}…`);
-        const endpoint = `/v3/blog/posts?fieldsets=CONTENT_TEXT,URL,TAGS&limit=50${cursor ? `&pagingCursor.cursor=${cursor}` : ""}`;
+        const endpoint = `/v3/posts?paging.limit=50${cursor ? `&paging.cursor=${cursor}` : ""}`;
         const data = await wixFetch(endpoint, "GET", null, keys);
-        const posts = data.posts || data.blogPosts || [];
+        const posts = data.posts || data.items || [];
         allPosts = [...allPosts, ...posts];
-        cursor = data.pagingMetadata?.cursors?.next || null;
+        cursor = data.pagingMetadata?.cursors?.next || data.next?.cursor || null;
         page++;
         if (posts.length < 50) break;
       } while (cursor && page < 10);
