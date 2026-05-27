@@ -1133,68 +1133,69 @@ function mapWixPost(wp) {
 }
 
 /**
- * Calls the Wix Blog API through the Blog Bunker Netlify Edge Function proxy.
- * The proxy lives at /api/wix and is deployed automatically with the site via GitHub.
- * No Cloudflare account or separate deployment needed.
+ * Calls Wix Blog API through the Netlify Edge Function proxy at /api/wix.
+ * Credentials (WIX_API_KEY, WIX_SITE_ID) are read from Netlify environment
+ * variables server-side — users don't need to enter them in the UI.
+ * User-supplied keys are sent as fallback if env vars aren't set.
  */
 async function wixFetch(endpoint, method = "GET", data = null, cfg = {}) {
-  const { apiKey, siteId } = cfg;
-
-  if (!apiKey || !siteId) {
-    throw new Error("Wix API key and Site ID are required.");
-  }
-
   const res = await fetch("/api/wix", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ endpoint, method, data, apiKey, siteId }),
+    body: JSON.stringify({
+      endpoint,
+      method,
+      data,
+      // Send user keys as fallback — env vars take priority in the function
+      apiKey: cfg.apiKey || "",
+      siteId: cfg.siteId || "",
+    }),
   });
 
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); }
   catch {
-    throw new Error(`Proxy returned unexpected response (${res.status}). Make sure the site is deployed via GitHub, not drag-and-drop.`);
+    throw new Error(`Proxy error (${res.status}). Check Netlify Functions tab — edge function may not be deployed.`);
   }
 
   if (!res.ok || json.error) {
-    throw new Error(json.error || `API error ${res.status}`);
+    const detail = json.urlCalled ? `\nURL: ${json.urlCalled}` : "";
+    const preview = json.preview ? `\nWix said: ${json.preview.slice(0, 150)}` : "";
+    throw new Error((json.error || `API error ${res.status}`) + detail + preview);
   }
 
   return json;
 }
 
 function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
-  const [cfg,        setCfg]        = useState(loadWixConfig);
-  const [apiKey,     setApiKey]     = useState(cfg.apiKey || "");
-  const [siteId,     setSiteId]     = useState(cfg.siteId || "");
-  const [status,     setStatus]     = useState(cfg.connected ? "connected" : "idle");
-  const [syncing,    setSyncing]    = useState(false);
-  const [testing,    setTesting]    = useState(false);
-  const [log,        setLog]        = useState([]);
-  const [lastSync,   setLastSync]   = useState(cfg.lastSync || null);
-  const [pullCount,  setPullCount]  = useState(cfg.pullCount || 0);
-  const [showKey,    setShowKey]    = useState(false);
+  const [cfg,       setCfg]      = useState(loadWixConfig);
+  const [status,    setStatus]   = useState(cfg.connected ? "connected" : "idle");
+  const [syncing,   setSyncing]  = useState(false);
+  const [testing,   setTesting]  = useState(false);
+  const [log,       setLog]      = useState([]);
+  const [lastSync,  setLastSync] = useState(cfg.lastSync || null);
+  const [pullCount, setPullCount]= useState(cfg.pullCount || 0);
+  // Fallback fields shown only if env vars aren't set
+  const [apiKey,    setApiKey]   = useState(cfg.apiKey || "");
+  const [siteId,    setSiteId]   = useState(cfg.siteId || "");
+  const [showKey,   setShowKey]  = useState(false);
 
   const addLog = (msg, type="info") => setLog(l => [...l, { msg, type, ts: new Date().toLocaleTimeString() }]);
 
-  const currentCfg = () => ({ apiKey, siteId, connected: cfg.connected, lastSync: cfg.lastSync, pullCount: cfg.pullCount });
-
   const testConnection = async () => {
-    if (!apiKey.trim()) { addLog("Enter your Wix API key first", "error"); return; }
-    if (!siteId.trim()) { addLog("Enter your Wix Site ID first", "error"); return; }
     setTesting(true);
     addLog("Testing Wix connection…");
     try {
       const data = await wixFetch("/v3/posts?paging.limit=1", "GET", null, { apiKey, siteId });
       if (data.posts !== undefined || data.items !== undefined || Array.isArray(data)) {
-        const newCfg = { apiKey, siteId, connected: true, lastSync: null, pullCount: 0 };
+        const newCfg = { connected: true, lastSync: null, pullCount: 0, apiKey, siteId };
         saveWixConfig(newCfg);
         setCfg(newCfg);
         setStatus("connected");
         addLog("✓ Connected to Wix Blog successfully!", "success");
       } else {
-        addLog("Unexpected response — check your API key and Site ID.", "error");
+        addLog(`Unexpected response — ${JSON.stringify(data).slice(0,200)}`, "error");
       }
     } catch(e) {
       addLog(`Connection failed: ${e.message}`, "error");
@@ -1207,15 +1208,11 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
     setSyncing(true);
     addLog("Pulling posts from Wix Blog…");
     try {
-      let allPosts = [];
-      let cursor   = null;
-      let page     = 1;
-      const keys   = { apiKey, siteId };
-
+      let allPosts = [], cursor = null, page = 1;
       do {
         addLog(`Fetching page ${page}…`);
         const endpoint = `/v3/posts?paging.limit=50${cursor ? `&paging.cursor=${cursor}` : ""}`;
-        const data = await wixFetch(endpoint, "GET", null, keys);
+        const data = await wixFetch(endpoint, "GET", null, { apiKey, siteId });
         const posts = data.posts || data.items || [];
         allPosts = [...allPosts, ...posts];
         cursor = data.pagingMetadata?.cursors?.next || data.next?.cursor || null;
@@ -1225,8 +1222,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
 
       addLog(`Found ${allPosts.length} posts on Wix`);
       const mapped = allPosts.map(mapWixPost);
-      const now    = new Date().toISOString();
-      const newCfg = { apiKey, siteId, connected: true, lastSync: now, pullCount: mapped.length };
+      const now = new Date().toISOString();
+      const newCfg = { connected: true, lastSync: now, pullCount: mapped.length, apiKey, siteId };
       saveWixConfig(newCfg);
       setCfg(newCfg);
       setLastSync(now);
@@ -1242,8 +1239,6 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const disconnect = () => {
     saveWixConfig({});
     setCfg({});
-    setApiKey("");
-    setSiteId("");
     setStatus("idle");
     setLog([]);
     setLastSync(null);
@@ -1259,8 +1254,14 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       <div>
         <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Wix Blog Integration</h3>
         <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
-          Enter your Wix credentials to pull posts from Cask & Stream directly into Blog Bunker.
+          Pull your Cask & Stream posts from Wix into Blog Bunker.
         </p>
+      </div>
+
+      {/* Env var status */}
+      <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)44", fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
+        ✦ <strong style={{color:"var(--amber)"}}>Netlify env vars detected:</strong> <code style={{color:"var(--amber)"}}>wix_api_key</code> and <code style={{color:"var(--amber)"}}>wix_site_id</code> are set in your Netlify environment — credentials are handled server-side automatically.
+        The fields below are only needed if you want to override them.
       </div>
 
       {/* Connection status */}
@@ -1274,96 +1275,59 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
           </div>
         </div>
         {isConnected && (
-          <button onClick={disconnect} style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
-            Disconnect
+          <button onClick={disconnect} style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Disconnect</button>
+        )}
+      </div>
+
+      {/* Override fields (collapsible) */}
+      <details>
+        <summary style={{ fontSize:12, color:"var(--muted)", cursor:"pointer", userSelect:"none" }}>Override credentials manually (optional)</summary>
+        <div style={{ display:"flex", flexDirection:"column", gap:12, marginTop:12 }}>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Wix API Key Override</label>
+            <div style={{ position:"relative" }}>
+              <input type={showKey?"text":"password"} style={{...iS, paddingRight:52, fontFamily:"monospace"}} placeholder="IST.eyJ…" value={apiKey} onChange={e=>setApiKey(e.target.value)} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+              <button onClick={()=>setShowKey(s=>!s)} style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", color:"var(--muted)", fontSize:11 }}>{showKey?"Hide":"Show"}</button>
+            </div>
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Wix Site ID Override</label>
+            <input style={{...iS, fontFamily:"monospace"}} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value={siteId} onChange={e=>setSiteId(e.target.value)} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+        </div>
+      </details>
+
+      {/* Actions */}
+      <div style={{ display:"flex", gap:10 }}>
+        <button onClick={testConnection} disabled={testing}
+          style={{ padding:"10px 20px", borderRadius:8, border:"none", background:!testing?"var(--amber)":"var(--bg-elevated)", color:!testing?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:!testing?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
+          {testing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Testing…</> : "Test Connection"}
+        </button>
+        {isConnected && (
+          <button onClick={pullPosts} disabled={syncing}
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:syncing?"var(--bg-elevated)":"#5cba6c", color:syncing?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:syncing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
+            {syncing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Syncing…</> : "↓ Pull Posts from Wix"}
           </button>
         )}
       </div>
 
-      {/* Credentials */}
-      <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-        <div>
-          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-            Wix API Key
-          </label>
-          <div style={{ position:"relative" }}>
-            <input
-              type={showKey ? "text" : "password"}
-              style={{ ...iS, paddingRight:52, fontFamily:"monospace" }}
-              placeholder="Paste your Wix API key…"
-              value={apiKey}
-              onChange={e => setApiKey(e.target.value)}
-              onFocus={e => e.target.style.borderColor="var(--amber)"}
-              onBlur={e => e.target.style.borderColor="var(--border)"}
-            />
-            <button onClick={()=>setShowKey(s=>!s)} style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", color:"var(--muted)", fontSize:11, fontFamily:"'DM Sans',sans-serif" }}>
-              {showKey ? "Hide" : "Show"}
-            </button>
-          </div>
-          <p style={{ fontSize:11, color:"var(--text-secondary)", marginTop:5, lineHeight:1.5 }}>
-            Wix Dashboard → Settings → Advanced → API Keys → create one with <strong style={{color:"var(--text)"}}>Wix Blog</strong> read permission
-          </p>
-        </div>
-
-        <div>
-          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-            Wix Site ID
-          </label>
-          <input
-            style={{ ...iS, fontFamily:"monospace" }}
-            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            value={siteId}
-            onChange={e => setSiteId(e.target.value)}
-            onFocus={e => e.target.style.borderColor="var(--amber)"}
-            onBlur={e => e.target.style.borderColor="var(--border)"}
-          />
-          <p style={{ fontSize:11, color:"var(--text-secondary)", marginTop:5, lineHeight:1.5 }}>
-            Wix Dashboard → Settings → General → scroll down to find your Site ID UUID
-          </p>
-        </div>
-
-        <div style={{ display:"flex", gap:10 }}>
-          <button onClick={testConnection} disabled={!apiKey.trim() || !siteId.trim() || testing}
-            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:apiKey.trim()&&siteId.trim()&&!testing?"var(--amber)":"var(--bg-elevated)", color:apiKey.trim()&&siteId.trim()&&!testing?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:apiKey.trim()&&siteId.trim()&&!testing?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
-            {testing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Testing…</> : "Test Connection"}
-          </button>
-
-          {isConnected && (
-            <button onClick={pullPosts} disabled={syncing}
-              style={{ padding:"10px 20px", borderRadius:8, border:"none", background:syncing?"var(--bg-elevated)":"#5cba6c", color:syncing?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:syncing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
-              {syncing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Syncing…</> : "↓ Pull Posts from Wix"}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Posts count note */}
-      {isConnected && currentPostCount > 0 && (
+      {currentPostCount > 0 && isConnected && (
         <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
           ▤ Blog Bunker currently has <strong style={{color:"var(--text)"}}>{currentPostCount} posts</strong>. Pulling from Wix adds any posts not already present.
         </div>
       )}
 
-      {/* Push coming soon */}
-      {isConnected && (
-        <div style={{ padding:16, borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)", opacity:0.7 }}>
-          <div style={{ fontSize:12, fontWeight:700, color:"var(--muted)", marginBottom:4 }}>↑ Push to Wix — Coming Soon</div>
-          <div style={{ fontSize:12, color:"var(--text-secondary)" }}>Publish Blog Bunker drafts directly to your Wix Blog. Next release.</div>
-        </div>
-      )}
-
-      {/* Activity log */}
+      {/* Log */}
       {log.length > 0 && (
         <div style={{ borderRadius:10, border:"1px solid var(--border)", overflow:"hidden" }}>
           <div style={{ padding:"8px 14px", background:"var(--bg-elevated)", borderBottom:"1px solid var(--border)", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", display:"flex", justifyContent:"space-between" }}>
-            Sync Log
-            <button onClick={()=>setLog([])} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--muted)", fontSize:11 }}>Clear</button>
+            Sync Log <button onClick={()=>setLog([])} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--muted)", fontSize:11 }}>Clear</button>
           </div>
-          <div style={{ maxHeight:180, overflow:"auto", padding:"10px 14px", display:"flex", flexDirection:"column", gap:4 }}>
+          <div style={{ maxHeight:220, overflow:"auto", padding:"10px 14px", display:"flex", flexDirection:"column", gap:4 }}>
             {log.map((l, i) => (
-              <div key={i} style={{ fontSize:12, display:"flex", gap:10, alignItems:"baseline" }}>
+              <div key={i} style={{ fontSize:11, display:"flex", gap:10, alignItems:"flex-start" }}>
                 <span style={{ color:"var(--muted)", flexShrink:0, fontFamily:"monospace", fontSize:10 }}>{l.ts}</span>
-                <span style={{ color: l.type==="success"?"#5cba6c":l.type==="error"?"var(--red)":"var(--text-secondary)", whiteSpace:"pre-wrap" }}>{l.msg}</span>
+                <span style={{ color: l.type==="success"?"#5cba6c":l.type==="error"?"var(--red)":"var(--text-secondary)", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>{l.msg}</span>
               </div>
             ))}
           </div>
@@ -1371,7 +1335,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       )}
 
       <div style={{ padding:"12px 16px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
-        🔒 <strong style={{color:"var(--text)"}}>Privacy:</strong> Your API key and Site ID are stored in your browser's localStorage and sent only to the secure Wix proxy — never exposed publicly.
+        🔒 Your Wix credentials are stored as Netlify environment variables — they never touch the browser.
       </div>
     </div>
   );
