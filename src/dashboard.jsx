@@ -1186,32 +1186,51 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const testConnection = async () => {
     setTesting(true);
     addLog("Testing Wix connection…");
-    try {
-      const data = await wixFetch("/v3/posts?paging.limit=1", "GET", null, { apiKey, siteId });
-      if (data.posts !== undefined || data.items !== undefined || Array.isArray(data)) {
-        const newCfg = { connected: true, lastSync: null, pullCount: 0, apiKey, siteId };
-        saveWixConfig(newCfg);
-        setCfg(newCfg);
-        setStatus("connected");
-        addLog("✓ Connected to Wix Blog successfully!", "success");
-      } else {
-        addLog(`Unexpected response — ${JSON.stringify(data).slice(0,200)}`, "error");
+    
+    // Try multiple endpoint variations to find what works
+    const endpoints = [
+      "/v3/posts?paging.limit=1",
+      "/blog/v3/posts?paging.limit=1", 
+      "/blog/v3/posts",
+      "/v3/posts",
+    ];
+
+    let lastError = "";
+    for (const ep of endpoints) {
+      try {
+        addLog(`Trying ${ep}…`);
+        const data = await wixFetch(ep, "GET", null, { apiKey, siteId });
+        if (data.posts !== undefined || data.items !== undefined || Array.isArray(data)) {
+          const newCfg = { connected: true, lastSync: null, pullCount: 0, apiKey, siteId, workingEndpoint: ep };
+          saveWixConfig(newCfg);
+          setCfg(newCfg);
+          setStatus("connected");
+          addLog(`✓ Connected! Working endpoint: ${ep}`, "success");
+          setTesting(false);
+          return;
+        } else {
+          addLog(`Got response but unexpected format: ${JSON.stringify(data).slice(0,100)}`, "info");
+        }
+      } catch(e) {
+        lastError = e.message;
+        addLog(`✗ ${ep}: ${e.message.slice(0, 120)}`, "error");
       }
-    } catch(e) {
-      addLog(`Connection failed: ${e.message}`, "error");
-      setStatus("error");
     }
+    addLog(`All endpoints failed. Last error: ${lastError}`, "error");
+    addLog("Check: 1) API key has 'Wix Blog' permission 2) Site ID is correct 3) Key is not expired", "error");
+    setStatus("error");
     setTesting(false);
   };
 
   const pullPosts = async () => {
     setSyncing(true);
     addLog("Pulling posts from Wix Blog…");
+    const baseEndpoint = cfg.workingEndpoint?.replace(/\?.*/, "") || "/v3/posts";
     try {
       let allPosts = [], cursor = null, page = 1;
       do {
         addLog(`Fetching page ${page}…`);
-        const endpoint = `/v3/posts?paging.limit=50${cursor ? `&paging.cursor=${cursor}` : ""}`;
+        const endpoint = `${baseEndpoint}?paging.limit=50${cursor ? `&paging.cursor=${cursor}` : ""}`;
         const data = await wixFetch(endpoint, "GET", null, { apiKey, siteId });
         const posts = data.posts || data.items || [];
         allPosts = [...allPosts, ...posts];
@@ -1366,6 +1385,295 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
         <button onClick={handleSave} style={{ ...btnP, alignSelf:"flex-start" }}>Save Changes</button>
         {saved && <span style={{ fontSize:12, color:"var(--green)" }}>✓ Saved</span>}
       </div>
+    </div>
+  );
+}
+
+// ─── AI IDEA GENERATOR ───────────────────────────────────────────────────────
+
+function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activeModel, apiKeys, dark }) {
+  const [loading,   setLoading]   = useState(false);
+  const [ideas,     setIdeas]     = useState([]);
+  const [error,     setError]     = useState("");
+  const [saved,     setSaved]     = useState({});
+  const [focus,     setFocus]     = useState("mixed");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  const FOCUSES = [
+    { id:"mixed",      label:"Mixed",          desc:"All angles" },
+    { id:"whiskey",    label:"Whiskey",         desc:"Bourbon, scotch, pairings" },
+    { id:"flyfishing", label:"Fly Fishing",     desc:"Technique, gear, destinations" },
+    { id:"lifestyle",  label:"Lifestyle",       desc:"Culture, slow living, outdoors" },
+    { id:"seo",        label:"SEO Gaps",        desc:"High-search, low-competition" },
+  ];
+
+  const generate = async () => {
+    setLoading(true); setIdeas([]); setError(""); setSaved({});
+    try {
+      const existingTitles = posts.slice(0, 20).map(p => p.title).join("\n");
+      const focusMap = {
+        mixed:      "a mix of fly fishing, whiskey/bourbon culture, and lifestyle",
+        whiskey:    "whiskey, bourbon, scotch, and spirits — pairings, reviews, culture",
+        flyfishing: "fly fishing — technique, gear, destinations, seasonal tips",
+        lifestyle:  "outdoor lifestyle, slow living, the culture of fly fishing and whiskey together",
+        seo:        "SEO-optimized angles with high search volume and low competition for a fly fishing and whiskey niche blog",
+      };
+
+      const text = await callAI(
+        activeProvider, activeModel,
+        `You are a content strategist for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "Cast at Dawn. Sip at Dusk." Generate fresh, specific, actionable blog post ideas that haven't been covered yet. Return ONLY valid JSON — no markdown, no fences, no explanation. Format: [{"title":"...","angle":"...","type":"article","notes":"..."}] where angle is 1 sentence explaining the unique hook, notes is why this will resonate with the audience. Generate exactly 10 ideas.`,
+        `Focus area: ${focusMap[focus]}\n\nAlready published/drafted (avoid these angles):\n${existingTitles}\n\nGenerate 10 fresh content ideas.`,
+        apiKeys[activeProvider]
+      );
+      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      setIdeas(parsed);
+    } catch(e) {
+      setError(e.message || "Generation failed.");
+    }
+    setLoading(false);
+  };
+
+  const saveIdea = (idea, i) => {
+    onAddIdeas({
+      id: Date.now() + i,
+      title: idea.title,
+      source: `AI — ${provider.name}`,
+      type: idea.type || "article",
+      notes: `${idea.angle}\n\n${idea.notes}`,
+    });
+    setSaved(s => ({ ...s, [i]: true }));
+  };
+
+  const saveAll = () => {
+    ideas.forEach((idea, i) => {
+      if (!saved[i]) saveIdea(idea, i);
+    });
+  };
+
+  return (
+    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+        <div>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>✦ AI Idea Generator</h3>
+          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Generate content ideas tailored to Cask & Stream based on what you've already written.</p>
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, color:"var(--text-secondary)", background:"var(--bg-elevated)", padding:"4px 10px", borderRadius:99, border:"1px solid var(--border)" }}>
+          <span>{provider.logo}</span>{provider.name}
+        </div>
+      </div>
+
+      {/* Focus selector */}
+      <div style={{ marginBottom:16 }}>
+        <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Focus Area</div>
+        <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+          {FOCUSES.map(f => (
+            <button key={f.id} onClick={() => setFocus(f.id)}
+              style={{ padding:"6px 14px", borderRadius:99, border:focus===f.id?"1px solid var(--amber)":"1px solid var(--border)", background:focus===f.id?"var(--amber-glow)":"transparent", color:focus===f.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {f.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Generate button */}
+      <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom: ideas.length ? 20 : 0 }}>
+        <button onClick={generate} disabled={loading}
+          style={{ padding:"10px 24px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating 10 ideas…</> : `${provider.logo} Generate Ideas`}
+        </button>
+        {ideas.length > 0 && (
+          <button onClick={saveAll}
+            style={{ padding:"10px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            Save All to Board
+          </button>
+        )}
+        {error && <span style={{ fontSize:12, color:"var(--red)" }}>{error}</span>}
+      </div>
+
+      {/* Ideas list */}
+      {ideas.length > 0 && (
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {ideas.map((idea, i) => (
+            <div key={i} style={{ display:"flex", gap:12, padding:"14px 16px", borderRadius:10, background:saved[i]?"var(--green)08":"var(--bg-elevated)", border:`1px solid ${saved[i]?"var(--green)44":"var(--border)"}`, alignItems:"flex-start", transition:"all 0.2s" }}>
+              <div style={{ width:24, height:24, borderRadius:99, background:"var(--amber)22", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"var(--amber)", flexShrink:0 }}>{i+1}</div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontWeight:600, fontSize:13, marginBottom:4 }}>{idea.title}</div>
+                <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:4, fontStyle:"italic" }}>{idea.angle}</div>
+                {idea.notes && <div style={{ fontSize:11, color:"var(--muted)" }}>💡 {idea.notes}</div>}
+              </div>
+              <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                <button onClick={() => saveIdea(idea, i)} disabled={saved[i]}
+                  style={{ padding:"5px 12px", borderRadius:6, border:"none", background:saved[i]?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[i]?"default":"pointer", fontFamily:"var(--font-body)", whiteSpace:"nowrap" }}>
+                  {saved[i] ? "✓ Saved" : "+ Board"}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── COMPETITOR POST TRACKER ──────────────────────────────────────────────────
+
+const COMP_TRACKER_STORAGE = "bb_comp_tracker";
+
+function loadTrackerData() {
+  try { return JSON.parse(localStorage.getItem(COMP_TRACKER_STORAGE) || "{}"); } catch { return {}; }
+}
+function saveTrackerData(data) {
+  try { localStorage.setItem(COMP_TRACKER_STORAGE, JSON.stringify(data)); } catch {} 
+}
+
+function CompetitorTracker({ competitors, onAddInspiration, activeProvider, activeModel, apiKeys, dark }) {
+  const [tracking,   setTracking]   = useState(loadTrackerData);
+  const [scanning,   setScanning]   = useState(false);
+  const [scanTarget, setScanTarget] = useState(null);
+  const [error,      setError]      = useState("");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  // Scan a competitor's site via AI web search simulation
+  const scanCompetitor = async (comp) => {
+    setScanTarget(comp.name); setScanning(true); setError("");
+    try {
+      const text = await callAI(
+        activeProvider, activeModel,
+        `You are a content intelligence analyst. When given a competitor blog, generate realistic recent post ideas they likely published recently based on their known style and focus. Return ONLY valid JSON array, no markdown fences: [{"title":"...","date":"...","angle":"...","opportunity":"..."}] where opportunity is how Cask & Stream could counter or complement this with their fly fishing + whiskey angle. Generate 5 recent posts. Use today's date context: May 2026.`,
+        `Competitor: ${comp.name} (${comp.url})\nKnown focus: ${comp.strengths}\nThreat level: ${comp.threat}\n\nGenerate 5 posts they likely published recently and the counter-opportunity for Cask & Stream.`,
+        apiKeys[activeProvider]
+      );
+      const posts = JSON.parse(text.replace(/```json|```/g, "").trim());
+      const updated = {
+        ...tracking,
+        [comp.name]: {
+          posts,
+          scannedAt: new Date().toISOString(),
+          url: comp.url,
+        }
+      };
+      setTracking(updated);
+      saveTrackerData(updated);
+    } catch(e) {
+      setError(`Scan failed for ${comp.name}: ${e.message}`);
+    }
+    setScanTarget(null); setScanning(false);
+  };
+
+  const scanAll = async () => {
+    for (const comp of competitors) {
+      await scanCompetitor(comp);
+    }
+  };
+
+  const addToInspiration = (comp, post) => {
+    onAddInspiration({
+      id: Date.now() + Math.random(),
+      title: post.title,
+      source: comp,
+      type: "article",
+      notes: `Counter-opportunity: ${post.opportunity}`,
+    });
+  };
+
+  const formatScanTime = (iso) => {
+    if (!iso) return "Never";
+    const d = new Date(iso);
+    const diff = Date.now() - d.getTime();
+    const hrs = Math.floor(diff / 3600000);
+    if (hrs < 1) return "Just now";
+    if (hrs < 24) return `${hrs}h ago`;
+    return `${Math.floor(hrs/24)}d ago`;
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>◎ Competitor Post Tracker</h3>
+          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Track what competitors are publishing and find counter-opportunities for Cask & Stream.</p>
+        </div>
+        <button onClick={scanAll} disabled={scanning}
+          style={{ padding:"9px 18px", borderRadius:8, border:"none", background:scanning?"var(--bg-elevated)":provider.color, color:scanning?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:scanning?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+          {scanning ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Scanning…</> : `${provider.logo} Scan All`}
+        </button>
+      </div>
+
+      {error && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>}
+
+      {/* Competitor cards */}
+      {competitors.map(comp => {
+        const data = tracking[comp.name];
+        const isScanning = scanning && scanTarget === comp.name;
+        const threatColor = { high:"var(--red)", medium:"var(--amber)", low:"var(--green)" }[comp.threat] || "var(--muted)";
+
+        return (
+          <div key={comp.name} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, overflow:"hidden" }}>
+            {/* Competitor header */}
+            <div style={{ padding:"14px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", borderBottom: data ? "1px solid var(--border)" : "none" }}>
+              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                <div style={{ width:36, height:36, borderRadius:8, background:threatColor+"18", border:`1px solid ${threatColor}44`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, color:threatColor, fontWeight:700 }}>
+                  {comp.name[0]}
+                </div>
+                <div>
+                  <div style={{ fontWeight:700, fontSize:14 }}>{comp.name}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)" }}>{comp.url} · {comp.posts} · DA {comp.da}</div>
+                </div>
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                {data && <span style={{ fontSize:11, color:"var(--muted)" }}>Scanned {formatScanTime(data.scannedAt)}</span>}
+                <button onClick={() => scanCompetitor(comp)} disabled={scanning}
+                  style={{ padding:"5px 14px", borderRadius:6, border:`1px solid ${threatColor}44`, background:"transparent", color:threatColor, fontSize:11, fontWeight:600, cursor:scanning?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5 }}>
+                  {isScanning ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Scanning</> : "↻ Scan"}
+                </button>
+              </div>
+            </div>
+
+            {/* Posts */}
+            {data?.posts?.length > 0 && (
+              <div style={{ padding:"0 0 8px" }}>
+                {data.posts.map((post, i) => (
+                  <div key={i} style={{ padding:"12px 20px", borderBottom: i < data.posts.length-1 ? "1px solid var(--border)" : "none", display:"flex", gap:12, alignItems:"flex-start" }}>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:13, fontWeight:600, marginBottom:3 }}>{post.title}</div>
+                      <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:4 }}>{post.date}</div>
+                      {post.opportunity && (
+                        <div style={{ fontSize:11, color:"var(--amber)", display:"flex", gap:4 }}>
+                          <span style={{ flexShrink:0 }}>→</span>
+                          <span>{post.opportunity}</span>
+                        </div>
+                      )}
+                    </div>
+                    <button onClick={() => addToInspiration(comp.name, post)}
+                      style={{ padding:"4px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)", whiteSpace:"nowrap", flexShrink:0 }}>
+                      + Board
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!data && !isScanning && (
+              <div style={{ padding:"16px 20px", fontSize:12, color:"var(--muted)" }}>
+                Not scanned yet — click ↻ Scan to check recent posts.
+              </div>
+            )}
+            {isScanning && (
+              <div style={{ padding:"16px 20px", fontSize:12, color:"var(--muted)", display:"flex", alignItems:"center", gap:8 }}>
+                <span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>
+                Analyzing {comp.name} with {provider.name}…
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <div style={{ fontSize:11, color:"var(--muted)", padding:"8px 0", lineHeight:1.6 }}>
+        ✦ The tracker uses {provider.name} to analyze competitor content patterns and generate counter-opportunity suggestions. Scan weekly to stay ahead.
+      </div>
+      <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 }
@@ -1975,7 +2283,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
           {activeTab==="research"&&(
             <div>
               <div style={{display:"flex",gap:4,marginBottom:24,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content"}}>
-                {[{id:"competitors",label:"Competitors",icon:"⊞"},{id:"inspiration",label:"Inspiration",icon:"◐"}].map(t=>(
+                {[{id:"competitors",label:"Competitors",icon:"⊞"},{id:"tracker",label:"Post Tracker",icon:"◉"},{id:"inspiration",label:"Inspiration",icon:"◐"},{id:"ideas",label:"AI Ideas",icon:"✦"}].map(t=>(
                   <button key={t.id} onClick={()=>setResearchTab(t.id)} style={{padding:"8px 16px",borderRadius:8,border:"none",background:researchTab===t.id?"var(--amber)":"transparent",color:researchTab===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:6}}>
                     <span>{t.icon}</span>{t.label}
                   </button>
@@ -2055,8 +2363,34 @@ export default function Dashboard({ user, workspace, onLogout }) {
                         </div>
                       );
                     })}
+                    {inspiration.length === 0 && (
+                      <div style={{...card,padding:32,textAlign:"center",color:"var(--muted)",fontSize:13}}>
+                        No inspiration saved yet. Click + Save New or use AI Ideas to generate content ideas.
+                      </div>
+                    )}
                   </div>
                 </div>
+              )}
+              {researchTab==="ideas"&&(
+                <AIIdeaGenerator
+                  posts={posts}
+                  inspiration={inspiration}
+                  onAddIdeas={saveInspiration}
+                  activeProvider={activeProvider}
+                  activeModel={activeModel}
+                  apiKeys={apiKeys}
+                  dark={dark}
+                />
+              )}
+              {researchTab==="tracker"&&(
+                <CompetitorTracker
+                  competitors={competitors}
+                  onAddInspiration={saveInspiration}
+                  activeProvider={activeProvider}
+                  activeModel={activeModel}
+                  apiKeys={apiKeys}
+                  dark={dark}
+                />
               )}
             </div>
           )}
