@@ -1273,7 +1273,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       <div>
         <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Wix Blog Integration</h3>
         <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
-          Pull your Cask & Stream posts from Wix into Blog Bunker.
+          Two-way sync with your Wix Blog. Pull existing posts into Blog Bunker, write new ones here and publish directly to caskandstream.com.
         </p>
       </div>
 
@@ -1330,7 +1330,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
         )}
       </div>
 
-      {currentPostCount > 0 && isConnected && (
+      {isConnected && currentPostCount > 0 && (
         <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
           ▤ Blog Bunker currently has <strong style={{color:"var(--text)"}}>{currentPostCount} posts</strong>. Pulling from Wix adds any posts not already present.
         </div>
@@ -1678,6 +1678,600 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
   );
 }
 
+// ─── CONTENT PIPELINE ────────────────────────────────────────────────────────
+//
+// 5-stage workflow: Brief → Draft → Enhance → Social → Schedule & Publish
+//
+
+const PIPELINE_STAGES = [
+  { id:"brief",    num:1, label:"Brief",    icon:"◎", desc:"Topic & research"     },
+  { id:"draft",    num:2, label:"Draft",    icon:"▤", desc:"Write the post"       },
+  { id:"enhance",  num:3, label:"Enhance",  icon:"✦", desc:"SEO + AI polish"      },
+  { id:"social",   num:4, label:"Social",   icon:"◈", desc:"Images + captions"    },
+  { id:"publish",  num:5, label:"Publish",  icon:"↑", desc:"Schedule & go live"   },
+];
+
+function PipelineProgress({ stage, setStage, completed }) {
+  return (
+    <div style={{ display:"flex", alignItems:"center", marginBottom:28, padding:"20px 28px", background:"var(--bg-surface)", borderRadius:12, border:"1px solid var(--border)" }}>
+      {PIPELINE_STAGES.map((s, i) => {
+        const isActive    = stage === s.id;
+        const isDone      = completed.includes(s.id);
+        const isReachable = i === 0 || completed.includes(PIPELINE_STAGES[i-1].id) || isDone || isActive;
+        return (
+          <div key={s.id} style={{ display:"contents" }}>
+            <div onClick={() => isReachable && setStage(s.id)}
+              style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:6, cursor:isReachable?"pointer":"default", opacity:isReachable?1:0.4, transition:"opacity 0.2s" }}>
+              <div style={{ width:40, height:40, borderRadius:99, display:"flex", alignItems:"center", justifyContent:"center", fontSize:isActive?18:14, fontWeight:700, background:isDone?"var(--green)":isActive?"var(--amber)":"var(--bg-elevated)", border:isDone?"none":isActive?"none":"1px solid var(--border)", color:isDone?"#fff":isActive?"#0e0f11":"var(--muted)", transition:"all 0.3s", boxShadow:isActive?"0 0 20px var(--amber-glow)":"none" }}>
+                {isDone ? "✓" : s.icon}
+              </div>
+              <div style={{ textAlign:"center" }}>
+                <div style={{ fontSize:11, fontWeight:isActive?700:500, color:isActive?"var(--amber)":isDone?"var(--green)":"var(--text-secondary)" }}>{s.label}</div>
+                <div style={{ fontSize:9, color:"var(--muted)", letterSpacing:"0.04em" }}>{s.desc}</div>
+              </div>
+            </div>
+            {i < PIPELINE_STAGES.length-1 && (
+              <div style={{ flex:1, height:2, background:completed.includes(s.id)?"var(--green)":isActive?"var(--amber)33":"var(--border)", margin:"0 12px", marginBottom:24, borderRadius:99, transition:"background 0.4s" }} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline }) {
+  const [stage,     setStage]    = useState("brief");
+  const [completed, setCompleted]= useState([]);
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  // Shared pipeline state
+  const [brief, setBrief] = useState({
+    topic: "", angle: "", audience: "fly fishing and whiskey enthusiasts", keywords: "", inspiration: null,
+  });
+  const [draft, setDraft] = useState({
+    title: "", body: "", category: "Culture", tone: "literary",
+  });
+  const [enhance, setEnhance] = useState({
+    metaTitle: "", metaDescription: "", primaryKeyword: "", suggestions: [], headlines: [], improved: "",
+  });
+  const [social, setSocial] = useState({ posts: {}, images: {} });
+  const [schedule, setSchedule] = useState({
+    publishDate: new Date(Date.now() + 86400000).toISOString().split("T")[0],
+    publishTime: "09:00",
+    publishToWix: wixConnected,
+    addToCalendar: true,
+    status: "scheduled",
+  });
+
+  const [loading, setLoading]   = useState(false);
+  const [loadMsg, setLoadMsg]   = useState("");
+  const [error,   setError]     = useState("");
+  const [success, setSuccess]   = useState("");
+
+  const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
+  const advanceTo = (next) => { setStage(next); setError(""); setSuccess(""); };
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
+  const btnA = { padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 };
+  const btnS = { padding:"10px 20px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" };
+
+  // ── STAGE 1: BRIEF ──────────────────────────────────────────────────────────
+
+  const generateFromBrief = async () => {
+    if (!brief.topic.trim()) return;
+    setLoading(true); setLoadMsg("Generating draft from your brief…"); setError("");
+    try {
+      const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
+      const text = await callAI(activeProvider, activeModel,
+        `You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`,
+        `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`,
+        apiKeys[activeProvider]
+      );
+      // Extract title from first # line
+      const lines  = text.split("\n");
+      const titleLine = lines.find(l => l.startsWith("# "));
+      const title  = titleLine ? titleLine.slice(2).trim() : brief.topic;
+      const body   = text.replace(/^#[^#].*\n/, "").trim();
+      setDraft(d => ({ ...d, title, body }));
+      markDone("brief");
+      advanceTo("draft");
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 2: DRAFT ──────────────────────────────────────────────────────────
+
+  const proceedToDraft = () => {
+    if (!draft.title.trim() || !draft.body.trim()) return;
+    markDone("draft");
+    advanceTo("enhance");
+  };
+
+  const regenerateDraft = async () => {
+    if (!brief.topic.trim()) return;
+    setLoading(true); setLoadMsg("Regenerating draft…"); setError("");
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write in markdown. # title, ## sections. 800+ words. Literary, evocative voice.`,
+        `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\n\nWrite a fresh version of the full post.`,
+        apiKeys[activeProvider]
+      );
+      const lines = text.split("\n");
+      const titleLine = lines.find(l => l.startsWith("# "));
+      const title = titleLine ? titleLine.slice(2).trim() : draft.title;
+      const body  = text.replace(/^#[^#].*\n/, "").trim();
+      setDraft(d => ({ ...d, title, body }));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 3: ENHANCE ────────────────────────────────────────────────────────
+
+  const runEnhancement = async () => {
+    setLoading(true); setLoadMsg("Running SEO analysis…"); setError("");
+    try {
+      // SEO analysis
+      const seoText = await callAI(activeProvider, activeModel,
+        `You are an SEO expert for Cask & Stream. Return ONLY valid JSON (no fences): {"metaTitle":"...","metaDescription":"...","primaryKeyword":"...","secondaryKeywords":["..."],"suggestions":["..."],"score":85}. metaTitle ≤60 chars, metaDescription ≤160 chars, score 0-100.`,
+        `Analyze and optimize:\nTitle: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0,1000)}`,
+        apiKeys[activeProvider]
+      );
+      const seo = JSON.parse(seoText.replace(/```json|```/g,"").trim());
+
+      setLoadMsg("Generating headline options…");
+      const hlText = await callAI(activeProvider, activeModel,
+        `Generate 5 headline variations for this Cask & Stream blog post. Return ONLY a JSON array of 5 strings. No fences.`,
+        `Original title: ${draft.title}\nTopic: ${brief.topic}`,
+        apiKeys[activeProvider]
+      );
+      const headlines = JSON.parse(hlText.replace(/```json|```/g,"").trim());
+
+      setEnhance({ ...seo, headlines, improved: seo.metaTitle });
+      markDone("enhance");
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 4: SOCIAL ─────────────────────────────────────────────────────────
+
+  const generateSocialPosts = async () => {
+    setLoading(true); setError("");
+    const targets = SOCIAL_PLATFORMS;
+    const results = {};
+    try {
+      for (const plat of targets) {
+        setLoadMsg(`Writing ${plat.name} post…`);
+        const system = `You are a social media manager for Cask & Stream. Tagline: "${wsTagline}". Voice: ${plat.tone}. Format: ${plat.format}. ${plat.urlNote}. Write ONLY the post content.`;
+        results[plat.id] = await callAI(activeProvider, activeModel, system,
+          `Write a ${plat.name} post based on this blog post:\nTitle: ${draft.title}\n\n${draft.body.slice(0,800)}`,
+          apiKeys[activeProvider]
+        );
+      }
+      setSocial(s => ({ ...s, posts: results }));
+      markDone("social");
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  const generateSocialImage = async (platId) => {
+    const hasStability = !!apiKeys["stability"];
+    if (!hasStability) { setError("Add Stability AI key in Settings → API Keys for image generation."); return; }
+    setLoading(true); setLoadMsg(`Generating ${platId} image…`); setError("");
+    try {
+      const prompt = await generateImagePrompt(draft.topic || brief.topic || draft.title, platId, activeProvider, activeModel, apiKeys[activeProvider]);
+      const url = await generateStabilityImage(prompt, platId, apiKeys["stability"]);
+      setSocial(s => ({ ...s, images: { ...s.images, [platId]: url } }));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 5: PUBLISH ────────────────────────────────────────────────────────
+
+  const handlePublish = async () => {
+    setLoading(true); setLoadMsg("Publishing…"); setError(""); setSuccess("");
+    try {
+      const finalPost = {
+        id: Date.now(),
+        title: enhance.metaTitle || draft.title,
+        body: draft.body,
+        category: draft.category,
+        status: schedule.status,
+        date: schedule.publishDate,
+        views: 0,
+        metaTitle: enhance.metaTitle,
+        metaDescription: enhance.metaDescription,
+        primaryKeyword: enhance.primaryKeyword,
+      };
+
+      // Save to Blog Bunker
+      onSavePost(finalPost);
+
+      // Add to calendar
+      if (schedule.addToCalendar) {
+        const day = new Date(schedule.publishDate).getDate();
+        onAddCalEvent({ title: finalPost.title, type: schedule.status === "published" ? "scheduled" : "draft", day });
+      }
+
+      // Push to Wix
+      if (schedule.publishToWix && wixConnected) {
+        setLoadMsg("Publishing to Wix…");
+        const wixCfg = loadWixConfig();
+        const body = buildWixPostBody(finalPost);
+        const res = await wixFetch("/blog/v3/posts", "POST", body, wixCfg);
+        const wixId = res?.post?.id;
+        if (wixId && schedule.status === "published") {
+          await wixFetch(`/blog/v3/posts/${wixId}/publish`, "POST", {}, wixCfg);
+        }
+      }
+
+      markDone("publish");
+      setSuccess(`✓ Post ${schedule.status === "published" ? "published" : "scheduled"} successfully!${schedule.publishToWix && wixConnected ? " Live on caskandstream.com." : ""}`);
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  const resetPipeline = () => {
+    setStage("brief"); setCompleted([]); setError(""); setSuccess("");
+    setBrief({ topic:"", angle:"", audience:"fly fishing and whiskey enthusiasts", keywords:"", inspiration:null });
+    setDraft({ title:"", body:"", category:"Culture", tone:"literary" });
+    setEnhance({ metaTitle:"", metaDescription:"", primaryKeyword:"", suggestions:[], headlines:[], improved:"" });
+    setSocial({ posts:{}, images:{} });
+  };
+
+  // ── RENDER ──────────────────────────────────────────────────────────────────
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, margin:"0 0 4px" }}>Content Pipeline</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>From idea to published — one seamless workflow.</p>
+        </div>
+        <div style={{ display:"flex", gap:8 }}>
+          {completed.length > 0 && (
+            <button onClick={resetPipeline} style={btnS}>↺ New Post</button>
+          )}
+          <div style={{ fontSize:11, color:"var(--text-secondary)", padding:"6px 12px", borderRadius:99, border:"1px solid var(--border)", display:"flex", alignItems:"center", gap:6 }}>
+            <span>{provider.logo}</span>{provider.name}
+          </div>
+        </div>
+      </div>
+
+      {/* Progress */}
+      <PipelineProgress stage={stage} setStage={setStage} completed={completed} />
+
+      {/* Error / Success */}
+      {error   && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>{error}</div>}
+      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", color:"#5cba6c", fontSize:13 }}>{success}</div>}
+
+      {/* Loading overlay */}
+      {loading && (
+        <div style={{ marginBottom:16, padding:"12px 16px", borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)44", display:"flex", alignItems:"center", gap:10, fontSize:13, color:"var(--amber)" }}>
+          <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>
+          {loadMsg || "Working…"}
+        </div>
+      )}
+
+      {/* ── STAGE 1: BRIEF ── */}
+      {stage === "brief" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+            <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 16px" }}>What are you writing about?</h3>
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Topic or Title *</label>
+                <input style={iS} placeholder="e.g. Best bourbon to sip after a day of dry fly fishing on the Madison…" value={brief.topic} onChange={e=>setBrief(b=>({...b,topic:e.target.value}))} autoFocus
+                  onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+              </div>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Unique Angle (optional)</label>
+                <input style={iS} placeholder="e.g. Focus on sherried scotch that complement the taste of river water…" value={brief.angle} onChange={e=>setBrief(b=>({...b,angle:e.target.value}))}
+                  onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+              </div>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                <div>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Target Audience</label>
+                  <input style={iS} value={brief.audience} onChange={e=>setBrief(b=>({...b,audience:e.target.value}))}
+                    onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                </div>
+                <div>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Target Keywords</label>
+                  <input style={iS} placeholder="whiskey fly fishing pairing, bourbon outdoors…" value={brief.keywords} onChange={e=>setBrief(b=>({...b,keywords:e.target.value}))}
+                    onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Quick inspiration from board */}
+          {inspiration.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>Use from Inspiration Board</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:160, overflow:"auto" }}>
+                {inspiration.slice(0,6).map(item => (
+                  <button key={item.id} onClick={() => setBrief(b => ({ ...b, topic:item.title, angle:item.notes||"", inspiration:item }))}
+                    style={{ padding:"8px 12px", borderRadius:8, border:brief.inspiration?.id===item.id?"1px solid var(--amber)":"1px solid var(--border)", background:brief.inspiration?.id===item.id?"var(--amber-glow)":"var(--bg-elevated)", color:"var(--text)", fontSize:12, cursor:"pointer", textAlign:"left", fontFamily:"'DM Sans',sans-serif" }}>
+                    <span style={{ fontWeight:600 }}>{item.title}</span>
+                    {item.notes && <span style={{ color:"var(--text-secondary)", marginLeft:8 }}>— {item.notes.slice(0,60)}</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={generateFromBrief} disabled={!brief.topic.trim() || loading} style={{ ...btnA, background:brief.topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:brief.topic.trim()&&!loading?"#0e0f11":"var(--muted)", cursor:brief.topic.trim()&&!loading?"pointer":"not-allowed" }}>
+              {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Writing…</> : <>{provider.logo} Generate Draft</>}
+            </button>
+            <button onClick={() => { markDone("brief"); advanceTo("draft"); }} style={btnS}>Write Manually →</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 2: DRAFT ── */}
+      {stage === "draft" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Your Draft</h3>
+              <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                <span style={{ fontSize:11, color:"var(--muted)" }}>{draft.body.split(" ").filter(Boolean).length} words</span>
+                <button onClick={regenerateDraft} disabled={loading} style={{ padding:"5px 12px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+                  ↻ Regenerate
+                </button>
+              </div>
+            </div>
+            <div style={{ marginBottom:12 }}>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Title</label>
+              <input style={iS} value={draft.title} onChange={e=>setDraft(d=>({...d,title:e.target.value}))}
+                onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            </div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:12 }}>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Category</label>
+                <select style={{ ...iS, cursor:"pointer" }} value={draft.category} onChange={e=>setDraft(d=>({...d,category:e.target.value}))}>
+                  {CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Tone</label>
+                <select style={{ ...iS, cursor:"pointer" }} value={draft.tone} onChange={e=>setDraft(d=>({...d,tone:e.target.value}))}>
+                  {["literary","informative","conversational","humorous"].map(t=><option key={t} value={t}>{t.charAt(0).toUpperCase()+t.slice(1)}</option>)}
+                </select>
+              </div>
+            </div>
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+                Body <span style={{ fontWeight:400, letterSpacing:0, textTransform:"none", fontSize:10 }}>· Markdown: # H1 · ## H2 · **bold** · - list</span>
+              </label>
+              <textarea rows={18} value={draft.body} onChange={e=>setDraft(d=>({...d,body:e.target.value}))} style={{ ...iS, resize:"vertical", lineHeight:1.8, fontFamily:"'DM Sans',monospace", fontSize:13 }} />
+            </div>
+          </div>
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={proceedToDraft} disabled={!draft.title.trim()||!draft.body.trim()} style={{ ...btnA, background:draft.title.trim()&&draft.body.trim()?"var(--amber)":"var(--bg-elevated)", color:draft.title.trim()&&draft.body.trim()?"#0e0f11":"var(--muted)", cursor:draft.title.trim()&&draft.body.trim()?"pointer":"not-allowed" }}>
+              Continue to Enhance →
+            </button>
+            <button onClick={() => setStage("brief")} style={btnS}>← Back to Brief</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 3: ENHANCE ── */}
+      {stage === "enhance" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {!enhance.metaTitle ? (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:32, textAlign:"center" }}>
+              <div style={{ fontSize:32, marginBottom:12 }}>✦</div>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8 }}>Enhance with AI</h3>
+              <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24, maxWidth:400, margin:"0 auto 24px" }}>
+                Run SEO analysis, generate meta tags, check readability, and get 5 alternative headlines — all in one click.
+              </p>
+              <button onClick={runEnhancement} disabled={loading} style={btnA}>
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Run Enhancement`}
+              </button>
+            </div>
+          ) : (
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+              {/* SEO panel */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--green)" }}>✓ SEO Analysis</div>
+                <div>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Meta Title</label>
+                  <input style={{ ...iS, fontFamily:"monospace", fontSize:12 }} value={enhance.metaTitle} onChange={e=>setEnhance(en=>({...en,metaTitle:e.target.value}))} />
+                  <div style={{ fontSize:10, color: enhance.metaTitle.length > 60 ? "var(--red)" : "var(--muted)", marginTop:3, textAlign:"right" }}>{enhance.metaTitle.length}/60</div>
+                </div>
+                <div>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Meta Description</label>
+                  <textarea rows={2} style={{ ...iS, resize:"none", fontFamily:"monospace", fontSize:12 }} value={enhance.metaDescription} onChange={e=>setEnhance(en=>({...en,metaDescription:e.target.value}))} />
+                  <div style={{ fontSize:10, color: enhance.metaDescription?.length > 160 ? "var(--red)" : "var(--muted)", marginTop:3, textAlign:"right" }}>{enhance.metaDescription?.length||0}/160</div>
+                </div>
+                <div>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Primary Keyword</label>
+                  <div style={{ padding:"6px 12px", borderRadius:99, background:"var(--amber)22", color:"var(--amber)", fontSize:12, fontWeight:600, display:"inline-block" }}>{enhance.primaryKeyword}</div>
+                </div>
+                {enhance.suggestions?.length > 0 && (
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Suggestions</label>
+                    {enhance.suggestions.map((s,i)=><div key={i} style={{ fontSize:12, color:"var(--text-secondary)", padding:"4px 0", borderBottom:i<enhance.suggestions.length-1?"1px solid var(--border)":"none" }}>· {s}</div>)}
+                  </div>
+                )}
+                <button onClick={runEnhancement} disabled={loading} style={{ ...btnS, fontSize:11, padding:"6px 14px" }}>↻ Re-run Analysis</button>
+              </div>
+
+              {/* Headlines panel */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:12 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)" }}>Headline Options</div>
+                {enhance.headlines?.map((h,i) => (
+                  <div key={i} style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 12px", borderRadius:8, background: draft.title===h?"var(--amber-glow)":"var(--bg-elevated)", border: draft.title===h?"1px solid var(--amber)":"1px solid var(--border)", cursor:"pointer" }}
+                    onClick={()=>setDraft(d=>({...d,title:h}))}>
+                    <span style={{ fontSize:12, flex:1 }}>{h}</span>
+                    {draft.title===h && <span style={{ fontSize:10, color:"var(--amber)", fontWeight:700 }}>Selected</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={()=>{ markDone("enhance"); advanceTo("social"); }} disabled={!enhance.metaTitle} style={{ ...btnA, background:enhance.metaTitle?"var(--amber)":"var(--bg-elevated)", color:enhance.metaTitle?"#0e0f11":"var(--muted)", cursor:enhance.metaTitle?"pointer":"not-allowed" }}>
+              Continue to Social →
+            </button>
+            <button onClick={()=>setStage("draft")} style={btnS}>← Back to Draft</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 4: SOCIAL ── */}
+      {stage === "social" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Social Media Posts</h3>
+              <button onClick={generateSocialPosts} disabled={loading} style={{ ...btnA, padding:"8px 18px", fontSize:12, background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", cursor:loading?"not-allowed":"pointer" }}>
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Generate All Platforms`}
+              </button>
+            </div>
+
+            {Object.keys(social.posts).length === 0 ? (
+              <div style={{ textAlign:"center", padding:"32px 0", color:"var(--muted)", fontSize:13 }}>
+                Click "Generate All Platforms" to create platform-specific posts from your draft.
+              </div>
+            ) : (
+              <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+                {SOCIAL_PLATFORMS.map(plat => social.posts[plat.id] && (
+                  <div key={plat.id} style={{ borderRadius:10, border:`1px solid ${plat.color}33`, overflow:"hidden" }}>
+                    <div style={{ padding:"10px 16px", background:plat.color+"12", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                        <span style={{ fontSize:18 }}>{plat.icon}</span>
+                        <span style={{ fontWeight:700, fontSize:13, color:plat.color }}>{plat.name}</span>
+                        <span style={{ fontSize:10, color:"var(--muted)" }}>{social.posts[plat.id].length}/{plat.charLimit < 40000 ? plat.charLimit : "∞"} chars</span>
+                      </div>
+                      <div style={{ display:"flex", gap:6 }}>
+                        {plat.id !== "reddit" && (
+                          <button onClick={()=>generateSocialImage(plat.id)} disabled={loading}
+                            style={{ padding:"4px 10px", borderRadius:6, border:"1px solid #7c3aed44", background:"transparent", color:"#a78bfa", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+                            {social.images[plat.id] ? "↻ New Image" : "▣ Generate Image"}
+                          </button>
+                        )}
+                        <button onClick={()=>navigator.clipboard.writeText(social.posts[plat.id])}
+                          style={{ padding:"4px 10px", borderRadius:6, border:"none", background:plat.color, color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+                          Copy
+                        </button>
+                      </div>
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:social.images[plat.id]?"1fr 1fr":"1fr" }}>
+                      <textarea value={social.posts[plat.id]} onChange={e=>setSocial(s=>({...s,posts:{...s.posts,[plat.id]:e.target.value}}))} rows={5}
+                        style={{ padding:14, border:"none", borderRight:social.images[plat.id]?"1px solid var(--border)":"none", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"'DM Sans',sans-serif", outline:"none", resize:"none", lineHeight:1.6 }} />
+                      {social.images[plat.id] && (
+                        <div style={{ position:"relative" }}>
+                          <img src={social.images[plat.id]} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+                          <button onClick={()=>{ const a=document.createElement("a"); a.href=social.images[plat.id]; a.download=`cask-stream-${plat.id}.webp`; a.click(); }}
+                            style={{ position:"absolute", bottom:8, right:8, padding:"4px 10px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.7)", color:"#fff", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+                            ↓ Download
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={()=>{ markDone("social"); advanceTo("publish"); }} style={btnA}>Continue to Publish →</button>
+            <button onClick={()=>setStage("enhance")} style={btnS}>← Back to Enhance</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 5: PUBLISH ── */}
+      {stage === "publish" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {success ? (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:40, textAlign:"center" }}>
+              <div style={{ fontSize:48, marginBottom:16 }}>✓</div>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, marginBottom:8 }}>Post Published!</h3>
+              <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:24 }}>{success}</p>
+              <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
+                <button onClick={resetPipeline} style={btnA}>Start New Post</button>
+                <button onClick={()=>setStage("draft")} style={btnS}>Back to Draft</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+                <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 20px" }}>Schedule & Publish</h3>
+
+                {/* Summary */}
+                <div style={{ padding:16, borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", marginBottom:20 }}>
+                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Post Summary</div>
+                  <div style={{ fontFamily:"var(--font-display)", fontSize:16, fontWeight:700, marginBottom:4 }}>{enhance.metaTitle || draft.title}</div>
+                  <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:8 }}>{enhance.metaDescription}</div>
+                  <div style={{ display:"flex", gap:12, fontSize:11, color:"var(--muted)" }}>
+                    <span>◈ {draft.category}</span>
+                    <span>▤ {draft.body.split(" ").filter(Boolean).length} words</span>
+                    {enhance.primaryKeyword && <span>🔑 {enhance.primaryKeyword}</span>}
+                    {Object.keys(social.posts).length > 0 && <span>◈ {Object.keys(social.posts).length} social posts ready</span>}
+                  </div>
+                </div>
+
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:20 }}>
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Publish Date</label>
+                    <input type="date" style={iS} value={schedule.publishDate} onChange={e=>setSchedule(s=>({...s,publishDate:e.target.value}))} />
+                  </div>
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Publish Time</label>
+                    <input type="time" style={iS} value={schedule.publishTime} onChange={e=>setSchedule(s=>({...s,publishTime:e.target.value}))} />
+                  </div>
+                </div>
+
+                <div style={{ marginBottom:20 }}>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Status</label>
+                  <div style={{ display:"flex", gap:8 }}>
+                    {["published","draft","scheduled"].map(s=>(
+                      <button key={s} onClick={()=>setSchedule(sc=>({...sc,status:s}))}
+                        style={{ padding:"7px 16px", borderRadius:8, border:schedule.status===s?"1px solid var(--amber)":"1px solid var(--border)", background:schedule.status===s?"var(--amber-glow)":"transparent", color:schedule.status===s?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textTransform:"capitalize" }}>
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                  {[
+                    { key:"addToCalendar", label:"Add to Blog Bunker calendar", always:true },
+                    { key:"publishToWix", label:"Publish to Wix Blog (caskandstream.com)", disabled:!wixConnected, note:!wixConnected?"— connect Wix first in Settings":wixConnected?"● Connected":null },
+                  ].map(opt=>(
+                    <label key={opt.key} style={{ display:"flex", alignItems:"center", gap:10, cursor:opt.disabled?"not-allowed":"pointer", opacity:opt.disabled?0.5:1 }}>
+                      <div onClick={()=>!opt.disabled&&setSchedule(s=>({...s,[opt.key]:!s[opt.key]}))}
+                        style={{ width:20, height:20, borderRadius:5, border:`2px solid ${schedule[opt.key]&&!opt.disabled?"var(--amber)":"var(--border)"}`, background:schedule[opt.key]&&!opt.disabled?"var(--amber)":"transparent", display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.2s", flexShrink:0, cursor:opt.disabled?"not-allowed":"pointer" }}>
+                        {schedule[opt.key]&&!opt.disabled&&<span style={{ fontSize:12, color:"#0e0f11", fontWeight:700 }}>✓</span>}
+                      </div>
+                      <span style={{ fontSize:13 }}>{opt.label}</span>
+                      {opt.note && <span style={{ fontSize:11, color:wixConnected?"#5cba6c":"var(--muted)" }}>{opt.note}</span>}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ display:"flex", gap:10 }}>
+                <button onClick={handlePublish} disabled={loading} style={{ ...btnA, background:loading?"var(--bg-elevated)":"#5cba6c", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
+                  {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : schedule.status==="published" ? "↑ Publish Now" : schedule.status==="draft" ? "Save as Draft" : "Schedule Post"}
+                </button>
+                <button onClick={()=>setStage("social")} style={btnS}>← Back to Social</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -1700,11 +2294,69 @@ function Modal({ title, onClose, children, wide }) {
   );
 }
 
+// ─── WIX CONTENT CONVERTER ───────────────────────────────────────────────────
+// Converts plain text / basic markdown → Wix rich content document format
+
+function textToWixContent(text) {
+  if (!text) return { nodes: [] };
+  const lines = text.split("\n");
+  const nodes = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      nodes.push({ type: "PARAGRAPH", nodes: [{ type: "TEXT", textData: { text: " ", decorations: [] } }] });
+      continue;
+    }
+    // H1
+    if (trimmed.startsWith("# ")) {
+      nodes.push({ type: "HEADING", headingData: { level: 1 }, nodes: [{ type: "TEXT", textData: { text: trimmed.slice(2), decorations: [] } }] });
+    // H2
+    } else if (trimmed.startsWith("## ")) {
+      nodes.push({ type: "HEADING", headingData: { level: 2 }, nodes: [{ type: "TEXT", textData: { text: trimmed.slice(3), decorations: [] } }] });
+    // H3
+    } else if (trimmed.startsWith("### ")) {
+      nodes.push({ type: "HEADING", headingData: { level: 3 }, nodes: [{ type: "TEXT", textData: { text: trimmed.slice(4), decorations: [] } }] });
+    // Bullet list
+    } else if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+      nodes.push({ type: "BULLETED_LIST", nodes: [{ type: "LIST_ITEM", nodes: [{ type: "PARAGRAPH", nodes: [{ type: "TEXT", textData: { text: trimmed.slice(2), decorations: [] } }] }] }] });
+    // Regular paragraph — handle **bold** inline
+    } else {
+      const textNodes = [];
+      const parts = trimmed.split(/(\*\*.*?\*\*)/g);
+      for (const part of parts) {
+        if (part.startsWith("**") && part.endsWith("**")) {
+          textNodes.push({ type: "TEXT", textData: { text: part.slice(2,-2), decorations: [{ type: "BOLD" }] } });
+        } else if (part) {
+          textNodes.push({ type: "TEXT", textData: { text: part, decorations: [] } });
+        }
+      }
+      nodes.push({ type: "PARAGRAPH", nodes: textNodes.length ? textNodes : [{ type: "TEXT", textData: { text: trimmed, decorations: [] } }] });
+    }
+  }
+
+  return { nodes };
+}
+
+// Build the Wix create/update post body
+function buildWixPostBody(form, existingWixId = null) {
+  const richContent = textToWixContent(form.body);
+  return {
+    post: {
+      ...(existingWixId ? {} : {}),
+      title: form.title,
+      richContent,
+      excerpt: form.body.slice(0, 200).replace(/[#*]/g, "").trim(),
+      membersOnly: false,
+    }
+  };
+}
+
 // ─── POST EDITOR MODAL ────────────────────────────────────────────────────────
 
 const CATEGORIES = ["Culture", "Whiskey", "Gear", "Destinations", "Technique", "Lifestyle", "Reviews", "News"];
 
-function PostEditor({ post, onSave, onClose, onDelete }) {
+function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
   const isNew = !post?.id;
   const [form, setForm] = useState({
     title:    post?.title    || "",
@@ -1713,7 +2365,10 @@ function PostEditor({ post, onSave, onClose, onDelete }) {
     status:   post?.status   || "draft",
     date:     post?.date     || new Date().toISOString().split("T")[0],
   });
-  const [saved, setSaved] = useState(false);
+  const [saved,        setSaved]        = useState(false);
+  const [wixStatus,    setWixStatus]    = useState("");
+  const [wixLoading,   setWixLoading]   = useState(false);
+  const [wixError,     setWixError]     = useState("");
 
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
 
@@ -1722,6 +2377,47 @@ function PostEditor({ post, onSave, onClose, onDelete }) {
     onSave({ ...post, ...form, id: post?.id || Date.now() });
     setSaved(true);
     setTimeout(() => { setSaved(false); onClose(); }, 600);
+  };
+
+  const handlePublishToWix = async (asDraft = false) => {
+    if (!form.title.trim()) return;
+    setWixLoading(true); setWixError(""); setWixStatus("");
+    const wixCfg = loadWixConfig();
+
+    try {
+      const body = buildWixPostBody(form, post?.wixId);
+
+      if (post?.wixId) {
+        // Update existing Wix post
+        setWixStatus("Updating post on Wix…");
+        await wixFetch(`/blog/v3/posts/${post.wixId}`, "PATCH", body, wixCfg);
+        if (!asDraft) {
+          setWixStatus("Publishing…");
+          await wixFetch(`/blog/v3/posts/${post.wixId}/publish`, "POST", {}, wixCfg);
+        }
+        setWixStatus(asDraft ? "✓ Updated as draft on Wix" : "✓ Published to Wix!");
+      } else {
+        // Create new Wix post
+        setWixStatus("Creating post on Wix…");
+        const res = await wixFetch("/blog/v3/posts", "POST", body, wixCfg);
+        const newWixId = res?.post?.id;
+        if (!newWixId) throw new Error("Wix didn't return a post ID");
+
+        if (!asDraft) {
+          setWixStatus("Publishing…");
+          await wixFetch(`/blog/v3/posts/${newWixId}/publish`, "POST", {}, wixCfg);
+        }
+
+        // Save wixId back to the post
+        const updatedPost = { ...post, ...form, id: post?.id || Date.now(), wixId: newWixId, status: asDraft ? "draft" : "published", fromWix: true };
+        onSave(updatedPost);
+        setWixStatus(asDraft ? "✓ Saved as draft on Wix" : "✓ Published to caskandstream.com!");
+      }
+    } catch(e) {
+      setWixError(`Wix error: ${e.message}`);
+      setWixStatus("");
+    }
+    setWixLoading(false);
   };
 
   return (
@@ -1750,9 +2446,40 @@ function PostEditor({ post, onSave, onClose, onDelete }) {
           </div>
         </div>
         <div>
-          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Body</label>
-          <textarea rows={12} value={form.body} onChange={e=>setForm(f=>({...f,body:e.target.value}))} placeholder="Write your post here…" style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+            Body
+            <span style={{ fontWeight:400, marginLeft:8, color:"var(--muted)", textTransform:"none", letterSpacing:0, fontSize:10 }}>
+              Markdown supported: # H1, ## H2, **bold**, - list
+            </span>
+          </label>
+          <textarea rows={14} value={form.body} onChange={e=>setForm(f=>({...f,body:e.target.value}))} placeholder="Write your post here…" style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
         </div>
+
+        {/* Wix push section */}
+        {wixConnected && (
+          <div style={{ padding:"14px 16px", borderRadius:10, border:"1px solid #5cba6c44", background:"#5cba6c08" }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>
+              ◉ Publish to Wix Blog
+              {post?.wixId && <span style={{ marginLeft:8, fontWeight:400, color:"var(--text-secondary)" }}>· Already on Wix</span>}
+            </div>
+            <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+              <button onClick={() => handlePublishToWix(false)} disabled={!form.title.trim() || wixLoading}
+                style={{ padding:"8px 18px", borderRadius:8, border:"none", background:!form.title.trim()||wixLoading?"var(--bg-elevated)":"#5cba6c", color:!form.title.trim()||wixLoading?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:!form.title.trim()||wixLoading?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:6 }}>
+                {wixLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{wixStatus||"Working…"}</> : post?.wixId ? "↑ Update on Wix" : "↑ Publish to Wix"}
+              </button>
+              <button onClick={() => handlePublishToWix(true)} disabled={!form.title.trim() || wixLoading}
+                style={{ padding:"8px 16px", borderRadius:8, border:"1px solid #5cba6c44", background:"transparent", color:"#5cba6c", fontSize:13, cursor:!form.title.trim()||wixLoading?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+                Save as Draft on Wix
+              </button>
+              {wixStatus && !wixLoading && <span style={{ fontSize:12, color:"#5cba6c", fontWeight:600 }}>{wixStatus}</span>}
+              {wixError && <span style={{ fontSize:12, color:"var(--red)" }}>{wixError}</span>}
+            </div>
+            <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"8px 0 0", lineHeight:1.5 }}>
+              Posts are converted from markdown to Wix rich content format automatically.
+            </p>
+          </div>
+        )}
+
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <div style={{ display:"flex", gap:8 }}>
             {!isNew && (
@@ -2056,12 +2783,13 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const connectedSocial    = SOCIAL_PLATFORMS.filter(p => loadSocialConnections()[p.id]?.enabled).length;
 
   const TABS = [
+    { id:"pipeline",  label:"Pipeline",  icon:"◈", highlight:true },
     { id:"posts",     label:"Posts",     icon:"▤" },
     { id:"analytics", label:"Analytics", icon:"◔" },
     { id:"calendar",  label:"Calendar",  icon:"▦" },
     { id:"research",  label:"Research",  icon:"◎" },
     { id:"ai",        label:"AI Tools",  icon:"✦" },
-    { id:"social",    label:"Social",    icon:"◈" },
+    { id:"social",    label:"Social",    icon:"▣" },
     { id:"settings",  label:"Settings",  icon:"⚙" },
   ];
 
@@ -2086,6 +2814,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
           onSave={savePost}
           onClose={() => setPostEditorOpen(false)}
           onDelete={deletePost}
+          wixConnected={wixConnected}
         />
       )}
       {addCompetitorOpen && (
@@ -2135,9 +2864,10 @@ export default function Dashboard({ user, workspace, onLogout }) {
         <nav style={{padding:"12px 12px",flex:1}}>
           <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.12em",textTransform:"uppercase",color:"var(--muted)",padding:"0 8px 6px"}}>Modules</div>
           {TABS.map(t=>(
-            <div key={t.id} onClick={()=>setActiveTab(t.id)} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",borderRadius:8,cursor:"pointer",background:activeTab===t.id?"var(--bg-elevated)":"transparent",color:activeTab===t.id?"var(--amber)":"var(--text-secondary)",fontWeight:activeTab===t.id?600:400,fontSize:13,marginBottom:2,transition:"all 0.15s"}}>
+            <div key={t.id} onClick={()=>setActiveTab(t.id)} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",borderRadius:8,cursor:"pointer",background:activeTab===t.id?"var(--bg-elevated)":t.highlight?"var(--amber-glow)":"transparent",color:activeTab===t.id?"var(--amber)":t.highlight?"var(--amber)":"var(--text-secondary)",fontWeight:activeTab===t.id||t.highlight?600:400,fontSize:13,marginBottom:2,transition:"all 0.15s",border:t.highlight&&activeTab!==t.id?"1px solid var(--amber)33":"1px solid transparent"}}>
               <span style={{fontSize:15,width:18,textAlign:"center"}}>{t.icon}</span>
               {t.label}
+              {t.highlight&&activeTab!==t.id&&<span style={{marginLeft:"auto",fontSize:9,fontWeight:700,padding:"1px 6px",borderRadius:99,background:"var(--amber)",color:"#0e0f11"}}>NEW</span>}
             </div>
           ))}
         </nav>
@@ -2172,6 +2902,25 @@ export default function Dashboard({ user, workspace, onLogout }) {
         </header>
 
         <div style={{flex:1,overflow:"auto",padding:28}}>
+
+          {/* ══ PIPELINE ══ */}
+          {activeTab==="pipeline"&&(
+            <ContentPipeline
+              posts={posts}
+              inspiration={inspiration}
+              competitors={competitors}
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+              dark={dark}
+              wixConnected={wixConnected}
+              onSavePost={savePost}
+              onAddInspiration={saveInspiration}
+              onAddCalEvent={saveCalEvent}
+              wsName={wsName}
+              wsTagline={wsTagline}
+            />
+          )}
 
           {/* ══ POSTS ══ */}
           {activeTab==="posts"&&(
