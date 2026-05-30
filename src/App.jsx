@@ -12,17 +12,41 @@ function AppShell() {
   useEffect(() => {
     if (!user) return;
     try {
-      const already = localStorage.getItem(`bb_onboarded_${user.id}`) === "true";
-      const saved   = localStorage.getItem(`bb_workspace_${user.id}`);
-      if (already && saved) { setWorkspace(JSON.parse(saved)); setOnboarded(true); }
+      // Check by user ID first (normal case)
+      const idKey    = `bb_onboarded_${user.id}`;
+      const idWsKey  = `bb_workspace_${user.id}`;
+
+      // Also check by email (survives password reset which may change session ID)
+      const emailKey   = `bb_onboarded_email_${user.email}`;
+      const emailWsKey = `bb_workspace_email_${user.email}`;
+
+      const alreadyById    = localStorage.getItem(idKey)    === "true";
+      const alreadyByEmail = localStorage.getItem(emailKey) === "true";
+      const already        = alreadyById || alreadyByEmail;
+
+      const savedById    = localStorage.getItem(idWsKey);
+      const savedByEmail = localStorage.getItem(emailWsKey);
+      const saved        = savedById || savedByEmail;
+
+      if (already && saved) {
+        // Re-stamp with current user ID so future logins work by ID too
+        localStorage.setItem(idKey,   "true");
+        localStorage.setItem(idWsKey, saved);
+        setWorkspace(JSON.parse(saved));
+        setOnboarded(true);
+      }
     } catch(e) { console.error("storage error:", e); }
     setChecking(false);
   }, [user]);
 
   const handleOnboardingComplete = (data) => {
     try {
-      localStorage.setItem(`bb_onboarded_${user.id}`, "true");
-      localStorage.setItem(`bb_workspace_${user.id}`, JSON.stringify(data));
+      const ws = JSON.stringify(data);
+      // Save by both user ID and email for resilience
+      localStorage.setItem(`bb_onboarded_${user.id}`,          "true");
+      localStorage.setItem(`bb_workspace_${user.id}`,           ws);
+      localStorage.setItem(`bb_onboarded_email_${user.email}`,  "true");
+      localStorage.setItem(`bb_workspace_email_${user.email}`,  ws);
     } catch(e) { console.error("save error:", e); }
     setWorkspace(data);
     setOnboarded(true);
