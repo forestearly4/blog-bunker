@@ -1391,7 +1391,7 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
 
 // ─── AI IDEA GENERATOR ───────────────────────────────────────────────────────
 
-function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activeModel, apiKeys, dark }) {
+function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activeModel, apiKeys, dark, onProviderChange, onModelChange }) {
   const [loading,   setLoading]   = useState(false);
   const [ideas,     setIdeas]     = useState([]);
   const [error,     setError]     = useState("");
@@ -1453,15 +1453,20 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
   return (
     <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
       {/* Header */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
         <div>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>✦ AI Idea Generator</h3>
           <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Generate content ideas tailored to Cask & Stream based on what you've already written.</p>
         </div>
-        <div style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, color:"var(--text-secondary)", background:"var(--bg-elevated)", padding:"4px 10px", borderRadius:99, border:"1px solid var(--border)" }}>
-          <span>{provider.logo}</span>{provider.name}
-        </div>
       </div>
+
+      <ProviderPicker
+        activeProvider={activeProvider}
+        activeModel={activeModel}
+        onProviderChange={onProviderChange}
+        onModelChange={onModelChange}
+        keys={apiKeys}
+      />
 
       {/* Focus selector */}
       <div style={{ marginBottom:16 }}>
@@ -1527,7 +1532,7 @@ function saveTrackerData(data) {
   try { localStorage.setItem(COMP_TRACKER_STORAGE, JSON.stringify(data)); } catch {} 
 }
 
-function CompetitorTracker({ competitors, onAddInspiration, activeProvider, activeModel, apiKeys, dark }) {
+function CompetitorTracker({ competitors, onAddInspiration, activeProvider, activeModel, apiKeys, dark, onProviderChange, onModelChange }) {
   const [tracking,   setTracking]   = useState(loadTrackerData);
   const [scanning,   setScanning]   = useState(false);
   const [scanTarget, setScanTarget] = useState(null);
@@ -1590,16 +1595,24 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
       {/* Header */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
         <div>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>◎ Competitor Post Tracker</h3>
           <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Track what competitors are publishing and find counter-opportunities for Cask & Stream.</p>
         </div>
         <button onClick={scanAll} disabled={scanning}
-          style={{ padding:"9px 18px", borderRadius:8, border:"none", background:scanning?"var(--bg-elevated)":provider.color, color:scanning?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:scanning?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+          style={{ padding:"9px 18px", borderRadius:8, border:"none", background:scanning?"var(--bg-elevated)":provider.color, color:scanning?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:scanning?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
           {scanning ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Scanning…</> : `${provider.logo} Scan All`}
         </button>
       </div>
+
+      <ProviderPicker
+        activeProvider={activeProvider}
+        activeModel={activeModel}
+        onProviderChange={onProviderChange}
+        onModelChange={onModelChange}
+        keys={apiKeys}
+      />
 
       {error && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>}
 
@@ -1720,7 +1733,7 @@ function PipelineProgress({ stage, setStage, completed }) {
   );
 }
 
-function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline }) {
+function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange }) {
   const [stage,     setStage]    = useState("brief");
   const [completed, setCompleted]= useState([]);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
@@ -1929,15 +1942,19 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
           <h2 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, margin:"0 0 4px" }}>Content Pipeline</h2>
           <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>From idea to published — one seamless workflow.</p>
         </div>
-        <div style={{ display:"flex", gap:8 }}>
-          {completed.length > 0 && (
-            <button onClick={resetPipeline} style={btnS}>↺ New Post</button>
-          )}
-          <div style={{ fontSize:11, color:"var(--text-secondary)", padding:"6px 12px", borderRadius:99, border:"1px solid var(--border)", display:"flex", alignItems:"center", gap:6 }}>
-            <span>{provider.logo}</span>{provider.name}
-          </div>
-        </div>
+        {completed.length > 0 && (
+          <button onClick={resetPipeline} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>↺ New Post</button>
+        )}
       </div>
+
+      {/* Provider picker */}
+      <ProviderPicker
+        activeProvider={activeProvider}
+        activeModel={activeModel}
+        onProviderChange={onProviderChange}
+        onModelChange={onModelChange}
+        keys={apiKeys}
+      />
 
       {/* Progress */}
       <PipelineProgress stage={stage} setStage={setStage} completed={completed} />
@@ -2268,6 +2285,86 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── CALENDAR TAB ─────────────────────────────────────────────────────────────
+
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpen, btnP, fixedGreen }) {
+  const today = new Date();
+  const [calYear,  setCalYear]  = useState(today.getFullYear());
+  const [calMonth, setCalMonth] = useState(today.getMonth());
+
+  const daysInMonth = new Date(calYear, calMonth+1, 0).getDate();
+  const firstDow    = new Date(calYear, calMonth, 1).getDay();
+  const isToday     = (d) => d===today.getDate() && calMonth===today.getMonth() && calYear===today.getFullYear();
+
+  const prevMonth = () => calMonth===0 ? (setCalMonth(11), setCalYear(y=>y-1)) : setCalMonth(m=>m-1);
+  const nextMonth = () => calMonth===11 ? (setCalMonth(0), setCalYear(y=>y+1)) : setCalMonth(m=>m+1);
+  const goToday   = () => { setCalMonth(today.getMonth()); setCalYear(today.getFullYear()); };
+
+  const monthEvs = (day) => calEvents.filter(e =>
+    e.day === day && (e.month === undefined || (e.month === calMonth && e.year === calYear))
+  );
+
+  const tc = { scheduled:"var(--amber)", newsletter:fixedGreen, draft:"var(--muted)", idea:"var(--text-secondary)" };
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={prevMonth} style={{width:32,height:32,borderRadius:8,border:"1px solid var(--border)",background:"var(--bg-elevated)",color:"var(--text)",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>‹</button>
+          <h2 style={{fontFamily:"'Fraunces',serif",fontSize:20,fontWeight:700,margin:0,minWidth:180,textAlign:"center"}}>{MONTH_NAMES[calMonth]} {calYear}</h2>
+          <button onClick={nextMonth} style={{width:32,height:32,borderRadius:8,border:"1px solid var(--border)",background:"var(--bg-elevated)",color:"var(--text)",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>›</button>
+          <button onClick={goToday} style={{padding:"5px 12px",borderRadius:6,border:"1px solid var(--border)",background:"transparent",color:"var(--text-secondary)",fontSize:11,cursor:"pointer",fontFamily:"'DM Sans',sans-serif"}}>Today</button>
+        </div>
+        <div style={{display:"flex",gap:12,alignItems:"center"}}>
+          {[{color:"var(--amber)",l:"Scheduled"},{color:fixedGreen,l:"Newsletter"},{color:"var(--muted)",l:"Draft"},{color:"var(--text-secondary)",l:"Idea"}].map(x=>(
+            <div key={x.l} style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"var(--text-secondary)"}}>
+              <span style={{width:8,height:8,borderRadius:99,background:x.color,display:"inline-block"}}/>{x.l}
+            </div>
+          ))}
+          <button onClick={()=>{setCalModalDay(null);setCalModalOpen(true);}} style={{...btnP,padding:"6px 14px",fontSize:12}}>+ Add Event</button>
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:1,background:"var(--border)",borderRadius:12,overflow:"hidden",border:"1px solid var(--border)"}}>
+        {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=>(
+          <div key={d} style={{background:"var(--bg-elevated)",padding:10,textAlign:"center",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{d}</div>
+        ))}
+        {Array(firstDow).fill(null).map((_,i)=>(
+          <div key={`empty-${i}`} style={{background:"var(--bg-surface)",padding:12,minHeight:80,opacity:0.3}}/>
+        ))}
+        {Array(daysInMonth).fill(null).map((_,i)=>{
+          const day=i+1;
+          const evs=monthEvs(day);
+          const tod=isToday(day);
+          return (
+            <div key={day}
+              onClick={()=>{setCalModalDay(day);setCalModalOpen(true);}}
+              style={{background:"var(--bg-surface)",padding:"8px 10px",minHeight:80,cursor:"pointer",borderTop:tod?"2px solid var(--amber)":"none",boxSizing:"border-box"}}
+              onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"}
+              onMouseLeave={e=>e.currentTarget.style.background="var(--bg-surface)"}>
+              <div style={{fontSize:12,fontWeight:tod?700:400,color:tod?"var(--amber)":"var(--text-secondary)",marginBottom:4,display:"flex",alignItems:"center",gap:5}}>
+                {day}
+                {tod&&<span style={{fontSize:8,background:"var(--amber)",color:"#0e0f11",borderRadius:99,padding:"1px 5px",fontWeight:700}}>TODAY</span>}
+              </div>
+              {evs.map((ev,ei)=>(
+                <div key={ei}
+                  onClick={e=>{e.stopPropagation();deleteCalEvent(calEvents.findIndex(c=>c.day===day&&c.title===ev.title));}}
+                  title="Click to remove"
+                  style={{fontSize:10,padding:"2px 6px",borderRadius:4,background:(tc[ev.type]||"var(--muted)")+"22",color:tc[ev.type]||"var(--muted)",fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>
+                  {ev.title}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      <p style={{fontSize:11,color:"var(--muted)",marginTop:10}}>Click a day to add an event · Click an event to remove it</p>
     </div>
   );
 }
@@ -2609,12 +2706,16 @@ function AddInspirationModal({ onSave, onClose }) {
 
 // ─── ADD CALENDAR EVENT MODAL ─────────────────────────────────────────────────
 
-function AddCalendarEventModal({ day, onSave, onClose }) {
-  const [form, setForm] = useState({ title:"", type:"idea", day: day || 1 });
+function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
+  const today = new Date();
+  const m = month ?? today.getMonth();
+  const y = year  ?? today.getFullYear();
+  const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const [form, setForm] = useState({ title:"", type:"idea", day: day || today.getDate() });
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
   const valid = form.title.trim();
   return (
-    <Modal title={day ? `Add Event — May ${day}` : "Add Calendar Event"} onClose={onClose}>
+    <Modal title={day ? `Add Event — ${MONTH_NAMES[m]} ${day}, ${y}` : "Add Calendar Event"} onClose={onClose}>
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Event Title *</label>
@@ -2639,7 +2740,7 @@ function AddCalendarEventModal({ day, onSave, onClose }) {
         </div>
         <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginTop:4 }}>
           <button onClick={onClose} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Cancel</button>
-          <button onClick={()=>{ if(valid){ onSave({...form, day: day || form.day}); onClose(); }}} disabled={!valid}
+          <button onClick={()=>{ if(valid){ onSave({ ...form, day: day||form.day, month: m, year: y }); onClose(); }}} disabled={!valid}
             style={{ padding:"9px 24px", borderRadius:8, border:"none", background:valid?"var(--amber)":"var(--bg-elevated)", color:valid?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:valid?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif" }}>
             Add Event
           </button>
@@ -2919,6 +3020,8 @@ export default function Dashboard({ user, workspace, onLogout }) {
               onAddCalEvent={saveCalEvent}
               wsName={wsName}
               wsTagline={wsTagline}
+              onProviderChange={handleProviderChange}
+              onModelChange={handleModelChange}
             />
           )}
 
@@ -2993,39 +3096,15 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
           {/* ══ CALENDAR ══ */}
           {activeTab==="calendar"&&(
-            <div>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-                <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:0}}>May 2026</h2>
-                <div style={{display:"flex",gap:12,alignItems:"center"}}>
-                  {[{color:"var(--amber)",l:"Scheduled"},{color:fixedGreen,l:"Newsletter"},{color:"var(--muted)",l:"Draft"},{color:"var(--text-secondary)",l:"Idea"}].map(x=>(
-                    <div key={x.l} style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"var(--text-secondary)"}}>
-                      <span style={{width:8,height:8,borderRadius:99,background:x.color,display:"inline-block"}}/>{x.l}
-                    </div>
-                  ))}
-                  <button onClick={()=>{setCalModalDay(null);setCalModalOpen(true);}} style={{...btnP,padding:"6px 14px",fontSize:12}}>+ Add Event</button>
-                </div>
-              </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:1,background:"var(--border)",borderRadius:12,overflow:"hidden",border:"1px solid var(--border)"}}>
-                {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=>(
-                  <div key={d} style={{background:"var(--bg-elevated)",padding:10,textAlign:"center",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{d}</div>
-                ))}
-                {Array(4).fill(null).map((_,i)=><div key={`e${i}`} style={{background:"var(--bg-surface)",padding:12,minHeight:80}}/>)}
-                {Array(31).fill(null).map((_,i)=>{
-                  const day=i+1;
-                  const evs=calEvents.filter(e=>e.day===day);
-                  const tc={scheduled:"var(--amber)",newsletter:fixedGreen,draft:"var(--muted)",idea:"var(--text-secondary)"};
-                  return (
-                    <div key={day} onClick={()=>{setCalModalDay(day);setCalModalOpen(true);}} style={{background:"var(--bg-surface)",padding:"8px 10px",minHeight:80,cursor:"pointer",position:"relative"}} onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"} onMouseLeave={e=>e.currentTarget.style.background="var(--bg-surface)"}>
-                      <div style={{fontSize:12,color:"var(--text-secondary)",marginBottom:4}}>{day}</div>
-                      {evs.map((ev,ei)=>(
-                        <div key={ei} onClick={e=>{e.stopPropagation();deleteCalEvent(calEvents.findIndex(c=>c.day===day&&c.title===ev.title));}} title="Click to remove" style={{fontSize:10,padding:"2px 6px",borderRadius:4,background:(tc[ev.type]||"var(--muted)")+"22",color:tc[ev.type]||"var(--muted)",fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>{ev.title}</div>
-                      ))}
-                    </div>
-                  );
-                })}
-              </div>
-              <p style={{fontSize:11,color:"var(--muted)",marginTop:10}}>Click a day to add an event · Click an event to remove it</p>
-            </div>
+            <CalendarTab
+              calEvents={calEvents}
+              deleteCalEvent={deleteCalEvent}
+              setCalModalDay={setCalModalDay}
+              setCalModalOpen={setCalModalOpen}
+              btnP={btnP}
+              fixedGreen={fixedGreen}
+              dark={dark}
+            />
           )}
 
           {/* ══ RESEARCH ══ */}
@@ -3129,6 +3208,8 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   activeModel={activeModel}
                   apiKeys={apiKeys}
                   dark={dark}
+                  onProviderChange={handleProviderChange}
+                  onModelChange={handleModelChange}
                 />
               )}
               {researchTab==="tracker"&&(
@@ -3139,6 +3220,8 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   activeModel={activeModel}
                   apiKeys={apiKeys}
                   dark={dark}
+                  onProviderChange={handleProviderChange}
+                  onModelChange={handleModelChange}
                 />
               )}
             </div>
