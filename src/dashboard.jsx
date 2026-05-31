@@ -90,8 +90,8 @@ const AI_PROVIDERS = [
     company: "Google",
     logo: "✦",
     color: "#4285f4",
-    models: ["gemini-2.5-flash-preview-05-20", "gemini-2.5-pro-preview-06-05", "gemini-1.5-pro", "gemini-1.5-flash"],
-    defaultModel: "gemini-2.5-flash-preview-05-20",
+    models: ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
+    defaultModel: "gemini-3.5-flash",
     keyPrefix: "AIza",
     keyPlaceholder: "AIzaSy...",
     docsUrl: "https://aistudio.google.com/apikey",
@@ -167,10 +167,13 @@ async function callAI(providerId, model, system, userMsg, apiKey) {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ parts: [{ text: `${system}\n\n${userMsg}` }] }], generationConfig: { maxOutputTokens: 1500 } }),
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: `${system}\n\n${userMsg}` }] }],
+        generationConfig: { maxOutputTokens: 1500 },
+      }),
     });
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message || "Gemini error");
+    if (data.error) throw new Error(`Gemini error: ${data.error.message || JSON.stringify(data.error)}`);
     return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
   }
 
