@@ -90,7 +90,7 @@ const AI_PROVIDERS = [
     company: "Google",
     logo: "✦",
     color: "#4285f4",
-    models: ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
+    models: ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"],
     defaultModel: "gemini-3.5-flash",
     keyPrefix: "AIza",
     keyPlaceholder: "AIzaSy...",
