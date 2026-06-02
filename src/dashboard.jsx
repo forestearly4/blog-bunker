@@ -277,7 +277,7 @@ function getImageProvider(apiKeys) {
 }
 
 function getImageProviderLabel(provider) {
-  return { stability:"Stability AI", dalle:"DALL-E 3", "gemini-image":"Gemini Image" }[provider] || "No image provider";
+  return { stability:"Stability AI", dalle:"GPT Image (OpenAI)", "gemini-image":"Gemini Image" }[provider] || "No image provider";
 }
 
 async function generateImage(prompt, platId, apiKeys) {
@@ -307,18 +307,25 @@ async function generateImage(prompt, platId, apiKeys) {
   }
 
   if (provider === "dalle") {
-    // Map ratio to DALL-E size
-    const sizeMap = { "1:1":"1024x1024", "3:2":"1792x1024", "2:3":"1024x1792", "16:9":"1792x1024" };
+    // gpt-image-1 replaced dall-e-3 (retired March 2026)
+    // gpt-image-1 returns base64 data, not URLs
+    const sizeMap = { "1:1":"1024x1024", "3:2":"1536x1024", "2:3":"1024x1536", "16:9":"1536x1024" };
     const size = sizeMap[spec.ratio] || "1024x1024";
     const res = await fetch("https://api.openai.com/v1/images/generations", {
       method: "POST",
       headers: { "Content-Type":"application/json", "Authorization":`Bearer ${apiKeys["openai"]}` },
-      body: JSON.stringify({ model:"dall-e-3", prompt, n:1, size, quality:"standard" }),
+      body: JSON.stringify({ model:"gpt-image-1", prompt, n:1, size, quality:"medium" }),
     });
     const data = await res.json();
-    if (data.error) throw new Error(`DALL-E error: ${data.error.message}`);
-    // Return the URL directly (expires after 1 hour)
-    return data.data?.[0]?.url || "";
+    if (data.error) throw new Error(`OpenAI image error: ${data.error.message}`);
+    // gpt-image-1 returns base64 JSON
+    const b64 = data.data?.[0]?.b64_json;
+    if (!b64) throw new Error("OpenAI returned no image data.");
+    const byteStr = atob(b64);
+    const bytes = new Uint8Array(byteStr.length);
+    for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+    const blob = new Blob([bytes], { type:"image/png" });
+    return URL.createObjectURL(blob);
   }
 
   if (provider === "gemini-image") {
