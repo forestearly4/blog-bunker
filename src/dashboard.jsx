@@ -1973,13 +1973,15 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
 
       // Push to Wix
       if (schedule.publishToWix && wixConnected) {
-        setLoadMsg("Publishing to Wix…");
+        setLoadMsg("Creating draft on Wix…");
         const wixCfg = loadWixConfig();
         const body = buildWixPostBody(finalPost);
-        const res = await wixFetch("/v3/posts", "POST", body, wixCfg);
-        const wixId = res?.post?.id;
+        // Create as draft first, then publish
+        const res = await wixFetch("/v3/draft-posts", "POST", body, wixCfg);
+        const wixId = res?.draftPost?.id;
         if (wixId && schedule.status === "published") {
-          await wixFetch(`/v3/posts/${wixId}/publish`, "POST", {}, wixCfg);
+          setLoadMsg("Publishing to Wix…");
+          await wixFetch(`/v3/draft-posts/${wixId}/publish`, "POST", {}, wixCfg);
         }
       }
 
@@ -2748,12 +2750,10 @@ function textToWixContent(text) {
 function buildWixPostBody(form, existingWixId = null) {
   const richContent = textToWixContent(form.body);
   return {
-    post: {
-      ...(existingWixId ? {} : {}),
+    draftPost: {
       title: form.title,
       richContent,
       excerpt: form.body.slice(0, 200).replace(/[#*]/g, "").trim(),
-      membersOnly: false,
     }
   };
 }
@@ -2794,24 +2794,24 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
       const body = buildWixPostBody(form, post?.wixId);
 
       if (post?.wixId) {
-        // Update existing Wix post
-        setWixStatus("Updating post on Wix…");
-        await wixFetch(`/v3/posts/${post.wixId}`, "PATCH", body, wixCfg);
+        // Update existing draft post on Wix
+        setWixStatus("Updating on Wix…");
+        await wixFetch(`/v3/draft-posts/${post.wixId}`, "PATCH", body, wixCfg);
         if (!asDraft) {
           setWixStatus("Publishing…");
-          await wixFetch(`/v3/posts/${post.wixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/v3/draft-posts/${post.wixId}/publish`, "POST", {}, wixCfg);
         }
         setWixStatus(asDraft ? "✓ Updated as draft on Wix" : "✓ Published to Wix!");
       } else {
-        // Create new Wix post
-        setWixStatus("Creating post on Wix…");
-        const res = await wixFetch("/v3/posts", "POST", body, wixCfg);
-        const newWixId = res?.post?.id;
-        if (!newWixId) throw new Error("Wix didn't return a post ID");
+        // Create new draft post on Wix, then optionally publish
+        setWixStatus("Creating draft on Wix…");
+        const res = await wixFetch("/v3/draft-posts", "POST", body, wixCfg);
+        const newWixId = res?.draftPost?.id;
+        if (!newWixId) throw new Error(`Wix didn't return a post ID. Response: ${JSON.stringify(res).slice(0,200)}`);
 
         if (!asDraft) {
           setWixStatus("Publishing…");
-          await wixFetch(`/v3/posts/${newWixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/v3/draft-posts/${newWixId}/publish`, "POST", {}, wixCfg);
         }
 
         // Save wixId back to the post
