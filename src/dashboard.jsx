@@ -1976,10 +1976,10 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
         setLoadMsg("Publishing to Wix…");
         const wixCfg = loadWixConfig();
         const body = buildWixPostBody(finalPost);
-        const res = await wixFetch("/blog/v3/posts", "POST", body, wixCfg);
+        const res = await wixFetch("/v3/posts", "POST", body, wixCfg);
         const wixId = res?.post?.id;
         if (wixId && schedule.status === "published") {
-          await wixFetch(`/blog/v3/posts/${wixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/v3/posts/${wixId}/publish`, "POST", {}, wixCfg);
         }
       }
 
@@ -2796,22 +2796,22 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
       if (post?.wixId) {
         // Update existing Wix post
         setWixStatus("Updating post on Wix…");
-        await wixFetch(`/blog/v3/posts/${post.wixId}`, "PATCH", body, wixCfg);
+        await wixFetch(`/v3/posts/${post.wixId}`, "PATCH", body, wixCfg);
         if (!asDraft) {
           setWixStatus("Publishing…");
-          await wixFetch(`/blog/v3/posts/${post.wixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/v3/posts/${post.wixId}/publish`, "POST", {}, wixCfg);
         }
         setWixStatus(asDraft ? "✓ Updated as draft on Wix" : "✓ Published to Wix!");
       } else {
         // Create new Wix post
         setWixStatus("Creating post on Wix…");
-        const res = await wixFetch("/blog/v3/posts", "POST", body, wixCfg);
+        const res = await wixFetch("/v3/posts", "POST", body, wixCfg);
         const newWixId = res?.post?.id;
         if (!newWixId) throw new Error("Wix didn't return a post ID");
 
         if (!asDraft) {
           setWixStatus("Publishing…");
-          await wixFetch(`/blog/v3/posts/${newWixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/v3/posts/${newWixId}/publish`, "POST", {}, wixCfg);
         }
 
         // Save wixId back to the post
