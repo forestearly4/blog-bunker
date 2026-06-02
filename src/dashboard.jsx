@@ -258,51 +258,101 @@ function saveSocialConnections(data) {
   try { localStorage.setItem(SOCIAL_KEYS_STORAGE, JSON.stringify(data)); } catch {}
 }
 
-// ─── STABILITY AI IMAGE GENERATOR ────────────────────────────────────────────
+// ─── MULTI-PROVIDER IMAGE GENERATOR ──────────────────────────────────────────
 
-// Platform image specs for Stability AI
 const PLATFORM_IMAGE_SPECS = {
-  instagram: { w:1024, h:1024,  ratio:"1:1",   label:"Square (1:1)",        style:"cinematic lifestyle photography" },
-  facebook:  { w:1216, h:832,   ratio:"3:2",   label:"Landscape (3:2)",     style:"editorial photography"           },
-  tiktok:    { w:832,  h:1216,  ratio:"2:3",   label:"Portrait (2:3)",      style:"vibrant lifestyle photography"   },
-  reddit:    { w:1024, h:1024,  ratio:"1:1",   label:"Square (1:1)",        style:"documentary photography"         },
-  twitter:   { w:1216, h:832,   ratio:"16:9",  label:"Widescreen (16:9)",   style:"editorial photography"           },
+  instagram: { ratio:"1:1",  label:"Square (1:1)",     style:"cinematic lifestyle photography, golden hour"     },
+  facebook:  { ratio:"3:2",  label:"Landscape (3:2)",  style:"editorial photography, wide scene"                },
+  tiktok:    { ratio:"2:3",  label:"Portrait (2:3)",   style:"vibrant lifestyle photography, vertical"          },
+  reddit:    { ratio:"1:1",  label:"Square (1:1)",     style:"documentary photography, authentic"               },
+  twitter:   { ratio:"16:9", label:"Widescreen (16:9)",style:"editorial photography, wide cinematic"            },
 };
 
-async function generateStabilityImage(prompt, platId, apiKey) {
-  if (!apiKey) throw new Error("Stability AI API key required. Add it in Settings → API Keys.");
-  const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
-
-  // Use Stability AI's stable-image-core endpoint
-  const formData = new FormData();
-  formData.append("prompt", prompt);
-  formData.append("output_format", "webp");
-  formData.append("aspect_ratio", spec.ratio);
-
-  const res = await fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Accept": "image/*",
-    },
-    body: formData,
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.message || `Stability AI error: ${res.status}`);
-  }
-
-  const blob = await res.blob();
-  return URL.createObjectURL(blob);
+// Determine which image provider to use based on available keys
+function getImageProvider(apiKeys) {
+  if (apiKeys["stability"]) return "stability";
+  if (apiKeys["openai"])    return "dalle";
+  if (apiKeys["gemini"])    return "gemini-image";
+  return null;
 }
 
-// Generate an image prompt from the topic using the text AI
+function getImageProviderLabel(provider) {
+  return { stability:"Stability AI", dalle:"DALL-E 3", "gemini-image":"Gemini Image" }[provider] || "No image provider";
+}
+
+async function generateImage(prompt, platId, apiKeys) {
+  const provider = getImageProvider(apiKeys);
+  const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
+
+  if (!provider) {
+    throw new Error("No image provider connected. Add a Stability AI, OpenAI, or Gemini key in Settings → API Keys.");
+  }
+
+  if (provider === "stability") {
+    const formData = new FormData();
+    formData.append("prompt", prompt);
+    formData.append("output_format", "webp");
+    formData.append("aspect_ratio", spec.ratio);
+    const res = await fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKeys["stability"]}`, "Accept": "image/*" },
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.message || `Stability AI error: ${res.status}`);
+    }
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  }
+
+  if (provider === "dalle") {
+    // Map ratio to DALL-E size
+    const sizeMap = { "1:1":"1024x1024", "3:2":"1792x1024", "2:3":"1024x1792", "16:9":"1792x1024" };
+    const size = sizeMap[spec.ratio] || "1024x1024";
+    const res = await fetch("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "Authorization":`Bearer ${apiKeys["openai"]}` },
+      body: JSON.stringify({ model:"dall-e-3", prompt, n:1, size, quality:"standard" }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(`DALL-E error: ${data.error.message}`);
+    // Return the URL directly (expires after 1 hour)
+    return data.data?.[0]?.url || "";
+  }
+
+  if (provider === "gemini-image") {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent?key=${apiKeys["gemini"]}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
+          generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+        }),
+      }
+    );
+    const data = await res.json();
+    if (data.error) throw new Error(`Gemini Image error: ${data.error.message}`);
+    const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+    if (!part?.inlineData) throw new Error("Gemini Image returned no image data.");
+    const byteStr = atob(part.inlineData.data);
+    const bytes = new Uint8Array(byteStr.length);
+    for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+    const blob = new Blob([bytes], { type: part.inlineData.mimeType || "image/png" });
+    return URL.createObjectURL(blob);
+  }
+
+  throw new Error("Unknown image provider");
+}
+
+// Generate an image prompt via text AI
 async function generateImagePrompt(topic, platId, activeProvider, activeModel, apiKey) {
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
   const text = await callAI(
     activeProvider, activeModel,
-    `You generate Stable Diffusion image prompts for Cask & Stream — a fly fishing and whiskey lifestyle brand. Style: ${spec.style}, golden hour lighting, moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones. Format: a single prompt string, no explanation, no quotes, no labels. Make it photorealistic and evocative.`,
+    `You generate image prompts for Cask & Stream — a fly fishing and whiskey lifestyle brand. Style: ${spec.style}, moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones. Format: a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
     `Write an image prompt for a ${platId} post (${spec.label}) about: ${topic}`,
     apiKey
   );
@@ -312,52 +362,38 @@ async function generateImagePrompt(topic, platId, activeProvider, activeModel, a
 // ─── IMAGE PANEL (per platform) ───────────────────────────────────────────────
 
 function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platColor }) {
-  const [imgPrompt,   setImgPrompt]   = useState("");
-  const [imageUrl,    setImageUrl]    = useState(null);
-  const [genLoading,  setGenLoading]  = useState(false);
-  const [promptLoad,  setPromptLoad]  = useState(false);
-  const [error,       setError]       = useState("");
-  const [showPrompt,  setShowPrompt]  = useState(false);
+  const [imgPrompt,  setImgPrompt]  = useState("");
+  const [imageUrl,   setImageUrl]   = useState(null);
+  const [genLoading, setGenLoading] = useState(false);
+  const [promptLoad, setPromptLoad] = useState(false);
+  const [error,      setError]      = useState("");
+  const [showPrompt, setShowPrompt] = useState(false);
 
-  const hasStabilityKey = !!apiKeys["stability"];
-  const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
+  const provider    = getImageProvider(apiKeys);
+  const providerLabel = getImageProviderLabel(provider);
+  const spec        = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
+  const isLoading   = genLoading || promptLoad;
 
-  const generatePrompt = async () => {
-    if (!topic.trim()) return;
-    setPromptLoad(true); setError("");
-    try {
-      const p = await generateImagePrompt(topic, platId, activeProvider, activeModel, apiKeys[activeProvider]);
-      setImgPrompt(p);
-      setShowPrompt(true);
-    } catch(e) { setError(e.message); }
-    setPromptLoad(false);
-  };
-
-  const generateImage = async () => {
-    if (!imgPrompt.trim()) return;
+  const runGenerate = async (prompt) => {
     setGenLoading(true); setError(""); setImageUrl(null);
     try {
-      const url = await generateStabilityImage(imgPrompt, platId, apiKeys["stability"]);
+      const url = await generateImage(prompt, platId, apiKeys);
       setImageUrl(url);
     } catch(e) { setError(e.message); }
     setGenLoading(false);
   };
 
   const handleGenerate = async () => {
+    setError("");
     if (!imgPrompt) {
-      // auto-generate prompt then image
-      setPromptLoad(true); setError("");
+      setPromptLoad(true);
       try {
         const p = await generateImagePrompt(topic, platId, activeProvider, activeModel, apiKeys[activeProvider]);
-        setImgPrompt(p);
-        setPromptLoad(false);
-        setGenLoading(true);
-        const url = await generateStabilityImage(p, platId, apiKeys["stability"]);
-        setImageUrl(url);
-      } catch(e) { setError(e.message); }
-      setPromptLoad(false); setGenLoading(false);
+        setImgPrompt(p); setPromptLoad(false);
+        await runGenerate(p);
+      } catch(e) { setError(e.message); setPromptLoad(false); setGenLoading(false); }
     } else {
-      await generateImage();
+      await runGenerate(imgPrompt);
     }
   };
 
@@ -369,17 +405,19 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
     a.click();
   };
 
-  const isLoading = genLoading || promptLoad;
-
   return (
     <div style={{ marginTop:20, paddingTop:20, borderTop:"1px solid var(--border)" }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ fontSize:13, fontWeight:700 }}>▣ Image</span>
           <span style={{ fontSize:10, color:"var(--muted)", padding:"1px 7px", borderRadius:99, border:"1px solid var(--border)" }}>{spec.label}</span>
-          {!hasStabilityKey && (
+          {provider ? (
+            <span style={{ fontSize:10, color:"#5cba6c", padding:"1px 7px", borderRadius:99, background:"#5cba6c0a", border:"1px solid #5cba6c44" }}>
+              via {providerLabel}
+            </span>
+          ) : (
             <span style={{ fontSize:10, color:"var(--amber)", padding:"1px 7px", borderRadius:99, background:"var(--amber-glow)", border:"1px solid var(--amber)44" }}>
-              Add Stability AI key in Settings
+              Add Stability AI, OpenAI, or Gemini key
             </span>
           )}
         </div>
@@ -390,25 +428,20 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
               {showPrompt ? "Hide" : "Edit"} Prompt
             </button>
           )}
-          <button onClick={handleGenerate} disabled={isLoading || !topic.trim()}
-            style={{ padding:"5px 14px", borderRadius:6, border:"none", background:isLoading||!topic.trim()?"var(--bg-elevated)":"#7c3aed", color:isLoading||!topic.trim()?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:isLoading||!topic.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-            {isLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{promptLoad?"Writing prompt…":"Generating…"}</> : imageUrl ? "Regenerate" : "▣ Generate Image"}
+          <button onClick={handleGenerate} disabled={isLoading || !topic.trim() || !provider}
+            style={{ padding:"5px 14px", borderRadius:6, border:"none", background:isLoading||!topic.trim()||!provider?"var(--bg-elevated)":"#7c3aed", color:isLoading||!topic.trim()||!provider?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:isLoading||!topic.trim()||!provider?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            {isLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{promptLoad?"Writing prompt…":"Generating…"}</> : imageUrl ? "↻ Regenerate" : "▣ Generate Image"}
           </button>
         </div>
       </div>
 
-      {/* Editable prompt */}
       {showPrompt && imgPrompt && (
         <div style={{ marginBottom:12 }}>
-          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>Image Prompt (editable)</div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>Prompt (editable)</div>
           <div style={{ display:"flex", gap:8 }}>
-            <textarea
-              value={imgPrompt}
-              onChange={e=>setImgPrompt(e.target.value)}
-              rows={2}
-              style={{ flex:1, padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", resize:"vertical", lineHeight:1.5 }}
-            />
-            <button onClick={generateImage} disabled={genLoading}
+            <textarea value={imgPrompt} onChange={e=>setImgPrompt(e.target.value)} rows={2}
+              style={{ flex:1, padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", resize:"vertical", lineHeight:1.5 }} />
+            <button onClick={()=>runGenerate(imgPrompt)} disabled={genLoading}
               style={{ padding:"8px 14px", borderRadius:8, border:"none", background:"#7c3aed", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start", whiteSpace:"nowrap" }}>
               {genLoading ? "…" : "Run →"}
             </button>
@@ -418,7 +451,6 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
 
       {error && <div style={{ fontSize:12, color:"var(--red)", marginBottom:10, padding:"6px 10px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>}
 
-      {/* Image output */}
       {imageUrl ? (
         <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:`1px solid ${platColor}33` }}>
           <img src={imageUrl} alt="Generated" style={{ width:"100%", display:"block", borderRadius:10 }} />
@@ -437,7 +469,9 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
         !isLoading && (
           <div style={{ height:120, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:8 }}>
             <span style={{ fontSize:28, opacity:0.3 }}>▣</span>
-            <span style={{ fontSize:11, color:"var(--muted)" }}>Click Generate Image to create a {spec.label} image</span>
+            <span style={{ fontSize:11, color:"var(--muted)" }}>
+              {provider ? `Click Generate Image — ${providerLabel} will create a ${spec.label} image` : "Add an image provider key in Settings → API Keys"}
+            </span>
           </div>
         )
       )}
@@ -445,7 +479,7 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
       {isLoading && !imageUrl && (
         <div style={{ height:120, borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", gap:12 }}>
           <span style={{ animation:"spin 1s linear infinite", display:"inline-block", fontSize:20, opacity:0.5 }}>◌</span>
-          <span style={{ fontSize:12, color:"var(--muted)" }}>{promptLoad ? "Writing image prompt…" : "Generating image with Stability AI…"}</span>
+          <span style={{ fontSize:12, color:"var(--muted)" }}>{promptLoad ? "Writing image prompt…" : `Generating with ${providerLabel}…`}</span>
         </div>
       )}
     </div>
@@ -465,7 +499,6 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark }) {
   const [activePlat,  setActivePlat]  = useState("instagram");
 
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
-  const hasStability = !!apiKeys["stability"];
 
   const generate = async () => {
     if (!input.trim()) return;
@@ -514,10 +547,10 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark }) {
               </button>
             ))}
           </div>
-          {/* Stability AI status badge */}
-          <div style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 12px", borderRadius:99, border:`1px solid ${hasStability?"#7c3aed44":"var(--border)"}`, background:hasStability?"#7c3aed0a":"transparent", fontSize:11, color:hasStability?"#a78bfa":"var(--muted)" }}>
+          {/* Image provider status badge */}
+          <div style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 12px", borderRadius:99, border:`1px solid ${getImageProvider(apiKeys)?"#7c3aed44":"var(--border)"}`, background:getImageProvider(apiKeys)?"#7c3aed0a":"transparent", fontSize:11, color:getImageProvider(apiKeys)?"#a78bfa":"var(--muted)" }}>
             <span>▣</span>
-            {hasStability ? "Stability AI connected — images ready" : "Add Stability AI key for images"}
+            {getImageProvider(apiKeys) ? `${getImageProviderLabel(getImageProvider(apiKeys))} — images ready` : "Add Stability AI, OpenAI or Gemini key for images"}
           </div>
         </div>
 
@@ -1871,12 +1904,12 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   };
 
   const generateSocialImage = async (platId) => {
-    const hasStability = !!apiKeys["stability"];
-    if (!hasStability) { setError("Add Stability AI key in Settings → API Keys for image generation."); return; }
-    setLoading(true); setLoadMsg(`Generating ${platId} image…`); setError("");
+    const provider = getImageProvider(apiKeys);
+    if (!provider) { setError("Add a Stability AI, OpenAI, or Gemini key in Settings → API Keys for image generation."); return; }
+    setLoading(true); setLoadMsg(`Generating ${platId} image via ${getImageProviderLabel(provider)}…`); setError("");
     try {
       const prompt = await generateImagePrompt(draft.topic || brief.topic || draft.title, platId, activeProvider, activeModel, apiKeys[activeProvider]);
-      const url = await generateStabilityImage(prompt, platId, apiKeys["stability"]);
+      const url = await generateImage(prompt, platId, apiKeys);
       setSocial(s => ({ ...s, images: { ...s.images, [platId]: url } }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
