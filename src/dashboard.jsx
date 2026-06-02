@@ -1769,23 +1769,36 @@ function PipelineProgress({ stage, setStage, completed }) {
   );
 }
 
+const PIPELINE_STORAGE = "bb_pipeline_draft";
+
+function loadPipelineDraft() {
+  try { return JSON.parse(localStorage.getItem(PIPELINE_STORAGE) || "null"); } catch { return null; }
+}
+function savePipelineDraft(data) {
+  try { localStorage.setItem(PIPELINE_STORAGE, JSON.stringify(data)); } catch {}
+}
+function clearPipelineDraft() {
+  try { localStorage.removeItem(PIPELINE_STORAGE); } catch {}
+}
+
 function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange }) {
-  const [stage,     setStage]    = useState("brief");
-  const [completed, setCompleted]= useState([]);
+  const saved = loadPipelineDraft();
+  const [stage,     setStage]    = useState(saved?.stage     || "brief");
+  const [completed, setCompleted]= useState(saved?.completed || []);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
 
-  // Shared pipeline state
-  const [brief, setBrief] = useState({
+  // Shared pipeline state — restored from localStorage if available
+  const [brief, setBrief] = useState(saved?.brief || {
     topic: "", angle: "", audience: "fly fishing and whiskey enthusiasts", keywords: "", inspiration: null,
   });
-  const [draft, setDraft] = useState({
+  const [draft, setDraft] = useState(saved?.draft || {
     title: "", body: "", category: "Culture", tone: "literary",
   });
-  const [enhance, setEnhance] = useState({
+  const [enhance, setEnhance] = useState(saved?.enhance || {
     metaTitle: "", metaDescription: "", primaryKeyword: "", suggestions: [], headlines: [], improved: "",
   });
-  const [social, setSocial] = useState({ posts: {}, images: {} });
-  const [schedule, setSchedule] = useState({
+  const [social, setSocial] = useState(saved?.social || { posts: {}, images: {} });
+  const [schedule, setSchedule] = useState(saved?.schedule || {
     publishDate: new Date(Date.now() + 86400000).toISOString().split("T")[0],
     publishTime: "09:00",
     publishToWix: wixConnected,
@@ -1797,6 +1810,15 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const [loadMsg, setLoadMsg]   = useState("");
   const [error,   setError]     = useState("");
   const [success, setSuccess]   = useState("");
+  const [savedAt, setSavedAt]   = useState(saved?.savedAt || null);
+
+  // Auto-save pipeline state to localStorage whenever it changes
+  useEffect(() => {
+    if (!brief.topic && !draft.title) return; // don't save empty state
+    const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, savedAt: new Date().toISOString() };
+    savePipelineDraft(data);
+    setSavedAt(data.savedAt);
+  }, [stage, completed, brief, draft, enhance, social.posts, schedule]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
   const advanceTo = (next) => { setStage(next); setError(""); setSuccess(""); };
@@ -1955,13 +1977,15 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       }
 
       markDone("publish");
+      clearPipelineDraft();
       setSuccess(`✓ Post ${schedule.status === "published" ? "published" : "scheduled"} successfully!${schedule.publishToWix && wixConnected ? " Live on caskandstream.com." : ""}`);
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
 
   const resetPipeline = () => {
-    setStage("brief"); setCompleted([]); setError(""); setSuccess("");
+    clearPipelineDraft();
+    setStage("brief"); setCompleted([]); setError(""); setSuccess(""); setSavedAt(null);
     setBrief({ topic:"", angle:"", audience:"fly fishing and whiskey enthusiasts", keywords:"", inspiration:null });
     setDraft({ title:"", body:"", category:"Culture", tone:"literary" });
     setEnhance({ metaTitle:"", metaDescription:"", primaryKeyword:"", suggestions:[], headlines:[], improved:"" });
@@ -1976,9 +2000,12 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
         <div>
           <h2 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, margin:"0 0 4px" }}>Content Pipeline</h2>
-          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>From idea to published — one seamless workflow.</p>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>
+            From idea to published — one seamless workflow.
+            {savedAt && <span style={{ color:"var(--green)", marginLeft:8, fontSize:11 }}>✓ Draft auto-saved {new Date(savedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</span>}
+          </p>
         </div>
-        {completed.length > 0 && (
+        {(completed.length > 0 || brief.topic) && (
           <button onClick={resetPipeline} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>↺ New Post</button>
         )}
       </div>
@@ -2401,6 +2428,245 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
         })}
       </div>
       <p style={{fontSize:11,color:"var(--muted)",marginTop:10}}>Click a day to add an event · Click an event to remove it</p>
+    </div>
+  );
+}
+
+// ─── GOOGLE SEARCH CONSOLE INTEGRATION ───────────────────────────────────────
+
+const GSC_STORAGE = "bb_gsc_config";
+const GSC_DATA_STORAGE = "bb_gsc_data";
+
+function loadGSCConfig() { try { return JSON.parse(localStorage.getItem(GSC_STORAGE) || "{}"); } catch { return {}; } }
+function saveGSCConfig(d) { try { localStorage.setItem(GSC_STORAGE, JSON.stringify(d)); } catch {} }
+function loadGSCData()   { try { return JSON.parse(localStorage.getItem(GSC_DATA_STORAGE) || "null"); } catch { return null; } }
+function saveGSCData(d)  { try { localStorage.setItem(GSC_DATA_STORAGE, JSON.stringify(d)); } catch {} }
+
+// Fetch GSC data via the Netlify edge function (CORS proxy)
+async function fetchGSCData(accessToken, siteUrl, days = 28) {
+  const endDate   = new Date().toISOString().split("T")[0];
+  const startDate = new Date(Date.now() - days * 86400000).toISOString().split("T")[0];
+
+  const body = {
+    startDate,
+    endDate,
+    dimensions: ["query", "page"],
+    rowLimit: 100,
+    startRow: 0,
+  };
+
+  const res = await fetch(
+    `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `GSC error ${res.status}`);
+  }
+
+  return await res.json();
+}
+
+function GSCPanel({ onDataLoaded }) {
+  const [cfg,       setCfg]       = useState(loadGSCConfig);
+  const [token,     setToken]     = useState(cfg.accessToken || "");
+  const [siteUrl,   setSiteUrl]   = useState(cfg.siteUrl || "https://caskandstream.com/");
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState("");
+  const [lastFetch, setLastFetch] = useState(cfg.lastFetch || null);
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
+
+  const fetchData = async () => {
+    if (!token.trim() || !siteUrl.trim()) return;
+    setLoading(true); setError("");
+    try {
+      const raw   = await fetchGSCData(token.trim(), siteUrl.trim());
+      const rows  = raw.rows || [];
+
+      // Aggregate by query
+      const queryMap = {};
+      const pageMap  = {};
+      let totalClicks = 0, totalImpressions = 0;
+
+      for (const row of rows) {
+        const [query, page] = row.keys;
+        totalClicks      += row.clicks;
+        totalImpressions += row.impressions;
+
+        if (!queryMap[query]) queryMap[query] = { query, clicks:0, impressions:0, ctr:0, position:0, count:0 };
+        queryMap[query].clicks      += row.clicks;
+        queryMap[query].impressions += row.impressions;
+        queryMap[query].position    += row.position;
+        queryMap[query].count++;
+
+        if (!pageMap[page]) pageMap[page] = { page, clicks:0, impressions:0 };
+        pageMap[page].clicks      += row.clicks;
+        pageMap[page].impressions += row.impressions;
+      }
+
+      const keywords = Object.values(queryMap)
+        .map(k => ({ ...k, ctr: k.impressions > 0 ? k.clicks/k.impressions*100 : 0, position: k.count > 0 ? k.position/k.count : 0 }))
+        .sort((a,b) => b.clicks - a.clicks)
+        .slice(0, 20);
+
+      const topPages = Object.values(pageMap)
+        .sort((a,b) => b.clicks - a.clicks)
+        .slice(0, 10);
+
+      const data = { keywords, topPages, totalClicks, totalImpressions, fetchedAt: new Date().toISOString(), siteUrl, days:28 };
+      saveGSCData(data);
+      const newCfg = { accessToken: token.trim(), siteUrl: siteUrl.trim(), lastFetch: data.fetchedAt };
+      saveGSCConfig(newCfg);
+      setCfg(newCfg);
+      setLastFetch(data.fetchedAt);
+      onDataLoaded(data);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div>
+        <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Google Search Console</h3>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+          Connect to see real keyword rankings, clicks, and impressions for caskandstream.com.
+        </p>
+      </div>
+
+      {lastFetch && (
+        <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c0a", border:"1px solid #5cba6c44", fontSize:12, color:"#5cba6c" }}>
+          ✓ Last synced: {new Date(lastFetch).toLocaleString()}
+        </div>
+      )}
+
+      <div>
+        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+          Access Token
+        </label>
+        <input type="password" style={iS} placeholder="Paste your Google OAuth access token…" value={token} onChange={e=>setToken(e.target.value)}
+          onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        <div style={{ marginTop:8, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
+          <strong style={{color:"var(--text)"}}>How to get your token:</strong><br/>
+          1. Go to <a href="https://developers.google.com/oauthplayground" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>Google OAuth Playground</a><br/>
+          2. In Step 1, find and select <strong style={{color:"var(--text)"}}>Search Console API v3</strong> → check <code>https://www.googleapis.com/auth/webmasters.readonly</code><br/>
+          3. Click <strong style={{color:"var(--text)"}}>Authorize APIs</strong> → sign in with your Google account<br/>
+          4. Click <strong style={{color:"var(--text)"}}>Exchange authorization code for tokens</strong><br/>
+          5. Copy the <strong style={{color:"var(--text)"}}>Access token</strong> and paste it above<br/>
+          <span style={{color:"var(--amber)"}}>⚠ Tokens expire after 1 hour — re-fetch when needed.</span>
+        </div>
+      </div>
+
+      <div>
+        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+          Site URL (exactly as it appears in Search Console)
+        </label>
+        <input style={iS} placeholder="https://caskandstream.com/" value={siteUrl} onChange={e=>setSiteUrl(e.target.value)}
+          onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        <p style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>Must match exactly — try both with and without trailing slash if it fails.</p>
+      </div>
+
+      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+        <button onClick={fetchData} disabled={!token.trim() || !siteUrl.trim() || loading}
+          style={{ padding:"10px 24px", borderRadius:8, border:"none", background:token.trim()&&siteUrl.trim()&&!loading?"var(--amber)":"var(--bg-elevated)", color:token.trim()&&siteUrl.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:token.trim()&&siteUrl.trim()&&!loading?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Fetching…</> : "↓ Fetch Analytics Data"}
+        </button>
+        {error && <span style={{ fontSize:12, color:"var(--red)" }}>{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+function GSCAnalyticsView({ data, onRefresh }) {
+  if (!data) return (
+    <div style={{ textAlign:"center", padding:"40px 20px", color:"var(--muted)", fontSize:13 }}>
+      <div style={{ fontSize:32, marginBottom:12 }}>◎</div>
+      No Search Console data yet. Go to <strong style={{color:"var(--text)"}}>Settings → API Keys → Search Console</strong> to connect and fetch data.
+    </div>
+  );
+
+  const { keywords, topPages, totalClicks, totalImpressions, fetchedAt, days } = data;
+  const avgCTR = totalImpressions > 0 ? (totalClicks / totalImpressions * 100).toFixed(1) : "0";
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Summary cards */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:16 }}>
+        {[
+          { label:"Total Clicks",       value:totalClicks.toLocaleString(),       sub:`Last ${days} days` },
+          { label:"Total Impressions",  value:totalImpressions.toLocaleString(),  sub:"Search appearances" },
+          { label:"Avg CTR",            value:`${avgCTR}%`,                        sub:"Click-through rate" },
+        ].map(s => (
+          <div key={s.label} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>{s.label}</div>
+            <div style={{ fontFamily:"var(--font-display)", fontSize:28, fontWeight:700 }}>{s.value}</div>
+            <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:4 }}>{s.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+        {/* Top Keywords */}
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Top Keywords</div>
+          <table style={{ width:"100%", borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ borderBottom:"1px solid var(--border)" }}>
+                {["Query","Clicks","Impr.","Pos."].map(h=>(
+                  <th key={h} style={{ textAlign:"left", padding:"6px 8px", fontSize:9, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {keywords.slice(0,12).map((k,i) => (
+                <tr key={i} style={{ borderBottom:"1px solid var(--border)11" }}>
+                  <td style={{ padding:"8px 8px", fontSize:12, maxWidth:160, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{k.query}</td>
+                  <td style={{ padding:"8px 8px", fontSize:12, fontWeight:700, color:"var(--amber)", fontVariantNumeric:"tabular-nums" }}>{k.clicks}</td>
+                  <td style={{ padding:"8px 8px", fontSize:12, color:"var(--text-secondary)", fontVariantNumeric:"tabular-nums" }}>{k.impressions}</td>
+                  <td style={{ padding:"8px 8px", fontSize:12, color:"var(--text-secondary)", fontVariantNumeric:"tabular-nums" }}>{k.position.toFixed(1)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Top Pages */}
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Top Pages by Clicks</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {topPages.slice(0,8).map((p,i) => {
+              const maxClicks = topPages[0]?.clicks || 1;
+              const slug = p.page.replace(/https?:\/\/[^/]+/, "").replace(/\/$/, "") || "/";
+              return (
+                <div key={i}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:4 }}>
+                    <span style={{ fontSize:11, color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"75%" }}>{slug || "/"}</span>
+                    <span style={{ fontSize:12, fontWeight:700, color:"var(--amber)", flexShrink:0, marginLeft:8 }}>{p.clicks}</span>
+                  </div>
+                  <div style={{ height:4, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
+                    <div style={{ height:"100%", width:`${(p.clicks/maxClicks)*100}%`, background:"var(--amber)", borderRadius:99, transition:"width 0.5s" }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:11, color:"var(--muted)", padding:"8px 0" }}>
+        <span>Data from Google Search Console · Last {days} days · Fetched {new Date(fetchedAt).toLocaleString()}</span>
+        <button onClick={onRefresh} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--amber)", fontSize:11, fontFamily:"'DM Sans',sans-serif" }}>
+          ↓ Refresh Data
+        </button>
+      </div>
     </div>
   );
 }
@@ -2846,6 +3112,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const saveCalEvent = (ev) => setCalEvents(all => [...all, ev]);
   const deleteCalEvent = (idx) => setCalEvents(all => all.filter((_, i) => i !== idx));
 
+  const [gscData, setGscData] = useState(loadGSCData);
   const [wixConnected, setWixConnected] = useState(() => !!loadWixConfig().connected);
 
   const handleWixSync = (wixPosts) => {
@@ -2931,12 +3198,13 @@ export default function Dashboard({ user, workspace, onLogout }) {
   ];
 
   const SETTINGS_SECTIONS = [
-    { id:"general",  label:"General"          },
-    { id:"apikeys",  label:"API Keys"         },
-    { id:"social",   label:"Social Media"     },
-    { id:"wix",      label:"Wix Integration"  },
-    { id:"billing",  label:"Billing & Plan"   },
-    { id:"account",  label:"Account"          },
+    { id:"general",  label:"General"             },
+    { id:"apikeys",  label:"API Keys"            },
+    { id:"gsc",      label:"Search Console"      },
+    { id:"social",   label:"Social Media"        },
+    { id:"wix",      label:"Wix Integration"     },
+    { id:"billing",  label:"Billing & Plan"      },
+    { id:"account",  label:"Account"             },
   ];
 
   return (
@@ -3112,7 +3380,8 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   </div>
                 ))}
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16}}>
+
+              <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16,marginBottom:24}}>
                 <div style={card}>
                   <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:16}}>Weekly Traffic</div>
                   <BarChart data={DEFAULT_ANALYTICS.weeklyViews} labels={DEFAULT_ANALYTICS.weekLabels} color={dark?"#d4a054":"#b8862e"}/>
@@ -3127,6 +3396,18 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   ))}
                 </div>
               </div>
+
+              {/* Google Search Console */}
+              <div style={{marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                <div style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700}}>Search Console</div>
+                {!gscData && (
+                  <button onClick={()=>{setActiveTab("settings");setSettingsSection("gsc");}}
+                    style={{padding:"6px 14px",borderRadius:7,border:"1px solid var(--amber)44",background:"var(--amber-glow)",color:"var(--amber)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)"}}>
+                    Connect Search Console →
+                  </button>
+                )}
+              </div>
+              <GSCAnalyticsView data={gscData} onRefresh={()=>{setActiveTab("settings");setSettingsSection("gsc");}} />
             </div>
           )}
 
@@ -3333,6 +3614,10 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
                 {settingsSection==="apikeys"&&(
                   <APIKeysSettings apiKeys={apiKeys} onSave={setApiKeys}/>
+                )}
+
+                {settingsSection==="gsc"&&(
+                  <GSCPanel onDataLoaded={(data)=>{ setGscData(data); saveGSCData(data); }} />
                 )}
 
                 {settingsSection==="social"&&(
