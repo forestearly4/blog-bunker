@@ -1323,8 +1323,28 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
     onDisconnect();
   };
 
-  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
-  const isConnected = status === "connected" || cfg.connected;
+  const fetchMemberId = async () => {
+    setTesting(true);
+    addLog("Looking up your Wix site member ID…");
+    try {
+      // Try contacts/members API to find the site owner's member ID
+      const res = await wixFetch("/members/v1/members?fieldsets=FULL&paging.limit=10", "GET", null, { apiKey, siteId });
+      addLog(`Members response: ${JSON.stringify(res).slice(0, 400)}`, "info");
+      const members = res.members || res.items || [];
+      if (members.length > 0) {
+        addLog(`Found ${members.length} members. First: ${JSON.stringify(members[0]).slice(0,200)}`, "info");
+      }
+    } catch(e) {
+      // Try alternative endpoint
+      try {
+        const res2 = await wixFetch("/site-members/v1/members?paging.limit=5", "GET", null, { apiKey, siteId });
+        addLog(`Alt members: ${JSON.stringify(res2).slice(0,400)}`, "info");
+      } catch(e2) {
+        addLog(`Members lookup failed: ${e2.message}`, "error");
+      }
+    }
+    setTesting(false);
+  };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
@@ -1386,7 +1406,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       </details>
 
       {/* Actions */}
-      <div style={{ display:"flex", gap:10 }}>
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
         <button onClick={testConnection} disabled={testing}
           style={{ padding:"10px 20px", borderRadius:8, border:"none", background:!testing?"var(--amber)":"var(--bg-elevated)", color:!testing?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:!testing?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
           {testing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Testing…</> : "Test Connection"}
@@ -1395,6 +1415,12 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
           <button onClick={pullPosts} disabled={syncing}
             style={{ padding:"10px 20px", borderRadius:8, border:"none", background:syncing?"var(--bg-elevated)":"#5cba6c", color:syncing?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:syncing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
             {syncing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Syncing…</> : "↓ Pull Posts from Wix"}
+          </button>
+        )}
+        {isConnected && (
+          <button onClick={fetchMemberId} disabled={testing}
+            style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:testing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+            🔍 Lookup Member ID
           </button>
         )}
       </div>
