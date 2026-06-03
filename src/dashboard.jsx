@@ -1212,6 +1212,7 @@ async function wixFetch(endpoint, method = "GET", data = null, cfg = {}) {
 function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const [cfg,       setCfg]      = useState(loadWixConfig);
   const [status,    setStatus]   = useState(cfg.connected ? "connected" : "idle");
+  const isConnected = status === "connected" || !!cfg.connected;
   const [syncing,   setSyncing]  = useState(false);
   const [testing,   setTesting]  = useState(false);
   const [log,       setLog]      = useState([]);
