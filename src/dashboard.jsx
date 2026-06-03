@@ -1219,9 +1219,9 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const [log,       setLog]      = useState([]);
   const [lastSync,  setLastSync] = useState(cfg.lastSync || null);
   const [pullCount, setPullCount]= useState(cfg.pullCount || 0);
-  // Fallback fields shown only if env vars aren't set
   const [apiKey,    setApiKey]   = useState(cfg.apiKey || "");
   const [siteId,    setSiteId]   = useState(cfg.siteId || "");
+  const [memberId,  setMemberId] = useState(cfg.memberId || "");
   const [showKey,   setShowKey]  = useState(false);
 
   const addLog = (msg, type="info") => setLog(l => [...l, { msg, type, ts: new Date().toLocaleTimeString() }]);
@@ -1244,7 +1244,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
         addLog(`Trying ${ep}…`);
         const data = await wixFetch(ep, "GET", null, { apiKey, siteId });
         if (data.posts !== undefined || data.items !== undefined || Array.isArray(data)) {
-          const newCfg = { connected: true, lastSync: null, pullCount: 0, apiKey, siteId, workingEndpoint: ep };
+          const newCfg = { connected: true, lastSync: null, pullCount: 0, apiKey, siteId, memberId, workingEndpoint: ep };
           saveWixConfig(newCfg);
           setCfg(newCfg);
           setStatus("connected");
@@ -1285,7 +1285,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       addLog(`Found ${allPosts.length} posts on Wix`);
       const mapped = allPosts.map(mapWixPost);
       const now = new Date().toISOString();
-      const newCfg = { connected: true, lastSync: now, pullCount: mapped.length, apiKey, siteId };
+      const newCfg = { connected: true, lastSync: now, pullCount: mapped.length, apiKey, siteId, memberId };
       saveWixConfig(newCfg);
       setCfg(newCfg);
       setLastSync(now);
@@ -1301,10 +1301,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const disconnect = () => {
     saveWixConfig({});
     setCfg({});
-    setStatus("idle");
-    setLog([]);
-    setLastSync(null);
-    setPullCount(0);
+    setApiKey(""); setSiteId(""); setMemberId("");
+    setStatus("idle"); setLog([]); setLastSync(null); setPullCount(0);
     onDisconnect();
   };
 
@@ -1355,6 +1353,15 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
           <div>
             <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Wix Site ID Override</label>
             <input style={{...iS, fontFamily:"monospace"}} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value={siteId} onChange={e=>setSiteId(e.target.value)} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+              Wix Member ID <span style={{ fontWeight:400, color:"var(--muted)", textTransform:"none", letterSpacing:0 }}>— required to create/publish posts</span>
+            </label>
+            <input style={{...iS, fontFamily:"monospace"}} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value={memberId} onChange={e=>setMemberId(e.target.value)} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            <p style={{ fontSize:11, color:"var(--text-secondary)", marginTop:5, lineHeight:1.5 }}>
+              Wix Dashboard → Contacts → Members → click your name → copy the ID from the URL bar
+            </p>
           </div>
         </div>
       </details>
@@ -1975,7 +1982,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       if (schedule.publishToWix && wixConnected) {
         setLoadMsg("Creating draft on Wix…");
         const wixCfg = loadWixConfig();
-        const body = buildWixPostBody(finalPost);
+        const body = buildWixPostBody(finalPost, wixCfg.memberId || "");
         // Create as draft first, then publish
         const res = await wixFetch("/blog/v3/draft-posts", "POST", body, wixCfg);
         const wixId = res?.draftPost?.id;
@@ -2747,13 +2754,14 @@ function textToWixContent(text) {
 }
 
 // Build the Wix create/update post body
-function buildWixPostBody(form, existingWixId = null) {
+function buildWixPostBody(form, memberId = "") {
   const richContent = textToWixContent(form.body);
   return {
     draftPost: {
       title: form.title,
       richContent,
       excerpt: form.body.slice(0, 200).replace(/[#*]/g, "").trim(),
+      ...(memberId ? { memberId } : {}),
     }
   };
 }
@@ -2791,7 +2799,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
     const wixCfg = loadWixConfig();
 
     try {
-      const body = buildWixPostBody(form, post?.wixId);
+      const body = buildWixPostBody(form, wixCfg.memberId || "");
 
       if (post?.wixId) {
         // Update existing draft post on Wix
