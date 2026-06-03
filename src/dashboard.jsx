@@ -1249,6 +1249,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
           setCfg(newCfg);
           setStatus("connected");
           addLog(`✓ Connected! Working endpoint: ${ep}`, "success");
+          if (!memberId) addLog("⚠ Pull your posts now to auto-detect your Wix Member ID for publishing.", "info");
+          else addLog(`✓ Member ID set: ${memberId.slice(0,8)}…`, "success");
           setTesting(false);
           return;
         } else {
@@ -1283,6 +1285,14 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       } while (cursor && page < 10);
 
       addLog(`Found ${allPosts.length} posts on Wix`);
+      // Extract memberId from first post to use for publishing
+      const extractedMemberId = allPosts[0]?.memberId || allPosts[0]?.blogPost?.memberId || "";
+      if (extractedMemberId && !cfg.memberId) {
+        addLog(`✓ Found your Wix Member ID: ${extractedMemberId}`);
+        const newCfgWithMember = { ...cfg, memberId: extractedMemberId };
+        saveWixConfig(newCfgWithMember);
+        setCfg(newCfgWithMember);
+      }
       const mapped = allPosts.map(mapWixPost);
       const now = new Date().toISOString();
       const newCfg = { connected: true, lastSync: now, pullCount: mapped.length, apiKey, siteId, memberId };
@@ -1332,6 +1342,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
             <div style={{ fontWeight:600, fontSize:14 }}>{isConnected ? "Wix Blog Connected" : "Not Connected"}</div>
             {lastSync && <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>Last sync: {new Date(lastSync).toLocaleString()}</div>}
             {isConnected && pullCount > 0 && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>{pullCount} posts pulled</div>}
+            {isConnected && cfg.memberId && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>✓ Member ID detected — ready to publish</div>}
+            {isConnected && !cfg.memberId && <div style={{ fontSize:11, color:"var(--amber)", marginTop:2 }}>⚠ Pull posts to auto-detect Member ID for publishing</div>}
           </div>
         </div>
         {isConnected && (
