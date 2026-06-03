@@ -3075,7 +3075,6 @@ function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
   const today = new Date();
   const m = month ?? today.getMonth();
   const y = year  ?? today.getFullYear();
-  const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
   const [form, setForm] = useState({ title:"", type:"idea", day: day || today.getDate() });
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
   const valid = form.title.trim();
