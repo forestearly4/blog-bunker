@@ -90,8 +90,8 @@ const AI_PROVIDERS = [
     company: "Google",
     logo: "✦",
     color: "#4285f4",
-    models: ["gemini-2.5-flash-preview-05-20", "gemini-2.5-pro-preview-06-05", "gemini-1.5-pro", "gemini-1.5-flash"],
-    defaultModel: "gemini-2.5-flash-preview-05-20",
+    models: ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"],
+    defaultModel: "gemini-3.5-flash",
     keyPrefix: "AIza",
     keyPlaceholder: "AIzaSy...",
     docsUrl: "https://aistudio.google.com/apikey",
@@ -167,10 +167,13 @@ async function callAI(providerId, model, system, userMsg, apiKey) {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ parts: [{ text: `${system}\n\n${userMsg}` }] }], generationConfig: { maxOutputTokens: 1500 } }),
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: `${system}\n\n${userMsg}` }] }],
+        generationConfig: { maxOutputTokens: 1500 },
+      }),
     });
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message || "Gemini error");
+    if (data.error) throw new Error(`Gemini error: ${data.error.message || JSON.stringify(data.error)}`);
     return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
   }
 
@@ -255,51 +258,108 @@ function saveSocialConnections(data) {
   try { localStorage.setItem(SOCIAL_KEYS_STORAGE, JSON.stringify(data)); } catch {}
 }
 
-// ─── STABILITY AI IMAGE GENERATOR ────────────────────────────────────────────
+// ─── MULTI-PROVIDER IMAGE GENERATOR ──────────────────────────────────────────
 
-// Platform image specs for Stability AI
 const PLATFORM_IMAGE_SPECS = {
-  instagram: { w:1024, h:1024,  ratio:"1:1",   label:"Square (1:1)",        style:"cinematic lifestyle photography" },
-  facebook:  { w:1216, h:832,   ratio:"3:2",   label:"Landscape (3:2)",     style:"editorial photography"           },
-  tiktok:    { w:832,  h:1216,  ratio:"2:3",   label:"Portrait (2:3)",      style:"vibrant lifestyle photography"   },
-  reddit:    { w:1024, h:1024,  ratio:"1:1",   label:"Square (1:1)",        style:"documentary photography"         },
-  twitter:   { w:1216, h:832,   ratio:"16:9",  label:"Widescreen (16:9)",   style:"editorial photography"           },
+  instagram: { ratio:"1:1",  label:"Square (1:1)",     style:"cinematic lifestyle photography, golden hour"     },
+  facebook:  { ratio:"3:2",  label:"Landscape (3:2)",  style:"editorial photography, wide scene"                },
+  tiktok:    { ratio:"2:3",  label:"Portrait (2:3)",   style:"vibrant lifestyle photography, vertical"          },
+  reddit:    { ratio:"1:1",  label:"Square (1:1)",     style:"documentary photography, authentic"               },
+  twitter:   { ratio:"16:9", label:"Widescreen (16:9)",style:"editorial photography, wide cinematic"            },
 };
 
-async function generateStabilityImage(prompt, platId, apiKey) {
-  if (!apiKey) throw new Error("Stability AI API key required. Add it in Settings → API Keys.");
-  const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
-
-  // Use Stability AI's stable-image-core endpoint
-  const formData = new FormData();
-  formData.append("prompt", prompt);
-  formData.append("output_format", "webp");
-  formData.append("aspect_ratio", spec.ratio);
-
-  const res = await fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Accept": "image/*",
-    },
-    body: formData,
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.message || `Stability AI error: ${res.status}`);
-  }
-
-  const blob = await res.blob();
-  return URL.createObjectURL(blob);
+// Determine which image provider to use based on available keys
+function getImageProvider(apiKeys) {
+  if (apiKeys["stability"]) return "stability";
+  if (apiKeys["openai"])    return "dalle";
+  if (apiKeys["gemini"])    return "gemini-image";
+  return null;
 }
 
-// Generate an image prompt from the topic using the text AI
+function getImageProviderLabel(provider) {
+  return { stability:"Stability AI", dalle:"GPT Image (OpenAI)", "gemini-image":"Gemini Image" }[provider] || "No image provider";
+}
+
+async function generateImage(prompt, platId, apiKeys) {
+  const provider = getImageProvider(apiKeys);
+  const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
+
+  if (!provider) {
+    throw new Error("No image provider connected. Add a Stability AI, OpenAI, or Gemini key in Settings → API Keys.");
+  }
+
+  if (provider === "stability") {
+    const formData = new FormData();
+    formData.append("prompt", prompt);
+    formData.append("output_format", "webp");
+    formData.append("aspect_ratio", spec.ratio);
+    const res = await fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${apiKeys["stability"]}`, "Accept": "image/*" },
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.message || `Stability AI error: ${res.status}`);
+    }
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  }
+
+  if (provider === "dalle") {
+    // gpt-image-1 replaced dall-e-3 (retired March 2026)
+    // gpt-image-1 returns base64 data, not URLs
+    const sizeMap = { "1:1":"1024x1024", "3:2":"1536x1024", "2:3":"1024x1536", "16:9":"1536x1024" };
+    const size = sizeMap[spec.ratio] || "1024x1024";
+    const res = await fetch("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "Authorization":`Bearer ${apiKeys["openai"]}` },
+      body: JSON.stringify({ model:"gpt-image-1", prompt, n:1, size, quality:"medium" }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(`OpenAI image error: ${data.error.message}`);
+    // gpt-image-1 returns base64 JSON
+    const b64 = data.data?.[0]?.b64_json;
+    if (!b64) throw new Error("OpenAI returned no image data.");
+    const byteStr = atob(b64);
+    const bytes = new Uint8Array(byteStr.length);
+    for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+    const blob = new Blob([bytes], { type:"image/png" });
+    return URL.createObjectURL(blob);
+  }
+
+  if (provider === "gemini-image") {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent?key=${apiKeys["gemini"]}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
+          generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+        }),
+      }
+    );
+    const data = await res.json();
+    if (data.error) throw new Error(`Gemini Image error: ${data.error.message}`);
+    const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+    if (!part?.inlineData) throw new Error("Gemini Image returned no image data.");
+    const byteStr = atob(part.inlineData.data);
+    const bytes = new Uint8Array(byteStr.length);
+    for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+    const blob = new Blob([bytes], { type: part.inlineData.mimeType || "image/png" });
+    return URL.createObjectURL(blob);
+  }
+
+  throw new Error("Unknown image provider");
+}
+
+// Generate an image prompt via text AI
 async function generateImagePrompt(topic, platId, activeProvider, activeModel, apiKey) {
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
   const text = await callAI(
     activeProvider, activeModel,
-    `You generate Stable Diffusion image prompts for Cask & Stream — a fly fishing and whiskey lifestyle brand. Style: ${spec.style}, golden hour lighting, moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones. Format: a single prompt string, no explanation, no quotes, no labels. Make it photorealistic and evocative.`,
+    `You generate image prompts for Cask & Stream — a fly fishing and whiskey lifestyle brand. Style: ${spec.style}, moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones. Format: a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
     `Write an image prompt for a ${platId} post (${spec.label}) about: ${topic}`,
     apiKey
   );
@@ -309,52 +369,38 @@ async function generateImagePrompt(topic, platId, activeProvider, activeModel, a
 // ─── IMAGE PANEL (per platform) ───────────────────────────────────────────────
 
 function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platColor }) {
-  const [imgPrompt,   setImgPrompt]   = useState("");
-  const [imageUrl,    setImageUrl]    = useState(null);
-  const [genLoading,  setGenLoading]  = useState(false);
-  const [promptLoad,  setPromptLoad]  = useState(false);
-  const [error,       setError]       = useState("");
-  const [showPrompt,  setShowPrompt]  = useState(false);
+  const [imgPrompt,  setImgPrompt]  = useState("");
+  const [imageUrl,   setImageUrl]   = useState(null);
+  const [genLoading, setGenLoading] = useState(false);
+  const [promptLoad, setPromptLoad] = useState(false);
+  const [error,      setError]      = useState("");
+  const [showPrompt, setShowPrompt] = useState(false);
 
-  const hasStabilityKey = !!apiKeys["stability"];
-  const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
+  const provider    = getImageProvider(apiKeys);
+  const providerLabel = getImageProviderLabel(provider);
+  const spec        = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
+  const isLoading   = genLoading || promptLoad;
 
-  const generatePrompt = async () => {
-    if (!topic.trim()) return;
-    setPromptLoad(true); setError("");
-    try {
-      const p = await generateImagePrompt(topic, platId, activeProvider, activeModel, apiKeys[activeProvider]);
-      setImgPrompt(p);
-      setShowPrompt(true);
-    } catch(e) { setError(e.message); }
-    setPromptLoad(false);
-  };
-
-  const generateImage = async () => {
-    if (!imgPrompt.trim()) return;
+  const runGenerate = async (prompt) => {
     setGenLoading(true); setError(""); setImageUrl(null);
     try {
-      const url = await generateStabilityImage(imgPrompt, platId, apiKeys["stability"]);
+      const url = await generateImage(prompt, platId, apiKeys);
       setImageUrl(url);
     } catch(e) { setError(e.message); }
     setGenLoading(false);
   };
 
   const handleGenerate = async () => {
+    setError("");
     if (!imgPrompt) {
-      // auto-generate prompt then image
-      setPromptLoad(true); setError("");
+      setPromptLoad(true);
       try {
         const p = await generateImagePrompt(topic, platId, activeProvider, activeModel, apiKeys[activeProvider]);
-        setImgPrompt(p);
-        setPromptLoad(false);
-        setGenLoading(true);
-        const url = await generateStabilityImage(p, platId, apiKeys["stability"]);
-        setImageUrl(url);
-      } catch(e) { setError(e.message); }
-      setPromptLoad(false); setGenLoading(false);
+        setImgPrompt(p); setPromptLoad(false);
+        await runGenerate(p);
+      } catch(e) { setError(e.message); setPromptLoad(false); setGenLoading(false); }
     } else {
-      await generateImage();
+      await runGenerate(imgPrompt);
     }
   };
 
@@ -366,17 +412,19 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
     a.click();
   };
 
-  const isLoading = genLoading || promptLoad;
-
   return (
     <div style={{ marginTop:20, paddingTop:20, borderTop:"1px solid var(--border)" }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ fontSize:13, fontWeight:700 }}>▣ Image</span>
           <span style={{ fontSize:10, color:"var(--muted)", padding:"1px 7px", borderRadius:99, border:"1px solid var(--border)" }}>{spec.label}</span>
-          {!hasStabilityKey && (
+          {provider ? (
+            <span style={{ fontSize:10, color:"#5cba6c", padding:"1px 7px", borderRadius:99, background:"#5cba6c0a", border:"1px solid #5cba6c44" }}>
+              via {providerLabel}
+            </span>
+          ) : (
             <span style={{ fontSize:10, color:"var(--amber)", padding:"1px 7px", borderRadius:99, background:"var(--amber-glow)", border:"1px solid var(--amber)44" }}>
-              Add Stability AI key in Settings
+              Add Stability AI, OpenAI, or Gemini key
             </span>
           )}
         </div>
@@ -387,25 +435,20 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
               {showPrompt ? "Hide" : "Edit"} Prompt
             </button>
           )}
-          <button onClick={handleGenerate} disabled={isLoading || !topic.trim()}
-            style={{ padding:"5px 14px", borderRadius:6, border:"none", background:isLoading||!topic.trim()?"var(--bg-elevated)":"#7c3aed", color:isLoading||!topic.trim()?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:isLoading||!topic.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-            {isLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{promptLoad?"Writing prompt…":"Generating…"}</> : imageUrl ? "Regenerate" : "▣ Generate Image"}
+          <button onClick={handleGenerate} disabled={isLoading || !topic.trim() || !provider}
+            style={{ padding:"5px 14px", borderRadius:6, border:"none", background:isLoading||!topic.trim()||!provider?"var(--bg-elevated)":"#7c3aed", color:isLoading||!topic.trim()||!provider?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:isLoading||!topic.trim()||!provider?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            {isLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{promptLoad?"Writing prompt…":"Generating…"}</> : imageUrl ? "↻ Regenerate" : "▣ Generate Image"}
           </button>
         </div>
       </div>
 
-      {/* Editable prompt */}
       {showPrompt && imgPrompt && (
         <div style={{ marginBottom:12 }}>
-          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>Image Prompt (editable)</div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>Prompt (editable)</div>
           <div style={{ display:"flex", gap:8 }}>
-            <textarea
-              value={imgPrompt}
-              onChange={e=>setImgPrompt(e.target.value)}
-              rows={2}
-              style={{ flex:1, padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", resize:"vertical", lineHeight:1.5 }}
-            />
-            <button onClick={generateImage} disabled={genLoading}
+            <textarea value={imgPrompt} onChange={e=>setImgPrompt(e.target.value)} rows={2}
+              style={{ flex:1, padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", resize:"vertical", lineHeight:1.5 }} />
+            <button onClick={()=>runGenerate(imgPrompt)} disabled={genLoading}
               style={{ padding:"8px 14px", borderRadius:8, border:"none", background:"#7c3aed", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start", whiteSpace:"nowrap" }}>
               {genLoading ? "…" : "Run →"}
             </button>
@@ -415,7 +458,6 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
 
       {error && <div style={{ fontSize:12, color:"var(--red)", marginBottom:10, padding:"6px 10px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>}
 
-      {/* Image output */}
       {imageUrl ? (
         <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:`1px solid ${platColor}33` }}>
           <img src={imageUrl} alt="Generated" style={{ width:"100%", display:"block", borderRadius:10 }} />
@@ -434,7 +476,9 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
         !isLoading && (
           <div style={{ height:120, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:8 }}>
             <span style={{ fontSize:28, opacity:0.3 }}>▣</span>
-            <span style={{ fontSize:11, color:"var(--muted)" }}>Click Generate Image to create a {spec.label} image</span>
+            <span style={{ fontSize:11, color:"var(--muted)" }}>
+              {provider ? `Click Generate Image — ${providerLabel} will create a ${spec.label} image` : "Add an image provider key in Settings → API Keys"}
+            </span>
           </div>
         )
       )}
@@ -442,7 +486,7 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
       {isLoading && !imageUrl && (
         <div style={{ height:120, borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", gap:12 }}>
           <span style={{ animation:"spin 1s linear infinite", display:"inline-block", fontSize:20, opacity:0.5 }}>◌</span>
-          <span style={{ fontSize:12, color:"var(--muted)" }}>{promptLoad ? "Writing image prompt…" : "Generating image with Stability AI…"}</span>
+          <span style={{ fontSize:12, color:"var(--muted)" }}>{promptLoad ? "Writing image prompt…" : `Generating with ${providerLabel}…`}</span>
         </div>
       )}
     </div>
@@ -462,7 +506,6 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark }) {
   const [activePlat,  setActivePlat]  = useState("instagram");
 
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
-  const hasStability = !!apiKeys["stability"];
 
   const generate = async () => {
     if (!input.trim()) return;
@@ -511,10 +554,10 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark }) {
               </button>
             ))}
           </div>
-          {/* Stability AI status badge */}
-          <div style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 12px", borderRadius:99, border:`1px solid ${hasStability?"#7c3aed44":"var(--border)"}`, background:hasStability?"#7c3aed0a":"transparent", fontSize:11, color:hasStability?"#a78bfa":"var(--muted)" }}>
+          {/* Image provider status badge */}
+          <div style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 12px", borderRadius:99, border:`1px solid ${getImageProvider(apiKeys)?"#7c3aed44":"var(--border)"}`, background:getImageProvider(apiKeys)?"#7c3aed0a":"transparent", fontSize:11, color:getImageProvider(apiKeys)?"#a78bfa":"var(--muted)" }}>
             <span>▣</span>
-            {hasStability ? "Stability AI connected — images ready" : "Add Stability AI key for images"}
+            {getImageProvider(apiKeys) ? `${getImageProviderLabel(getImageProvider(apiKeys))} — images ready` : "Add Stability AI, OpenAI or Gemini key for images"}
           </div>
         </div>
 
@@ -1176,9 +1219,9 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const [log,       setLog]      = useState([]);
   const [lastSync,  setLastSync] = useState(cfg.lastSync || null);
   const [pullCount, setPullCount]= useState(cfg.pullCount || 0);
-  // Fallback fields shown only if env vars aren't set
   const [apiKey,    setApiKey]   = useState(cfg.apiKey || "");
   const [siteId,    setSiteId]   = useState(cfg.siteId || "");
+  const [memberId,  setMemberId] = useState(cfg.memberId || "");
   const [showKey,   setShowKey]  = useState(false);
 
   const addLog = (msg, type="info") => setLog(l => [...l, { msg, type, ts: new Date().toLocaleTimeString() }]);
@@ -1201,11 +1244,13 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
         addLog(`Trying ${ep}…`);
         const data = await wixFetch(ep, "GET", null, { apiKey, siteId });
         if (data.posts !== undefined || data.items !== undefined || Array.isArray(data)) {
-          const newCfg = { connected: true, lastSync: null, pullCount: 0, apiKey, siteId, workingEndpoint: ep };
+          const newCfg = { connected: true, lastSync: null, pullCount: 0, apiKey, siteId, memberId, workingEndpoint: ep };
           saveWixConfig(newCfg);
           setCfg(newCfg);
           setStatus("connected");
           addLog(`✓ Connected! Working endpoint: ${ep}`, "success");
+          if (!memberId) addLog("⚠ Pull your posts now to auto-detect your Wix Member ID for publishing.", "info");
+          else addLog(`✓ Member ID set: ${memberId.slice(0,8)}…`, "success");
           setTesting(false);
           return;
         } else {
@@ -1240,9 +1285,24 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       } while (cursor && page < 10);
 
       addLog(`Found ${allPosts.length} posts on Wix`);
+      // Log the raw first post to help identify memberId field
+      if (allPosts.length > 0) {
+        const firstPost = allPosts[0];
+        addLog(`First post raw keys: ${Object.keys(firstPost).join(", ")}`, "info");
+        const memberFields = ["memberId","authorId","ownerId","author","member","createdBy","creatorId"];
+        memberFields.forEach(f => { if (firstPost[f]) addLog(`Found ${f}: ${JSON.stringify(firstPost[f]).slice(0,80)}`, "info"); });
+      }
+      // Extract memberId from first post to use for publishing
+      const extractedMemberId = allPosts[0]?.memberId || allPosts[0]?.blogPost?.memberId || "";
+      if (extractedMemberId && !cfg.memberId) {
+        addLog(`✓ Found your Wix Member ID: ${extractedMemberId}`);
+        const newCfgWithMember = { ...cfg, memberId: extractedMemberId };
+        saveWixConfig(newCfgWithMember);
+        setCfg(newCfgWithMember);
+      }
       const mapped = allPosts.map(mapWixPost);
       const now = new Date().toISOString();
-      const newCfg = { connected: true, lastSync: now, pullCount: mapped.length, apiKey, siteId };
+      const newCfg = { connected: true, lastSync: now, pullCount: mapped.length, apiKey, siteId, memberId };
       saveWixConfig(newCfg);
       setCfg(newCfg);
       setLastSync(now);
@@ -1258,10 +1318,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const disconnect = () => {
     saveWixConfig({});
     setCfg({});
-    setStatus("idle");
-    setLog([]);
-    setLastSync(null);
-    setPullCount(0);
+    setApiKey(""); setSiteId(""); setMemberId("");
+    setStatus("idle"); setLog([]); setLastSync(null); setPullCount(0);
     onDisconnect();
   };
 
@@ -1291,6 +1349,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
             <div style={{ fontWeight:600, fontSize:14 }}>{isConnected ? "Wix Blog Connected" : "Not Connected"}</div>
             {lastSync && <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>Last sync: {new Date(lastSync).toLocaleString()}</div>}
             {isConnected && pullCount > 0 && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>{pullCount} posts pulled</div>}
+            {isConnected && cfg.memberId && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>✓ Member ID detected — ready to publish</div>}
+            {isConnected && !cfg.memberId && <div style={{ fontSize:11, color:"var(--amber)", marginTop:2 }}>⚠ Pull posts to auto-detect Member ID for publishing</div>}
           </div>
         </div>
         {isConnected && (
@@ -1312,6 +1372,15 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
           <div>
             <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Wix Site ID Override</label>
             <input style={{...iS, fontFamily:"monospace"}} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value={siteId} onChange={e=>setSiteId(e.target.value)} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+              Wix Member ID <span style={{ fontWeight:400, color:"var(--muted)", textTransform:"none", letterSpacing:0 }}>— required to create/publish posts</span>
+            </label>
+            <input style={{...iS, fontFamily:"monospace"}} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value={memberId} onChange={e=>setMemberId(e.target.value)} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            <p style={{ fontSize:11, color:"var(--text-secondary)", marginTop:5, lineHeight:1.5 }}>
+              Wix Dashboard → Contacts → Members → click your name → copy the ID from the URL bar
+            </p>
           </div>
         </div>
       </details>
@@ -1391,7 +1460,7 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
 
 // ─── AI IDEA GENERATOR ───────────────────────────────────────────────────────
 
-function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activeModel, apiKeys, dark }) {
+function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activeModel, apiKeys, dark, onProviderChange, onModelChange }) {
   const [loading,   setLoading]   = useState(false);
   const [ideas,     setIdeas]     = useState([]);
   const [error,     setError]     = useState("");
@@ -1453,15 +1522,20 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
   return (
     <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
       {/* Header */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
         <div>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>✦ AI Idea Generator</h3>
           <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Generate content ideas tailored to Cask & Stream based on what you've already written.</p>
         </div>
-        <div style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, color:"var(--text-secondary)", background:"var(--bg-elevated)", padding:"4px 10px", borderRadius:99, border:"1px solid var(--border)" }}>
-          <span>{provider.logo}</span>{provider.name}
-        </div>
       </div>
+
+      <ProviderPicker
+        activeProvider={activeProvider}
+        activeModel={activeModel}
+        onProviderChange={onProviderChange}
+        onModelChange={onModelChange}
+        keys={apiKeys}
+      />
 
       {/* Focus selector */}
       <div style={{ marginBottom:16 }}>
@@ -1527,7 +1601,7 @@ function saveTrackerData(data) {
   try { localStorage.setItem(COMP_TRACKER_STORAGE, JSON.stringify(data)); } catch {} 
 }
 
-function CompetitorTracker({ competitors, onAddInspiration, activeProvider, activeModel, apiKeys, dark }) {
+function CompetitorTracker({ competitors, onAddInspiration, activeProvider, activeModel, apiKeys, dark, onProviderChange, onModelChange }) {
   const [tracking,   setTracking]   = useState(loadTrackerData);
   const [scanning,   setScanning]   = useState(false);
   const [scanTarget, setScanTarget] = useState(null);
@@ -1590,16 +1664,24 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
       {/* Header */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
         <div>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>◎ Competitor Post Tracker</h3>
           <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Track what competitors are publishing and find counter-opportunities for Cask & Stream.</p>
         </div>
         <button onClick={scanAll} disabled={scanning}
-          style={{ padding:"9px 18px", borderRadius:8, border:"none", background:scanning?"var(--bg-elevated)":provider.color, color:scanning?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:scanning?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+          style={{ padding:"9px 18px", borderRadius:8, border:"none", background:scanning?"var(--bg-elevated)":provider.color, color:scanning?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:scanning?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
           {scanning ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Scanning…</> : `${provider.logo} Scan All`}
         </button>
       </div>
+
+      <ProviderPicker
+        activeProvider={activeProvider}
+        activeModel={activeModel}
+        onProviderChange={onProviderChange}
+        onModelChange={onModelChange}
+        keys={apiKeys}
+      />
 
       {error && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>}
 
@@ -1720,23 +1802,36 @@ function PipelineProgress({ stage, setStage, completed }) {
   );
 }
 
-function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline }) {
-  const [stage,     setStage]    = useState("brief");
-  const [completed, setCompleted]= useState([]);
+const PIPELINE_STORAGE = "bb_pipeline_draft";
+
+function loadPipelineDraft() {
+  try { return JSON.parse(localStorage.getItem(PIPELINE_STORAGE) || "null"); } catch { return null; }
+}
+function savePipelineDraft(data) {
+  try { localStorage.setItem(PIPELINE_STORAGE, JSON.stringify(data)); } catch {}
+}
+function clearPipelineDraft() {
+  try { localStorage.removeItem(PIPELINE_STORAGE); } catch {}
+}
+
+function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange }) {
+  const saved = loadPipelineDraft();
+  const [stage,     setStage]    = useState(saved?.stage     || "brief");
+  const [completed, setCompleted]= useState(saved?.completed || []);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
 
-  // Shared pipeline state
-  const [brief, setBrief] = useState({
+  // Shared pipeline state — restored from localStorage if available
+  const [brief, setBrief] = useState(saved?.brief || {
     topic: "", angle: "", audience: "fly fishing and whiskey enthusiasts", keywords: "", inspiration: null,
   });
-  const [draft, setDraft] = useState({
+  const [draft, setDraft] = useState(saved?.draft || {
     title: "", body: "", category: "Culture", tone: "literary",
   });
-  const [enhance, setEnhance] = useState({
+  const [enhance, setEnhance] = useState(saved?.enhance || {
     metaTitle: "", metaDescription: "", primaryKeyword: "", suggestions: [], headlines: [], improved: "",
   });
-  const [social, setSocial] = useState({ posts: {}, images: {} });
-  const [schedule, setSchedule] = useState({
+  const [social, setSocial] = useState(saved?.social || { posts: {}, images: {} });
+  const [schedule, setSchedule] = useState(saved?.schedule || {
     publishDate: new Date(Date.now() + 86400000).toISOString().split("T")[0],
     publishTime: "09:00",
     publishToWix: wixConnected,
@@ -1748,6 +1843,15 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const [loadMsg, setLoadMsg]   = useState("");
   const [error,   setError]     = useState("");
   const [success, setSuccess]   = useState("");
+  const [savedAt, setSavedAt]   = useState(saved?.savedAt || null);
+
+  // Auto-save pipeline state to localStorage whenever it changes
+  useEffect(() => {
+    if (!brief.topic && !draft.title) return; // don't save empty state
+    const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, savedAt: new Date().toISOString() };
+    savePipelineDraft(data);
+    setSavedAt(data.savedAt);
+  }, [stage, completed, brief, draft, enhance, social.posts, schedule]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
   const advanceTo = (next) => { setStage(next); setError(""); setSuccess(""); };
@@ -1855,12 +1959,12 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   };
 
   const generateSocialImage = async (platId) => {
-    const hasStability = !!apiKeys["stability"];
-    if (!hasStability) { setError("Add Stability AI key in Settings → API Keys for image generation."); return; }
-    setLoading(true); setLoadMsg(`Generating ${platId} image…`); setError("");
+    const provider = getImageProvider(apiKeys);
+    if (!provider) { setError("Add a Stability AI, OpenAI, or Gemini key in Settings → API Keys for image generation."); return; }
+    setLoading(true); setLoadMsg(`Generating ${platId} image via ${getImageProviderLabel(provider)}…`); setError("");
     try {
       const prompt = await generateImagePrompt(draft.topic || brief.topic || draft.title, platId, activeProvider, activeModel, apiKeys[activeProvider]);
-      const url = await generateStabilityImage(prompt, platId, apiKeys["stability"]);
+      const url = await generateImage(prompt, platId, apiKeys);
       setSocial(s => ({ ...s, images: { ...s.images, [platId]: url } }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
@@ -1895,24 +1999,28 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
 
       // Push to Wix
       if (schedule.publishToWix && wixConnected) {
-        setLoadMsg("Publishing to Wix…");
+        setLoadMsg("Creating draft on Wix…");
         const wixCfg = loadWixConfig();
         const body = buildWixPostBody(finalPost);
-        const res = await wixFetch("/blog/v3/posts", "POST", body, wixCfg);
-        const wixId = res?.post?.id;
+        // Create as draft first, then publish
+        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, wixCfg);
+        const wixId = res?.draftPost?.id;
         if (wixId && schedule.status === "published") {
-          await wixFetch(`/blog/v3/posts/${wixId}/publish`, "POST", {}, wixCfg);
+          setLoadMsg("Publishing to Wix…");
+          await wixFetch(`/blog/v3/draft-posts/${wixId}/publish`, "POST", {}, wixCfg);
         }
       }
 
       markDone("publish");
+      clearPipelineDraft();
       setSuccess(`✓ Post ${schedule.status === "published" ? "published" : "scheduled"} successfully!${schedule.publishToWix && wixConnected ? " Live on caskandstream.com." : ""}`);
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
 
   const resetPipeline = () => {
-    setStage("brief"); setCompleted([]); setError(""); setSuccess("");
+    clearPipelineDraft();
+    setStage("brief"); setCompleted([]); setError(""); setSuccess(""); setSavedAt(null);
     setBrief({ topic:"", angle:"", audience:"fly fishing and whiskey enthusiasts", keywords:"", inspiration:null });
     setDraft({ title:"", body:"", category:"Culture", tone:"literary" });
     setEnhance({ metaTitle:"", metaDescription:"", primaryKeyword:"", suggestions:[], headlines:[], improved:"" });
@@ -1927,17 +2035,24 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
         <div>
           <h2 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, margin:"0 0 4px" }}>Content Pipeline</h2>
-          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>From idea to published — one seamless workflow.</p>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>
+            From idea to published — one seamless workflow.
+            {savedAt && <span style={{ color:"var(--green)", marginLeft:8, fontSize:11 }}>✓ Draft auto-saved {new Date(savedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</span>}
+          </p>
         </div>
-        <div style={{ display:"flex", gap:8 }}>
-          {completed.length > 0 && (
-            <button onClick={resetPipeline} style={btnS}>↺ New Post</button>
-          )}
-          <div style={{ fontSize:11, color:"var(--text-secondary)", padding:"6px 12px", borderRadius:99, border:"1px solid var(--border)", display:"flex", alignItems:"center", gap:6 }}>
-            <span>{provider.logo}</span>{provider.name}
-          </div>
-        </div>
+        {(completed.length > 0 || brief.topic) && (
+          <button onClick={resetPipeline} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>↺ New Post</button>
+        )}
       </div>
+
+      {/* Provider picker */}
+      <ProviderPicker
+        activeProvider={activeProvider}
+        activeModel={activeModel}
+        onProviderChange={onProviderChange}
+        onModelChange={onModelChange}
+        keys={apiKeys}
+      />
 
       {/* Progress */}
       <PipelineProgress stage={stage} setStage={setStage} completed={completed} />
@@ -2272,6 +2387,325 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   );
 }
 
+// ─── CALENDAR TAB ─────────────────────────────────────────────────────────────
+
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpen, btnP, fixedGreen }) {
+  const today = new Date();
+  const [calYear,  setCalYear]  = useState(today.getFullYear());
+  const [calMonth, setCalMonth] = useState(today.getMonth());
+
+  const daysInMonth = new Date(calYear, calMonth+1, 0).getDate();
+  const firstDow    = new Date(calYear, calMonth, 1).getDay();
+  const isToday     = (d) => d===today.getDate() && calMonth===today.getMonth() && calYear===today.getFullYear();
+
+  const prevMonth = () => calMonth===0 ? (setCalMonth(11), setCalYear(y=>y-1)) : setCalMonth(m=>m-1);
+  const nextMonth = () => calMonth===11 ? (setCalMonth(0), setCalYear(y=>y+1)) : setCalMonth(m=>m+1);
+  const goToday   = () => { setCalMonth(today.getMonth()); setCalYear(today.getFullYear()); };
+
+  const monthEvs = (day) => calEvents.filter(e =>
+    e.day === day && (e.month === undefined || (e.month === calMonth && e.year === calYear))
+  );
+
+  const tc = { scheduled:"var(--amber)", newsletter:fixedGreen, draft:"var(--muted)", idea:"var(--text-secondary)" };
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={prevMonth} style={{width:32,height:32,borderRadius:8,border:"1px solid var(--border)",background:"var(--bg-elevated)",color:"var(--text)",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>‹</button>
+          <h2 style={{fontFamily:"'Fraunces',serif",fontSize:20,fontWeight:700,margin:0,minWidth:180,textAlign:"center"}}>{MONTH_NAMES[calMonth]} {calYear}</h2>
+          <button onClick={nextMonth} style={{width:32,height:32,borderRadius:8,border:"1px solid var(--border)",background:"var(--bg-elevated)",color:"var(--text)",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>›</button>
+          <button onClick={goToday} style={{padding:"5px 12px",borderRadius:6,border:"1px solid var(--border)",background:"transparent",color:"var(--text-secondary)",fontSize:11,cursor:"pointer",fontFamily:"'DM Sans',sans-serif"}}>Today</button>
+        </div>
+        <div style={{display:"flex",gap:12,alignItems:"center"}}>
+          {[{color:"var(--amber)",l:"Scheduled"},{color:fixedGreen,l:"Newsletter"},{color:"var(--muted)",l:"Draft"},{color:"var(--text-secondary)",l:"Idea"}].map(x=>(
+            <div key={x.l} style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"var(--text-secondary)"}}>
+              <span style={{width:8,height:8,borderRadius:99,background:x.color,display:"inline-block"}}/>{x.l}
+            </div>
+          ))}
+          <button onClick={()=>{setCalModalDay(null);setCalModalOpen(true);}} style={{...btnP,padding:"6px 14px",fontSize:12}}>+ Add Event</button>
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:1,background:"var(--border)",borderRadius:12,overflow:"hidden",border:"1px solid var(--border)"}}>
+        {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=>(
+          <div key={d} style={{background:"var(--bg-elevated)",padding:10,textAlign:"center",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{d}</div>
+        ))}
+        {Array(firstDow).fill(null).map((_,i)=>(
+          <div key={`empty-${i}`} style={{background:"var(--bg-surface)",padding:12,minHeight:80,opacity:0.3}}/>
+        ))}
+        {Array(daysInMonth).fill(null).map((_,i)=>{
+          const day=i+1;
+          const evs=monthEvs(day);
+          const tod=isToday(day);
+          return (
+            <div key={day}
+              onClick={()=>{setCalModalDay(day);setCalModalOpen(true);}}
+              style={{background:"var(--bg-surface)",padding:"8px 10px",minHeight:80,cursor:"pointer",borderTop:tod?"2px solid var(--amber)":"none",boxSizing:"border-box"}}
+              onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"}
+              onMouseLeave={e=>e.currentTarget.style.background="var(--bg-surface)"}>
+              <div style={{fontSize:12,fontWeight:tod?700:400,color:tod?"var(--amber)":"var(--text-secondary)",marginBottom:4,display:"flex",alignItems:"center",gap:5}}>
+                {day}
+                {tod&&<span style={{fontSize:8,background:"var(--amber)",color:"#0e0f11",borderRadius:99,padding:"1px 5px",fontWeight:700}}>TODAY</span>}
+              </div>
+              {evs.map((ev,ei)=>(
+                <div key={ei}
+                  onClick={e=>{e.stopPropagation();deleteCalEvent(calEvents.findIndex(c=>c.day===day&&c.title===ev.title));}}
+                  title="Click to remove"
+                  style={{fontSize:10,padding:"2px 6px",borderRadius:4,background:(tc[ev.type]||"var(--muted)")+"22",color:tc[ev.type]||"var(--muted)",fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>
+                  {ev.title}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      <p style={{fontSize:11,color:"var(--muted)",marginTop:10}}>Click a day to add an event · Click an event to remove it</p>
+    </div>
+  );
+}
+
+// ─── GOOGLE SEARCH CONSOLE INTEGRATION ───────────────────────────────────────
+
+const GSC_STORAGE = "bb_gsc_config";
+const GSC_DATA_STORAGE = "bb_gsc_data";
+
+function loadGSCConfig() { try { return JSON.parse(localStorage.getItem(GSC_STORAGE) || "{}"); } catch { return {}; } }
+function saveGSCConfig(d) { try { localStorage.setItem(GSC_STORAGE, JSON.stringify(d)); } catch {} }
+function loadGSCData()   { try { return JSON.parse(localStorage.getItem(GSC_DATA_STORAGE) || "null"); } catch { return null; } }
+function saveGSCData(d)  { try { localStorage.setItem(GSC_DATA_STORAGE, JSON.stringify(d)); } catch {} }
+
+// Fetch GSC data via the Netlify edge function (CORS proxy)
+async function fetchGSCData(accessToken, siteUrl, days = 28) {
+  const endDate   = new Date().toISOString().split("T")[0];
+  const startDate = new Date(Date.now() - days * 86400000).toISOString().split("T")[0];
+
+  const body = {
+    startDate,
+    endDate,
+    dimensions: ["query", "page"],
+    rowLimit: 100,
+    startRow: 0,
+  };
+
+  const res = await fetch(
+    `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `GSC error ${res.status}`);
+  }
+
+  return await res.json();
+}
+
+function GSCPanel({ onDataLoaded }) {
+  const [cfg,       setCfg]       = useState(loadGSCConfig);
+  const [token,     setToken]     = useState(cfg.accessToken || "");
+  const [siteUrl,   setSiteUrl]   = useState(cfg.siteUrl || "https://caskandstream.com/");
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState("");
+  const [lastFetch, setLastFetch] = useState(cfg.lastFetch || null);
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
+
+  const fetchData = async () => {
+    if (!token.trim() || !siteUrl.trim()) return;
+    setLoading(true); setError("");
+    try {
+      const raw   = await fetchGSCData(token.trim(), siteUrl.trim());
+      const rows  = raw.rows || [];
+
+      // Aggregate by query
+      const queryMap = {};
+      const pageMap  = {};
+      let totalClicks = 0, totalImpressions = 0;
+
+      for (const row of rows) {
+        const [query, page] = row.keys;
+        totalClicks      += row.clicks;
+        totalImpressions += row.impressions;
+
+        if (!queryMap[query]) queryMap[query] = { query, clicks:0, impressions:0, ctr:0, position:0, count:0 };
+        queryMap[query].clicks      += row.clicks;
+        queryMap[query].impressions += row.impressions;
+        queryMap[query].position    += row.position;
+        queryMap[query].count++;
+
+        if (!pageMap[page]) pageMap[page] = { page, clicks:0, impressions:0 };
+        pageMap[page].clicks      += row.clicks;
+        pageMap[page].impressions += row.impressions;
+      }
+
+      const keywords = Object.values(queryMap)
+        .map(k => ({ ...k, ctr: k.impressions > 0 ? k.clicks/k.impressions*100 : 0, position: k.count > 0 ? k.position/k.count : 0 }))
+        .sort((a,b) => b.clicks - a.clicks)
+        .slice(0, 20);
+
+      const topPages = Object.values(pageMap)
+        .sort((a,b) => b.clicks - a.clicks)
+        .slice(0, 10);
+
+      const data = { keywords, topPages, totalClicks, totalImpressions, fetchedAt: new Date().toISOString(), siteUrl, days:28 };
+      saveGSCData(data);
+      const newCfg = { accessToken: token.trim(), siteUrl: siteUrl.trim(), lastFetch: data.fetchedAt };
+      saveGSCConfig(newCfg);
+      setCfg(newCfg);
+      setLastFetch(data.fetchedAt);
+      onDataLoaded(data);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div>
+        <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Google Search Console</h3>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+          Connect to see real keyword rankings, clicks, and impressions for caskandstream.com.
+        </p>
+      </div>
+
+      {lastFetch && (
+        <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c0a", border:"1px solid #5cba6c44", fontSize:12, color:"#5cba6c" }}>
+          ✓ Last synced: {new Date(lastFetch).toLocaleString()}
+        </div>
+      )}
+
+      <div>
+        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+          Access Token
+        </label>
+        <input type="password" style={iS} placeholder="Paste your Google OAuth access token…" value={token} onChange={e=>setToken(e.target.value)}
+          onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        <div style={{ marginTop:8, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
+          <strong style={{color:"var(--text)"}}>How to get your token:</strong><br/>
+          1. Go to <a href="https://developers.google.com/oauthplayground" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>Google OAuth Playground</a><br/>
+          2. In Step 1, find and select <strong style={{color:"var(--text)"}}>Search Console API v3</strong> → check <code>https://www.googleapis.com/auth/webmasters.readonly</code><br/>
+          3. Click <strong style={{color:"var(--text)"}}>Authorize APIs</strong> → sign in with your Google account<br/>
+          4. Click <strong style={{color:"var(--text)"}}>Exchange authorization code for tokens</strong><br/>
+          5. Copy the <strong style={{color:"var(--text)"}}>Access token</strong> and paste it above<br/>
+          <span style={{color:"var(--amber)"}}>⚠ Tokens expire after 1 hour — re-fetch when needed.</span>
+        </div>
+      </div>
+
+      <div>
+        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+          Site URL (exactly as it appears in Search Console)
+        </label>
+        <input style={iS} placeholder="https://caskandstream.com/" value={siteUrl} onChange={e=>setSiteUrl(e.target.value)}
+          onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        <p style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>Must match exactly — try both with and without trailing slash if it fails.</p>
+      </div>
+
+      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+        <button onClick={fetchData} disabled={!token.trim() || !siteUrl.trim() || loading}
+          style={{ padding:"10px 24px", borderRadius:8, border:"none", background:token.trim()&&siteUrl.trim()&&!loading?"var(--amber)":"var(--bg-elevated)", color:token.trim()&&siteUrl.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:token.trim()&&siteUrl.trim()&&!loading?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Fetching…</> : "↓ Fetch Analytics Data"}
+        </button>
+        {error && <span style={{ fontSize:12, color:"var(--red)" }}>{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+function GSCAnalyticsView({ data, onRefresh }) {
+  if (!data) return (
+    <div style={{ textAlign:"center", padding:"40px 20px", color:"var(--muted)", fontSize:13 }}>
+      <div style={{ fontSize:32, marginBottom:12 }}>◎</div>
+      No Search Console data yet. Go to <strong style={{color:"var(--text)"}}>Settings → API Keys → Search Console</strong> to connect and fetch data.
+    </div>
+  );
+
+  const { keywords, topPages, totalClicks, totalImpressions, fetchedAt, days } = data;
+  const avgCTR = totalImpressions > 0 ? (totalClicks / totalImpressions * 100).toFixed(1) : "0";
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Summary cards */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:16 }}>
+        {[
+          { label:"Total Clicks",       value:totalClicks.toLocaleString(),       sub:`Last ${days} days` },
+          { label:"Total Impressions",  value:totalImpressions.toLocaleString(),  sub:"Search appearances" },
+          { label:"Avg CTR",            value:`${avgCTR}%`,                        sub:"Click-through rate" },
+        ].map(s => (
+          <div key={s.label} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>{s.label}</div>
+            <div style={{ fontFamily:"var(--font-display)", fontSize:28, fontWeight:700 }}>{s.value}</div>
+            <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:4 }}>{s.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+        {/* Top Keywords */}
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Top Keywords</div>
+          <table style={{ width:"100%", borderCollapse:"collapse" }}>
+            <thead>
+              <tr style={{ borderBottom:"1px solid var(--border)" }}>
+                {["Query","Clicks","Impr.","Pos."].map(h=>(
+                  <th key={h} style={{ textAlign:"left", padding:"6px 8px", fontSize:9, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {keywords.slice(0,12).map((k,i) => (
+                <tr key={i} style={{ borderBottom:"1px solid var(--border)11" }}>
+                  <td style={{ padding:"8px 8px", fontSize:12, maxWidth:160, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{k.query}</td>
+                  <td style={{ padding:"8px 8px", fontSize:12, fontWeight:700, color:"var(--amber)", fontVariantNumeric:"tabular-nums" }}>{k.clicks}</td>
+                  <td style={{ padding:"8px 8px", fontSize:12, color:"var(--text-secondary)", fontVariantNumeric:"tabular-nums" }}>{k.impressions}</td>
+                  <td style={{ padding:"8px 8px", fontSize:12, color:"var(--text-secondary)", fontVariantNumeric:"tabular-nums" }}>{k.position.toFixed(1)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Top Pages */}
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Top Pages by Clicks</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {topPages.slice(0,8).map((p,i) => {
+              const maxClicks = topPages[0]?.clicks || 1;
+              const slug = p.page.replace(/https?:\/\/[^/]+/, "").replace(/\/$/, "") || "/";
+              return (
+                <div key={i}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:4 }}>
+                    <span style={{ fontSize:11, color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"75%" }}>{slug || "/"}</span>
+                    <span style={{ fontSize:12, fontWeight:700, color:"var(--amber)", flexShrink:0, marginLeft:8 }}>{p.clicks}</span>
+                  </div>
+                  <div style={{ height:4, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
+                    <div style={{ height:"100%", width:`${(p.clicks/maxClicks)*100}%`, background:"var(--amber)", borderRadius:99, transition:"width 0.5s" }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:11, color:"var(--muted)", padding:"8px 0" }}>
+        <span>Data from Google Search Console · Last {days} days · Fetched {new Date(fetchedAt).toLocaleString()}</span>
+        <button onClick={onRefresh} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--amber)", fontSize:11, fontFamily:"'DM Sans',sans-serif" }}>
+          ↓ Refresh Data
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -2339,15 +2773,13 @@ function textToWixContent(text) {
 }
 
 // Build the Wix create/update post body
-function buildWixPostBody(form, existingWixId = null) {
+function buildWixPostBody(form) {
   const richContent = textToWixContent(form.body);
   return {
-    post: {
-      ...(existingWixId ? {} : {}),
+    draftPost: {
       title: form.title,
       richContent,
       excerpt: form.body.slice(0, 200).replace(/[#*]/g, "").trim(),
-      membersOnly: false,
     }
   };
 }
@@ -2385,27 +2817,27 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
     const wixCfg = loadWixConfig();
 
     try {
-      const body = buildWixPostBody(form, post?.wixId);
+      const body = buildWixPostBody(form);
 
       if (post?.wixId) {
-        // Update existing Wix post
-        setWixStatus("Updating post on Wix…");
-        await wixFetch(`/blog/v3/posts/${post.wixId}`, "PATCH", body, wixCfg);
+        // Update existing draft post on Wix
+        setWixStatus("Updating on Wix…");
+        await wixFetch(`/blog/v3/draft-posts/${post.wixId}`, "PATCH", body, wixCfg);
         if (!asDraft) {
           setWixStatus("Publishing…");
-          await wixFetch(`/blog/v3/posts/${post.wixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/blog/v3/draft-posts/${post.wixId}/publish`, "POST", {}, wixCfg);
         }
         setWixStatus(asDraft ? "✓ Updated as draft on Wix" : "✓ Published to Wix!");
       } else {
-        // Create new Wix post
-        setWixStatus("Creating post on Wix…");
-        const res = await wixFetch("/blog/v3/posts", "POST", body, wixCfg);
-        const newWixId = res?.post?.id;
-        if (!newWixId) throw new Error("Wix didn't return a post ID");
+        // Create new draft post on Wix, then optionally publish
+        setWixStatus("Creating draft on Wix…");
+        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, wixCfg);
+        const newWixId = res?.draftPost?.id;
+        if (!newWixId) throw new Error(`Wix didn't return a post ID. Response: ${JSON.stringify(res).slice(0,200)}`);
 
         if (!asDraft) {
           setWixStatus("Publishing…");
-          await wixFetch(`/blog/v3/posts/${newWixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/blog/v3/draft-posts/${newWixId}/publish`, "POST", {}, wixCfg);
         }
 
         // Save wixId back to the post
@@ -2609,12 +3041,16 @@ function AddInspirationModal({ onSave, onClose }) {
 
 // ─── ADD CALENDAR EVENT MODAL ─────────────────────────────────────────────────
 
-function AddCalendarEventModal({ day, onSave, onClose }) {
-  const [form, setForm] = useState({ title:"", type:"idea", day: day || 1 });
+function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
+  const today = new Date();
+  const m = month ?? today.getMonth();
+  const y = year  ?? today.getFullYear();
+  const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const [form, setForm] = useState({ title:"", type:"idea", day: day || today.getDate() });
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
   const valid = form.title.trim();
   return (
-    <Modal title={day ? `Add Event — May ${day}` : "Add Calendar Event"} onClose={onClose}>
+    <Modal title={day ? `Add Event — ${MONTH_NAMES[m]} ${day}, ${y}` : "Add Calendar Event"} onClose={onClose}>
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Event Title *</label>
@@ -2639,7 +3075,7 @@ function AddCalendarEventModal({ day, onSave, onClose }) {
         </div>
         <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginTop:4 }}>
           <button onClick={onClose} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Cancel</button>
-          <button onClick={()=>{ if(valid){ onSave({...form, day: day || form.day}); onClose(); }}} disabled={!valid}
+          <button onClick={()=>{ if(valid){ onSave({ ...form, day: day||form.day, month: m, year: y }); onClose(); }}} disabled={!valid}
             style={{ padding:"9px 24px", borderRadius:8, border:"none", background:valid?"var(--amber)":"var(--bg-elevated)", color:valid?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:valid?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif" }}>
             Add Event
           </button>
@@ -2709,6 +3145,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const saveCalEvent = (ev) => setCalEvents(all => [...all, ev]);
   const deleteCalEvent = (idx) => setCalEvents(all => all.filter((_, i) => i !== idx));
 
+  const [gscData, setGscData] = useState(loadGSCData);
   const [wixConnected, setWixConnected] = useState(() => !!loadWixConfig().connected);
 
   const handleWixSync = (wixPosts) => {
@@ -2794,12 +3231,13 @@ export default function Dashboard({ user, workspace, onLogout }) {
   ];
 
   const SETTINGS_SECTIONS = [
-    { id:"general",  label:"General"          },
-    { id:"apikeys",  label:"API Keys"         },
-    { id:"social",   label:"Social Media"     },
-    { id:"wix",      label:"Wix Integration"  },
-    { id:"billing",  label:"Billing & Plan"   },
-    { id:"account",  label:"Account"          },
+    { id:"general",  label:"General"             },
+    { id:"apikeys",  label:"API Keys"            },
+    { id:"gsc",      label:"Search Console"      },
+    { id:"social",   label:"Social Media"        },
+    { id:"wix",      label:"Wix Integration"     },
+    { id:"billing",  label:"Billing & Plan"      },
+    { id:"account",  label:"Account"             },
   ];
 
   return (
@@ -2919,6 +3357,8 @@ export default function Dashboard({ user, workspace, onLogout }) {
               onAddCalEvent={saveCalEvent}
               wsName={wsName}
               wsTagline={wsTagline}
+              onProviderChange={handleProviderChange}
+              onModelChange={handleModelChange}
             />
           )}
 
@@ -2973,7 +3413,8 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   </div>
                 ))}
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16}}>
+
+              <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16,marginBottom:24}}>
                 <div style={card}>
                   <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:16}}>Weekly Traffic</div>
                   <BarChart data={DEFAULT_ANALYTICS.weeklyViews} labels={DEFAULT_ANALYTICS.weekLabels} color={dark?"#d4a054":"#b8862e"}/>
@@ -2988,44 +3429,32 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   ))}
                 </div>
               </div>
+
+              {/* Google Search Console */}
+              <div style={{marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                <div style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700}}>Search Console</div>
+                {!gscData && (
+                  <button onClick={()=>{setActiveTab("settings");setSettingsSection("gsc");}}
+                    style={{padding:"6px 14px",borderRadius:7,border:"1px solid var(--amber)44",background:"var(--amber-glow)",color:"var(--amber)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)"}}>
+                    Connect Search Console →
+                  </button>
+                )}
+              </div>
+              <GSCAnalyticsView data={gscData} onRefresh={()=>{setActiveTab("settings");setSettingsSection("gsc");}} />
             </div>
           )}
 
           {/* ══ CALENDAR ══ */}
           {activeTab==="calendar"&&(
-            <div>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-                <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:0}}>May 2026</h2>
-                <div style={{display:"flex",gap:12,alignItems:"center"}}>
-                  {[{color:"var(--amber)",l:"Scheduled"},{color:fixedGreen,l:"Newsletter"},{color:"var(--muted)",l:"Draft"},{color:"var(--text-secondary)",l:"Idea"}].map(x=>(
-                    <div key={x.l} style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"var(--text-secondary)"}}>
-                      <span style={{width:8,height:8,borderRadius:99,background:x.color,display:"inline-block"}}/>{x.l}
-                    </div>
-                  ))}
-                  <button onClick={()=>{setCalModalDay(null);setCalModalOpen(true);}} style={{...btnP,padding:"6px 14px",fontSize:12}}>+ Add Event</button>
-                </div>
-              </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:1,background:"var(--border)",borderRadius:12,overflow:"hidden",border:"1px solid var(--border)"}}>
-                {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=>(
-                  <div key={d} style={{background:"var(--bg-elevated)",padding:10,textAlign:"center",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{d}</div>
-                ))}
-                {Array(4).fill(null).map((_,i)=><div key={`e${i}`} style={{background:"var(--bg-surface)",padding:12,minHeight:80}}/>)}
-                {Array(31).fill(null).map((_,i)=>{
-                  const day=i+1;
-                  const evs=calEvents.filter(e=>e.day===day);
-                  const tc={scheduled:"var(--amber)",newsletter:fixedGreen,draft:"var(--muted)",idea:"var(--text-secondary)"};
-                  return (
-                    <div key={day} onClick={()=>{setCalModalDay(day);setCalModalOpen(true);}} style={{background:"var(--bg-surface)",padding:"8px 10px",minHeight:80,cursor:"pointer",position:"relative"}} onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"} onMouseLeave={e=>e.currentTarget.style.background="var(--bg-surface)"}>
-                      <div style={{fontSize:12,color:"var(--text-secondary)",marginBottom:4}}>{day}</div>
-                      {evs.map((ev,ei)=>(
-                        <div key={ei} onClick={e=>{e.stopPropagation();deleteCalEvent(calEvents.findIndex(c=>c.day===day&&c.title===ev.title));}} title="Click to remove" style={{fontSize:10,padding:"2px 6px",borderRadius:4,background:(tc[ev.type]||"var(--muted)")+"22",color:tc[ev.type]||"var(--muted)",fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>{ev.title}</div>
-                      ))}
-                    </div>
-                  );
-                })}
-              </div>
-              <p style={{fontSize:11,color:"var(--muted)",marginTop:10}}>Click a day to add an event · Click an event to remove it</p>
-            </div>
+            <CalendarTab
+              calEvents={calEvents}
+              deleteCalEvent={deleteCalEvent}
+              setCalModalDay={setCalModalDay}
+              setCalModalOpen={setCalModalOpen}
+              btnP={btnP}
+              fixedGreen={fixedGreen}
+              dark={dark}
+            />
           )}
 
           {/* ══ RESEARCH ══ */}
@@ -3129,6 +3558,8 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   activeModel={activeModel}
                   apiKeys={apiKeys}
                   dark={dark}
+                  onProviderChange={handleProviderChange}
+                  onModelChange={handleModelChange}
                 />
               )}
               {researchTab==="tracker"&&(
@@ -3139,6 +3570,8 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   activeModel={activeModel}
                   apiKeys={apiKeys}
                   dark={dark}
+                  onProviderChange={handleProviderChange}
+                  onModelChange={handleModelChange}
                 />
               )}
             </div>
@@ -3214,6 +3647,10 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
                 {settingsSection==="apikeys"&&(
                   <APIKeysSettings apiKeys={apiKeys} onSave={setApiKeys}/>
+                )}
+
+                {settingsSection==="gsc"&&(
+                  <GSCPanel onDataLoaded={(data)=>{ setGscData(data); saveGSCData(data); }} />
                 )}
 
                 {settingsSection==="social"&&(
