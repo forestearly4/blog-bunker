@@ -1186,12 +1186,10 @@ async function wixFetch(endpoint, method = "GET", data = null, cfg = {}) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      endpoint,
-      method,
-      data,
-      // Send user keys as fallback — env vars take priority in the function
-      apiKey: cfg.apiKey || "",
-      siteId: cfg.siteId || "",
+      endpoint, method, data,
+      apiKey:    cfg.apiKey    || "",
+      siteId:    cfg.siteId    || "",
+      accountId: cfg.accountId || cfg.siteId || "", // account ID for owner resolution
     }),
   });
 
@@ -1285,15 +1283,15 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       } while (cursor && page < 10);
 
       addLog(`Found ${allPosts.length} posts on Wix`);
-      // Log the raw first post to help identify memberId field
-      if (allPosts.length > 0) {
-        const firstPost = allPosts[0];
-        addLog(`First post raw keys: ${Object.keys(firstPost).join(", ")}`, "info");
-        const memberFields = ["memberId","authorId","ownerId","author","member","createdBy","creatorId"];
-        memberFields.forEach(f => { if (firstPost[f]) addLog(`Found ${f}: ${JSON.stringify(firstPost[f]).slice(0,80)}`, "info"); });
+      // Extract author ID from first post - try multiple fields
+      const firstPost = allPosts[0] || {};
+      const extractedMemberId = firstPost.memberId || firstPost.mostRecentContributorId || firstPost.authorId || "";
+      if (extractedMemberId && extractedMemberId !== cfg.memberId) {
+        addLog(`✓ Author ID detected: ${extractedMemberId.slice(0,8)}…`, "info");
+        const newCfgWithMember = { ...cfg, memberId: extractedMemberId };
+        saveWixConfig(newCfgWithMember);
+        setCfg(newCfgWithMember);
       }
-      // Extract memberId from first post to use for publishing
-      const extractedMemberId = allPosts[0]?.memberId || allPosts[0]?.blogPost?.memberId || "";
       if (extractedMemberId && !cfg.memberId) {
         addLog(`✓ Found your Wix Member ID: ${extractedMemberId}`);
         const newCfgWithMember = { ...cfg, memberId: extractedMemberId };
@@ -1323,8 +1321,28 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
     onDisconnect();
   };
 
-  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
-  const isConnected = status === "connected" || cfg.connected;
+  const fetchMemberId = async () => {
+    setTesting(true);
+    addLog("Looking up your Wix site member ID…");
+    try {
+      // Try contacts/members API to find the site owner's member ID
+      const res = await wixFetch("/members/v1/members?fieldsets=FULL&paging.limit=10", "GET", null, { apiKey, siteId });
+      addLog(`Members response: ${JSON.stringify(res).slice(0, 400)}`, "info");
+      const members = res.members || res.items || [];
+      if (members.length > 0) {
+        addLog(`Found ${members.length} members. First: ${JSON.stringify(members[0]).slice(0,200)}`, "info");
+      }
+    } catch(e) {
+      // Try alternative endpoint
+      try {
+        const res2 = await wixFetch("/site-members/v1/members?paging.limit=5", "GET", null, { apiKey, siteId });
+        addLog(`Alt members: ${JSON.stringify(res2).slice(0,400)}`, "info");
+      } catch(e2) {
+        addLog(`Members lookup failed: ${e2.message}`, "error");
+      }
+    }
+    setTesting(false);
+  };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
@@ -1386,7 +1404,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       </details>
 
       {/* Actions */}
-      <div style={{ display:"flex", gap:10 }}>
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
         <button onClick={testConnection} disabled={testing}
           style={{ padding:"10px 20px", borderRadius:8, border:"none", background:!testing?"var(--amber)":"var(--bg-elevated)", color:!testing?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:!testing?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
           {testing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Testing…</> : "Test Connection"}
@@ -1395,6 +1413,12 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
           <button onClick={pullPosts} disabled={syncing}
             style={{ padding:"10px 20px", borderRadius:8, border:"none", background:syncing?"var(--bg-elevated)":"#5cba6c", color:syncing?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:syncing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
             {syncing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Syncing…</> : "↓ Pull Posts from Wix"}
+          </button>
+        )}
+        {isConnected && (
+          <button onClick={fetchMemberId} disabled={testing}
+            style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:testing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+            🔍 Lookup Member ID
           </button>
         )}
       </div>
@@ -2001,13 +2025,13 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       if (schedule.publishToWix && wixConnected) {
         setLoadMsg("Creating draft on Wix…");
         const wixCfg = loadWixConfig();
-        const body = buildWixPostBody(finalPost, wixCfg.memberId || "");
+        const body = buildWixPostBody(finalPost);
         // Create as draft first, then publish
-        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, wixCfg);
+        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, getWixCfgWithAccount(wixCfg));
         const wixId = res?.draftPost?.id;
         if (wixId && schedule.status === "published") {
           setLoadMsg("Publishing to Wix…");
-          await wixFetch(`/blog/v3/draft-posts/${wixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/blog/v3/draft-posts/${wixId}/publish`, "POST", {}, getWixCfgWithAccount(wixCfg));
         }
       }
 
@@ -2773,16 +2797,20 @@ function textToWixContent(text) {
 }
 
 // Build the Wix create/update post body
-function buildWixPostBody(form, memberId = "") {
+function buildWixPostBody(form) {
   const richContent = textToWixContent(form.body);
   return {
     draftPost: {
-      title: form.title,
+      title:       form.title,
       richContent,
-      excerpt: form.body.slice(0, 200).replace(/[#*]/g, "").trim(),
-      ...(memberId ? { memberId } : {}),
+      excerpt:     (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
     }
   };
+}
+
+function getWixCfgWithAccount(cfg) {
+  // accountId is the Wix account UUID — same as the memberId on pulled posts
+  return { ...cfg, accountId: cfg.memberId || cfg.siteId || "" };
 }
 
 // ─── POST EDITOR MODAL ────────────────────────────────────────────────────────
@@ -2818,7 +2846,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
     const wixCfg = loadWixConfig();
 
     try {
-      const body = buildWixPostBody(form, wixCfg.memberId || "");
+      const body = buildWixPostBody(form);
 
       if (post?.wixId) {
         // Update existing draft post on Wix
@@ -2826,19 +2854,19 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
         await wixFetch(`/blog/v3/draft-posts/${post.wixId}`, "PATCH", body, wixCfg);
         if (!asDraft) {
           setWixStatus("Publishing…");
-          await wixFetch(`/blog/v3/draft-posts/${post.wixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/blog/v3/draft-posts/${post.wixId}/publish`, "POST", {}, getWixCfgWithAccount(wixCfg));
         }
         setWixStatus(asDraft ? "✓ Updated as draft on Wix" : "✓ Published to Wix!");
       } else {
         // Create new draft post on Wix, then optionally publish
         setWixStatus("Creating draft on Wix…");
-        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, wixCfg);
+        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, getWixCfgWithAccount(wixCfg));
         const newWixId = res?.draftPost?.id;
         if (!newWixId) throw new Error(`Wix didn't return a post ID. Response: ${JSON.stringify(res).slice(0,200)}`);
 
         if (!asDraft) {
           setWixStatus("Publishing…");
-          await wixFetch(`/blog/v3/draft-posts/${newWixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/blog/v3/draft-posts/${newWixId}/publish`, "POST", {}, getWixCfgWithAccount(wixCfg));
         }
 
         // Save wixId back to the post
