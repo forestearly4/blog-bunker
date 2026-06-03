@@ -1977,11 +1977,11 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
         const wixCfg = loadWixConfig();
         const body = buildWixPostBody(finalPost);
         // Create as draft first, then publish
-        const res = await wixFetch("/v3/draft-posts", "POST", body, wixCfg);
+        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, wixCfg);
         const wixId = res?.draftPost?.id;
         if (wixId && schedule.status === "published") {
           setLoadMsg("Publishing to Wix…");
-          await wixFetch(`/v3/draft-posts/${wixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/blog/v3/draft-posts/${wixId}/publish`, "POST", {}, wixCfg);
         }
       }
 
@@ -2796,22 +2796,22 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
       if (post?.wixId) {
         // Update existing draft post on Wix
         setWixStatus("Updating on Wix…");
-        await wixFetch(`/v3/draft-posts/${post.wixId}`, "PATCH", body, wixCfg);
+        await wixFetch(`/blog/v3/draft-posts/${post.wixId}`, "PATCH", body, wixCfg);
         if (!asDraft) {
           setWixStatus("Publishing…");
-          await wixFetch(`/v3/draft-posts/${post.wixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/blog/v3/draft-posts/${post.wixId}/publish`, "POST", {}, wixCfg);
         }
         setWixStatus(asDraft ? "✓ Updated as draft on Wix" : "✓ Published to Wix!");
       } else {
         // Create new draft post on Wix, then optionally publish
         setWixStatus("Creating draft on Wix…");
-        const res = await wixFetch("/v3/draft-posts", "POST", body, wixCfg);
+        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, wixCfg);
         const newWixId = res?.draftPost?.id;
         if (!newWixId) throw new Error(`Wix didn't return a post ID. Response: ${JSON.stringify(res).slice(0,200)}`);
 
         if (!asDraft) {
           setWixStatus("Publishing…");
-          await wixFetch(`/v3/draft-posts/${newWixId}/publish`, "POST", {}, wixCfg);
+          await wixFetch(`/blog/v3/draft-posts/${newWixId}/publish`, "POST", {}, wixCfg);
         }
 
         // Save wixId back to the post
