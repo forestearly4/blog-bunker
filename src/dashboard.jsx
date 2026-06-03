@@ -1285,6 +1285,13 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       } while (cursor && page < 10);
 
       addLog(`Found ${allPosts.length} posts on Wix`);
+      // Log the raw first post to help identify memberId field
+      if (allPosts.length > 0) {
+        const firstPost = allPosts[0];
+        addLog(`First post raw keys: ${Object.keys(firstPost).join(", ")}`, "info");
+        const memberFields = ["memberId","authorId","ownerId","author","member","createdBy","creatorId"];
+        memberFields.forEach(f => { if (firstPost[f]) addLog(`Found ${f}: ${JSON.stringify(firstPost[f]).slice(0,80)}`, "info"); });
+      }
       // Extract memberId from first post to use for publishing
       const extractedMemberId = allPosts[0]?.memberId || allPosts[0]?.blogPost?.memberId || "";
       if (extractedMemberId && !cfg.memberId) {
