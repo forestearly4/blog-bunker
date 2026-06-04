@@ -1149,7 +1149,14 @@ function APIKeysSettings({ apiKeys, onSave }) {
 const WIX_STORAGE = "bb_wix_config";
 
 function loadWixConfig() {
-  try { return JSON.parse(localStorage.getItem(WIX_STORAGE) || "{}"); } catch { return {}; }
+  try {
+    const cfg = JSON.parse(localStorage.getItem(WIX_STORAGE) || "{}");
+    // Ensure correct site member ID is always set
+    if (!cfg.memberId) {
+      cfg.memberId = "8838fc89-15f1-4f8e-8f46-18d58c15649f";
+    }
+    return cfg;
+  } catch { return { memberId: "8838fc89-15f1-4f8e-8f46-18d58c15649f" }; }
 }
 function saveWixConfig(cfg) {
   try { localStorage.setItem(WIX_STORAGE, JSON.stringify(cfg)); } catch {}
@@ -2807,11 +2814,15 @@ function textToWixContent(text) {
 // Build the Wix create/update post body
 function buildWixPostBody(form) {
   const richContent = textToWixContent(form.body);
+  const wixCfg = loadWixConfig();
+  // Use stored memberId or fall back to known site member ID
+  const memberId = wixCfg.memberId || "8838fc89-15f1-4f8e-8f46-18d58c15649f";
   return {
     draftPost: {
       title:      form.title,
       richContent,
       excerpt:    (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
+      memberId,
     }
   };
 }
