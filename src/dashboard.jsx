@@ -2802,13 +2802,19 @@ function textToWixContent(text) {
 // Build the Wix create/update post body
 function buildWixPostBody(form) {
   const richContent = textToWixContent(form.body);
-  return {
+  // memberId from cfg is used as post author — pulled from existing posts
+  const wixCfg = loadWixConfig();
+  const memberId = wixCfg.memberId || "";
+  const body = {
     draftPost: {
-      title:       form.title,
+      title:      form.title,
       richContent,
-      excerpt:     (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
+      excerpt:    (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
     }
   };
+  // Only include memberId if we have one — omitting it lets Wix use the account owner
+  if (memberId) body.draftPost.memberId = memberId;
+  return body;
 }
 
 function getWixCfgWithAccount(cfg) {
