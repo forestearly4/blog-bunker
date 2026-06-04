@@ -1,6 +1,5 @@
 /**
  * Blog Bunker — Wix API Proxy (Netlify Edge Function)
- * Reads WIX_API_KEY, WIX_SITE_ID, WIX_ACCOUNT_ID from Netlify env vars.
  */
 
 const CORS = {
@@ -17,35 +16,30 @@ function json(data, status = 200) {
 }
 
 export default async (request, context) => {
-  if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: CORS });
-  }
-  if (request.method !== "POST") {
-    return json({ error: "Method not allowed" }, 405);
-  }
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
   let body = {};
   try { body = await request.json(); } catch {}
 
-  const apiKey    = Deno.env.get("WIX_API_KEY")     || body.apiKey    || "";
-  const siteId    = Deno.env.get("WIX_SITE_ID")     || body.siteId    || "";
-  const accountId = Deno.env.get("WIX_ACCOUNT_ID")  || body.accountId || "";
+  const apiKey    = Deno.env.get("WIX_API_KEY")    || Deno.env.get("wix_api_key")    || body.apiKey    || "";
+  const siteId    = Deno.env.get("WIX_SITE_ID")    || Deno.env.get("wix_site_id")    || body.siteId    || "";
+  const accountId = Deno.env.get("WIX_ACCOUNT_ID") || Deno.env.get("wix_account_id") || body.accountId || "8ac069ef-24ac-441a-9b21-0108361be0d7";
+
   const { endpoint, method = "GET", data = null } = body;
 
-  if (!apiKey)              return json({ error: "WIX_API_KEY not set in Netlify env vars." }, 500);
-  if (!siteId)              return json({ error: "WIX_SITE_ID not set in Netlify env vars." }, 500);
-  if (!endpoint?.startsWith("/")) return json({ error: "endpoint must start with /" }, 400);
+  if (!apiKey)                     return json({ error: "WIX_API_KEY not configured." }, 500);
+  if (!siteId)                     return json({ error: "WIX_SITE_ID not configured." }, 500);
+  if (!endpoint?.startsWith("/"))  return json({ error: "endpoint must start with /" }, 400);
 
   const url = `https://www.wixapis.com${endpoint}`;
 
   const headers = {
-    "Content-Type":  "application/json",
-    "Authorization": apiKey,
-    "wix-site-id":   siteId,
+    "Content-Type":    "application/json",
+    "Authorization":   apiKey,
+    "wix-site-id":     siteId,
+    "wix-account-id":  accountId,
   };
-
-  // Include account ID header if available — lets Wix resolve owner identity for blog posts
-  if (accountId) headers["wix-account-id"] = accountId;
 
   const fetchOpts = { method, headers };
   if (data && method !== "GET") fetchOpts.body = JSON.stringify(data);
@@ -62,11 +56,10 @@ export default async (request, context) => {
 
     if (!upstream.ok) {
       const msg = result?.message || result?.error?.message || JSON.stringify(result);
-      return json({ error: `Wix API ${upstream.status}: ${msg}`, urlCalled: url }, upstream.status);
+      return json({ error: `Wix API ${upstream.status}: ${msg}`, urlCalled: url, wixResponse: result }, upstream.status);
     }
 
     return json(result, 200);
-
   } catch (err) {
     return json({ error: "Proxy error", detail: err.message, urlCalled: url }, 502);
   }
