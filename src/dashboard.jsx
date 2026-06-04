@@ -1212,7 +1212,6 @@ async function wixFetch(endpoint, method = "GET", data = null, cfg = {}) {
 function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const [cfg,       setCfg]      = useState(loadWixConfig);
   const [status,    setStatus]   = useState(cfg.connected ? "connected" : "idle");
-  const isConnected = status === "connected" || !!cfg.connected;
   const [syncing,   setSyncing]  = useState(false);
   const [testing,   setTesting]  = useState(false);
   const [log,       setLog]      = useState([]);
@@ -1222,6 +1221,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const [siteId,    setSiteId]   = useState(cfg.siteId || "");
   const [memberId,  setMemberId] = useState(cfg.memberId || "");
   const [showKey,   setShowKey]  = useState(false);
+
+  const isConnected = status === "connected" || !!cfg.connected;
 
   const addLog = (msg, type="info") => setLog(l => [...l, { msg, type, ts: new Date().toLocaleTimeString() }]);
 
