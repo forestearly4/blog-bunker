@@ -1327,21 +1327,26 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const fetchMemberId = async () => {
     setTesting(true);
     addLog("Looking up your Wix site member ID…");
-    try {
-      // Try contacts/members API to find the site owner's member ID
-      const res = await wixFetch("/members/v1/members?fieldsets=FULL&paging.limit=10", "GET", null, { apiKey, siteId });
-      addLog(`Members response: ${JSON.stringify(res).slice(0, 400)}`, "info");
-      const members = res.members || res.items || [];
-      if (members.length > 0) {
-        addLog(`Found ${members.length} members. First: ${JSON.stringify(members[0]).slice(0,200)}`, "info");
-      }
-    } catch(e) {
-      // Try alternative endpoint
+    const keys = { apiKey, siteId };
+    // Try multiple member endpoints to find the right one
+    const attempts = [
+      "/members/v1/members?paging.limit=5",
+      "/members/v1/members/my",
+      "/site-members/v1/members?paging.limit=5",
+      "/contacts/v4/contacts?paging.limit=5",
+    ];
+    for (const ep of attempts) {
       try {
-        const res2 = await wixFetch("/site-members/v1/members?paging.limit=5", "GET", null, { apiKey, siteId });
-        addLog(`Alt members: ${JSON.stringify(res2).slice(0,400)}`, "info");
-      } catch(e2) {
-        addLog(`Members lookup failed: ${e2.message}`, "error");
+        addLog(`Trying ${ep}…`);
+        const res = await wixFetch(ep, "GET", null, keys);
+        addLog(`Response: ${JSON.stringify(res).slice(0,300)}`, "info");
+        // Extract any IDs found
+        const members = res.members || res.contacts || res.items || (res.member ? [res.member] : []);
+        if (members.length > 0) {
+          addLog(`Found ${members.length} members. First ID: ${JSON.stringify(members[0]).slice(0,200)}`, "info");
+        }
+      } catch(e) {
+        addLog(`✗ ${ep}: ${e.message.slice(0,80)}`, "error");
       }
     }
     setTesting(false);
@@ -2802,19 +2807,13 @@ function textToWixContent(text) {
 // Build the Wix create/update post body
 function buildWixPostBody(form) {
   const richContent = textToWixContent(form.body);
-  // memberId from cfg is used as post author — pulled from existing posts
-  const wixCfg = loadWixConfig();
-  const memberId = wixCfg.memberId || "";
-  const body = {
+  return {
     draftPost: {
       title:      form.title,
       richContent,
       excerpt:    (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
     }
   };
-  // Only include memberId if we have one — omitting it lets Wix use the account owner
-  if (memberId) body.draftPost.memberId = memberId;
-  return body;
 }
 
 function getWixCfgWithAccount(cfg) {
