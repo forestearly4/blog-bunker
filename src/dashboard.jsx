@@ -1223,6 +1223,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const [showKey,   setShowKey]  = useState(false);
 
   const isConnected = status === "connected" || !!cfg.connected;
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
 
   const addLog = (msg, type="info") => setLog(l => [...l, { msg, type, ts: new Date().toLocaleTimeString() }]);
 
