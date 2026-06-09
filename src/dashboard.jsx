@@ -1301,7 +1301,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   };
 
   const connectOAuth = async () => {
-    if (!appId || !appSecret || !instanceId) { addLog("App ID, App Secret, and Instance ID are all required", "error"); return; }
+    if (!appId || !appSecret) { addLog("App ID and App Secret are required", "error"); return; }
     setTesting(true);
     addLog("Exchanging credentials for OAuth token…");
     try {
@@ -1415,7 +1415,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
             {label:"App ID",     val:appId,      set:setAppId,     ph:"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
             {label:"App Secret", val:appSecret,  set:setAppSecret, ph:"your-app-secret-key", pwd:true},
             {label:"Site ID",    val:siteId,     set:setSiteId,    ph:"964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3"},
-            {label:"Instance ID",val:instanceId, set:setInstanceId,ph:"from app install URL"},
+            {label:"Instance ID (optional)",val:instanceId, set:setInstanceId,ph:"leave blank to try without"},
           ].map(f=>(
             <div key={f.label}>
               <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
@@ -1423,8 +1423,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
                 onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
             </div>
           ))}
-          <button onClick={connectOAuth} disabled={!appId||!appSecret||!instanceId||testing}
-            style={{ padding:"10px 24px", borderRadius:8, border:"none", background:appId&&appSecret&&instanceId&&!testing?"var(--amber)":"var(--bg-elevated)", color:appId&&appSecret&&instanceId&&!testing?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:appId&&appSecret&&instanceId&&!testing?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
+          <button onClick={connectOAuth} disabled={!appId||!appSecret||testing}
+            style={{ padding:"10px 24px", borderRadius:8, border:"none", background:appId&&appSecret&&!testing?"var(--amber)":"var(--bg-elevated)", color:appId&&appSecret&&!testing?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:appId&&appSecret&&!testing?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
             {testing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Connecting…</> : "🔑 Connect with OAuth"}
           </button>
         </div>
