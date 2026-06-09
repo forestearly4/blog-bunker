@@ -21,3 +21,8 @@
 [[edge_functions]]
   path     = "/api/wix"
   function = "wix-proxy"
+
+  [[redirects]]
+  from   = "/api/wix-token"
+  to     = "/.netlify/functions/wix-token"
+  status = 200
