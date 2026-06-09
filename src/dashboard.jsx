@@ -1408,11 +1408,11 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
           </div>
           <div>
             <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-              Wix Member ID <span style={{ fontWeight:400, color:"var(--muted)", textTransform:"none", letterSpacing:0 }}>— required to create/publish posts</span>
+              Velo Endpoint URL <span style={{ fontWeight:400, color:"var(--muted)", textTransform:"none", letterSpacing:0 }}>— for direct publishing</span>
             </label>
-            <input style={{...iS, fontFamily:"monospace"}} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value={memberId} onChange={e=>setMemberId(e.target.value)} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
-            <p style={{ fontSize:11, color:"var(--text-secondary)", marginTop:5, lineHeight:1.5 }}>
-              Wix Dashboard → Contacts → Members → click your name → copy the ID from the URL bar
+            <input style={{...iS, fontFamily:"monospace"}} placeholder="https://caskandstream.com/_functions/createBlogPost" value={cfg.veloUrl || "https://caskandstream.com/_functions/createBlogPost"} readOnly />
+            <p style={{ fontSize:11, color:"var(--text-secondary)", marginTop:4, lineHeight:1.5 }}>
+              Set up the Velo http-functions.js on your Wix site to enable direct publishing.
             </p>
           </div>
         </div>
@@ -2036,18 +2036,12 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
         onAddCalEvent({ title: finalPost.title, type: schedule.status === "published" ? "scheduled" : "draft", day });
       }
 
-      // Push to Wix
+      // Push to Wix via Velo HTTP function
       if (schedule.publishToWix && wixConnected) {
-        setLoadMsg("Creating draft on Wix…");
+        setLoadMsg("Publishing to Wix via Velo…");
         const wixCfg = loadWixConfig();
-        const body = buildWixPostBody(finalPost);
-        // Create as draft first, then publish
-        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, getWixCfgWithAccount(wixCfg));
-        const wixId = res?.draftPost?.id;
-        if (wixId && schedule.status === "published") {
-          setLoadMsg("Publishing to Wix…");
-          await wixFetch(`/blog/v3/draft-posts/${wixId}/publish`, "POST", {}, getWixCfgWithAccount(wixCfg));
-        }
+        const result = await wixVeloPush(finalPost, schedule.status === "published", wixCfg);
+        if (result.postId) { finalPost.wixId = result.postId; finalPost.fromWix = true; }
       }
 
       markDone("publish");
@@ -2812,24 +2806,40 @@ function textToWixContent(text) {
 }
 
 // Build the Wix create/update post body
-function buildWixPostBody(form) {
-  const richContent = textToWixContent(form.body);
-  const wixCfg = loadWixConfig();
-  // Use stored memberId or fall back to known site member ID
-  const memberId = wixCfg.memberId || "8838fc89-15f1-4f8e-8f46-18d58c15649f";
+function buildWixPostBody(form, status = "DRAFT") {
   return {
-    draftPost: {
-      title:      form.title,
-      richContent,
-      excerpt:    (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
-      memberId,
-    }
+    title:   form.title,
+    content: form.body || "",
+    excerpt: (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
+    status,
   };
 }
 
 function getWixCfgWithAccount(cfg) {
-  // accountId is the Wix account UUID — same as the memberId on pulled posts
   return { ...cfg, accountId: cfg.memberId || cfg.siteId || "" };
+}
+
+// Push post via Wix Velo HTTP function (runs as site identity — no memberId needed)
+async function wixVeloPush(form, publishNow = false, cfg = {}) {
+  const veloUrl = cfg.veloUrl || "https://caskandstream.com/_functions/createBlogPost";
+  const secret  = cfg.veloSecret || "blogbunker-secret-2026";
+
+  const body = buildWixPostBody(form, publishNow ? "PUBLISHED" : "DRAFT");
+
+  const res = await fetch(veloUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type":            "application/json",
+      "X-Blog-Bunker-Secret":    secret,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); } catch { throw new Error(`Velo returned: ${text.slice(0,200)}`); }
+  if (!res.ok || !json.success) throw new Error(json.error || json.detail || `Velo error ${res.status}`);
+  return json;
 }
 
 // ─── POST EDITOR MODAL ────────────────────────────────────────────────────────
@@ -2865,34 +2875,13 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
     const wixCfg = loadWixConfig();
 
     try {
-      const body = buildWixPostBody(form);
-
-      if (post?.wixId) {
-        // Update existing draft post on Wix
-        setWixStatus("Updating on Wix…");
-        await wixFetch(`/blog/v3/draft-posts/${post.wixId}`, "PATCH", body, wixCfg);
-        if (!asDraft) {
-          setWixStatus("Publishing…");
-          await wixFetch(`/blog/v3/draft-posts/${post.wixId}/publish`, "POST", {}, getWixCfgWithAccount(wixCfg));
-        }
-        setWixStatus(asDraft ? "✓ Updated as draft on Wix" : "✓ Published to Wix!");
-      } else {
-        // Create new draft post on Wix, then optionally publish
-        setWixStatus("Creating draft on Wix…");
-        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, getWixCfgWithAccount(wixCfg));
-        const newWixId = res?.draftPost?.id;
-        if (!newWixId) throw new Error(`Wix didn't return a post ID. Response: ${JSON.stringify(res).slice(0,200)}`);
-
-        if (!asDraft) {
-          setWixStatus("Publishing…");
-          await wixFetch(`/blog/v3/draft-posts/${newWixId}/publish`, "POST", {}, getWixCfgWithAccount(wixCfg));
-        }
-
-        // Save wixId back to the post
-        const updatedPost = { ...post, ...form, id: post?.id || Date.now(), wixId: newWixId, status: asDraft ? "draft" : "published", fromWix: true };
-        onSave(updatedPost);
-        setWixStatus(asDraft ? "✓ Saved as draft on Wix" : "✓ Published to caskandstream.com!");
-      }
+      // Use Velo HTTP function — runs as site identity, no memberId needed
+      setWixStatus(asDraft ? "Saving draft to Wix…" : "Publishing to Wix…");
+      const result = await wixVeloPush(form, !asDraft, wixCfg);
+      const newWixId = result.postId;
+      const updatedPost = { ...post, ...form, id: post?.id || Date.now(), wixId: newWixId, status: asDraft ? "draft" : "published", fromWix: true };
+      onSave(updatedPost);
+      setWixStatus(asDraft ? "✓ Saved as draft on Wix" : "✓ Published to caskandstream.com!");
     } catch(e) {
       setWixError(`Wix error: ${e.message}`);
       setWixStatus("");
