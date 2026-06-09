@@ -23,12 +23,12 @@ export default async (req) => {
   let body;
   try { body = await req.json(); } catch { return new Response(JSON.stringify({ error: "Invalid JSON" }), { status: 400, headers: CORS }); }
 
-  const appId     = process.env.WIX_APP_ID     || body.appId;
-  const appSecret = process.env.WIX_APP_SECRET || body.appSecret;
-  const instanceId = body.instanceId;
+  const appId      = process.env.WIX_APP_ID     || body.appId;
+  const appSecret  = process.env.WIX_APP_SECRET || body.appSecret;
+  const instanceId = body.instanceId || "";
 
-  if (!appId || !appSecret || !instanceId) {
-    return new Response(JSON.stringify({ error: "appId, appSecret, and instanceId are required" }), { status: 400, headers: CORS });
+  if (!appId || !appSecret) {
+    return new Response(JSON.stringify({ error: "appId and appSecret are required" }), { status: 400, headers: CORS });
   }
 
   try {
