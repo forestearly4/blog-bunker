@@ -2892,8 +2892,7 @@ async function wixVeloPush(form, publishNow = false, cfg = {}) {
     excerpt:     (form.body || "").slice(0, 200).replace(/[^a-zA-Z0-9 .!?,]/g, " ").slice(0, 200).trim(),
     richContent: textToWixContent(form.body),
   };
-  // Always include memberId — required by Wix Blog API
-  if (memberId) draftPostData.memberId = memberId;
+  // Deliberately omitting memberId to see raw Wix error
 
   const createRes = await makeWixCall("/blog/v3/draft-posts", "POST", {
     draftPost: draftPostData,
