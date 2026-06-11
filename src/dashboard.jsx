@@ -1153,10 +1153,10 @@ function loadWixConfig() {
     const cfg = JSON.parse(localStorage.getItem(WIX_STORAGE) || "{}");
     // Ensure correct site member ID is always set
     if (!cfg.memberId) {
-      cfg.memberId = "09975983-0b1e-431d-913b-fa98e96cba68";
+      cfg.memberId = "1e9d13fa-cf47-4524-8cf1-78b3193785ec";
     }
     return cfg;
-  } catch { return { memberId: "09975983-0b1e-431d-913b-fa98e96cba68" }; }
+  } catch { return { memberId: "1e9d13fa-cf47-4524-8cf1-78b3193785ec" }; }
 }
 function saveWixConfig(cfg) {
   try { localStorage.setItem(WIX_STORAGE, JSON.stringify(cfg)); } catch {}
