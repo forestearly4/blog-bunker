@@ -1244,7 +1244,7 @@ async function wixFetchOAuth(endpoint, method = "GET", data = null, oauthToken, 
 
 // ─── WIX SYNC PANEL ──────────────────────────────────────────────────────────
 
-function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
+function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
   const [cfg,       setCfg]      = useState(loadWixConfig);
   const [status,    setStatus]   = useState(cfg.connected ? "connected" : "idle");
   const [syncing,   setSyncing]  = useState(false);
@@ -1287,6 +1287,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
           const newCfg = { connected: true, lastSync: null, pullCount: 0, apiKey, siteId, workingEndpoint: ep, appId, appSecret, instanceId, oauthToken };
           saveWixConfig(newCfg); setCfg(newCfg); setStatus("connected");
           addLog(`✓ Connected! Endpoint: ${ep}`, "success");
+          if (onConnect) onConnect();
           setTesting(false); return;
         } else {
           addLog(`Response: ${JSON.stringify(data).slice(0,100)}`, "info");
@@ -1318,6 +1319,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
         const finalCfg = { ...newCfg, connected: true, workingEndpoint: ep };
         saveWixConfig(finalCfg); setCfg(finalCfg); setStatus("connected");
         addLog("✓ OAuth connected successfully!", "success");
+        if (onConnect) onConnect();
       }
     } catch(e) {
       addLog(`OAuth failed: ${e.message}`, "error");
@@ -3232,6 +3234,11 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const [gscData, setGscData] = useState(loadGSCData);
   const [wixConnected, setWixConnected] = useState(() => !!loadWixConfig().connected);
 
+  // Re-check wix connection state whenever settings tab is visited
+  useEffect(() => {
+    setWixConnected(!!loadWixConfig().connected);
+  }, [activeTab, settingsSection]);
+
   const handleWixSync = (wixPosts) => {
     setPosts(current => {
       // Merge: keep existing non-wix posts, replace/add wix posts by wixId
@@ -3745,6 +3752,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   <WixSyncPanel
                     onSync={handleWixSync}
                     onDisconnect={handleWixDisconnect}
+                    onConnect={() => setWixConnected(true)}
                     currentPostCount={posts.length}
                   />
                 )}
