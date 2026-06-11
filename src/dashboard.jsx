@@ -2848,18 +2848,24 @@ function getWixCfgWithAccount(cfg) {
 
 // Push post via Wix Velo HTTP function (runs as site identity — no memberId needed)
 async function wixVeloPush(form, publishNow = false, cfg = {}) {
-  const veloUrl = cfg.veloUrl || "https://caskandstream.com/_functions/createBlogPost";
-  const secret  = cfg.veloSecret || "blogbunker-secret-2026";
-
-  const body = buildWixPostBody(form, publishNow ? "PUBLISHED" : "DRAFT");
-
-  const res = await fetch(veloUrl, {
+  // Use Wix REST API through the /api/wix proxy — no Velo needed
+  const res = await fetch("/api/wix", {
     method: "POST",
-    headers: {
-      "Content-Type":            "application/json",
-      "X-Blog-Bunker-Secret":    secret,
-    },
-    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      endpoint:   "/blog/v3/draft-posts",
+      method:     "POST",
+      apiKey:     cfg.apiKey     || "",
+      siteId:     cfg.siteId     || "",
+      oauthToken: cfg.oauthToken || "",
+      data: {
+        draftPost: {
+          title:       form.title,
+          excerpt:     (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
+          richContent: textToWixContent(form.body),
+        }
+      }
+    })
   });
 
   const text = await res.text();
