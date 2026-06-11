@@ -2874,12 +2874,28 @@ async function wixVeloPush(form, publishNow = false, cfg = {}) {
     return json;
   };
 
+  // Fetch the site owner's memberId first — required by Wix Blog API
+  let memberId = loadWixConfig().memberId || "";
+  if (!memberId) {
+    try {
+      const memberRes = await makeWixCall("/members/v1/members/my", "GET", null);
+      memberId = memberRes?.member?.id || memberRes?.member?._id || "";
+      if (memberId) {
+        const c = loadWixConfig();
+        saveWixConfig({ ...c, memberId });
+      }
+    } catch(e) { /* ignore — proceed without memberId */ }
+  }
+
+  const draftPostData = {
+    title:       form.title,
+    excerpt:     (form.body || "").slice(0, 200).replace(/[#* \n]/g, " ").trim(),
+    richContent: textToWixContent(form.body),
+  };
+  if (memberId) draftPostData.memberId = memberId;
+
   const createRes = await makeWixCall("/blog/v3/draft-posts", "POST", {
-    draftPost: {
-      title:       form.title,
-      excerpt:     (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
-      richContent: textToWixContent(form.body),
-    }
+    draftPost: draftPostData,
   });
 
   const draftId = createRes.draftPost?.id || createRes.draftPost?._id;
