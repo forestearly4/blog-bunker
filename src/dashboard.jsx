@@ -2848,34 +2848,46 @@ function getWixCfgWithAccount(cfg) {
 
 // Push post via Wix Velo HTTP function (runs as site identity — no memberId needed)
 async function wixVeloPush(form, publishNow = false, cfg = {}) {
-  // Use Wix REST API through the /api/wix proxy — no Velo needed
-  const res = await fetch("/api/wix", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      endpoint:   "/blog/v3/draft-posts",
-      method:     "POST",
-      apiKey:     cfg.apiKey     || "",
-      siteId:     cfg.siteId     || "",
-      oauthToken: cfg.oauthToken || "",
-      data: {
-        draftPost: {
-          title:       form.title,
-          excerpt:     (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
-          richContent: textToWixContent(form.body),
-        }
-      }
-    })
+  // Use Wix REST API through the /api/wix proxy
+  // Sends oauthToken if available (bypasses memberId requirement)
+  // Falls back to apiKey auth
+  const makeWixCall = async (endpoint, method, data) => {
+    const res = await fetch("/api/wix", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        endpoint,
+        method,
+        data,
+        apiKey:     cfg.apiKey     || "",
+        siteId:     cfg.siteId     || "",
+        oauthToken: cfg.oauthToken || "",
+        accountId:  "8ac069ef-24ac-441a-9b21-0108361be0d7",
+      })
+    });
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch { throw new Error(`Proxy error (${res.status}): ${text.slice(0,200)}`); }
+    if (!res.ok || json.error) throw new Error(json.error || `API ${res.status}`);
+    return json;
+  };
+
+  const createRes = await makeWixCall("/blog/v3/draft-posts", "POST", {
+    draftPost: {
+      title:       form.title,
+      excerpt:     (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
+      richContent: textToWixContent(form.body),
+    }
   });
 
-  const text = await res.text();
-  let json;
-  try { json = JSON.parse(text); } catch { throw new Error(`Velo returned non-JSON: ${text.slice(0,300)}`); }
-  if (!res.ok || !json.success) {
-    const detail = json.detail ? ` — ${json.detail}` : "";
-    throw new Error(`${json.error || `Velo error ${res.status}`}${detail}`);
+  const draftId = createRes.draftPost?.id || createRes.draftPost?._id;
+  if (!draftId) throw new Error(`No draft ID returned: ${JSON.stringify(createRes).slice(0,200)}`);
+
+  if (publishNow) {
+    await makeWixCall(`/blog/v3/draft-posts/${draftId}/publish`, "POST", {});
   }
-  return json;
+
+  return { success: true, postId: draftId };
 }
 
 // ─── POST EDITOR MODAL ────────────────────────────────────────────────────────
