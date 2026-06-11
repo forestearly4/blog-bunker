@@ -1153,10 +1153,10 @@ function loadWixConfig() {
     const cfg = JSON.parse(localStorage.getItem(WIX_STORAGE) || "{}");
     // Ensure correct site member ID is always set
     if (!cfg.memberId) {
-      cfg.memberId = "8838fc89-15f1-4f8e-8f46-18d58c15649f";
+      cfg.memberId = "09975983-0b1e-431d-913b-fa98e96cba68";
     }
     return cfg;
-  } catch { return { memberId: "8838fc89-15f1-4f8e-8f46-18d58c15649f" }; }
+  } catch { return { memberId: "09975983-0b1e-431d-913b-fa98e96cba68" }; }
 }
 function saveWixConfig(cfg) {
   try { localStorage.setItem(WIX_STORAGE, JSON.stringify(cfg)); } catch {}
@@ -2889,9 +2889,10 @@ async function wixVeloPush(form, publishNow = false, cfg = {}) {
 
   const draftPostData = {
     title:       form.title,
-    excerpt:     (form.body || "").slice(0, 200).replace(/[#* \n]/g, " ").trim(),
+    excerpt:     (form.body || "").slice(0, 200).replace(/[^a-zA-Z0-9 .!?,]/g, " ").slice(0, 200).trim(),
     richContent: textToWixContent(form.body),
   };
+  // Always include memberId — required by Wix Blog API
   if (memberId) draftPostData.memberId = memberId;
 
   const createRes = await makeWixCall("/blog/v3/draft-posts", "POST", {
