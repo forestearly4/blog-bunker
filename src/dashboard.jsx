@@ -1303,13 +1303,15 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
 
   const connectOAuth = () => {
     if (!appId) { addLog("App ID / Client ID is required", "error"); return; }
-    // Use Wix installer URL — works for both App Market and Headless OAuth
+    // Wix Headless OAuth authorization URL
     const params = new URLSearchParams({
-      appId:       appId,
-      redirectUrl: "https://blogbunker.netlify.app/api/wix-callback",
-      state:       "wix_connect",
+      client_id:     appId,
+      redirect_uri:  "https://blogbunker.netlify.app/api/wix-callback",
+      response_type: "code",
+      scope:         "offline_access",
+      state:         "wix_connect",
     });
-    const authUrl = `https://www.wix.com/installer/install?${params}`;
+    const authUrl = `https://www.wix.com/oauth/authorize?${params}`;
     addLog("Opening Wix authorization page…");
     const popup = window.open(authUrl, "wix_auth", "width=650,height=750,scrollbars=yes");
     if (!popup) {
