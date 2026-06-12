@@ -1301,31 +1301,36 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
     setStatus("error"); setTesting(false);
   };
 
-  const connectOAuth = async () => {
-    if (!appId || !appSecret) { addLog("App ID and App Secret are required", "error"); return; }
-    setTesting(true);
-    addLog("Exchanging credentials for OAuth token…");
-    try {
-      const token = await getWixOAuthToken(appId, appSecret, instanceId);
-      setOauthToken(token);
-      addLog("✓ OAuth token received — testing connection…", "success");
-      // Save token and test
-      const newCfg = { ...cfg, appId, appSecret, instanceId, oauthToken: token };
-      saveWixConfig(newCfg); setCfg(newCfg);
-      // Now test
-      const ep = "/v3/posts?paging.limit=1";
-      const data = await wixFetchOAuth(ep, "GET", null, token, siteId);
-      if (data.posts !== undefined || data.items !== undefined) {
-        const finalCfg = { ...newCfg, connected: true, workingEndpoint: ep };
-        saveWixConfig(finalCfg); setCfg(finalCfg); setStatus("connected");
-        addLog("✓ OAuth connected successfully!", "success");
-        if (onConnect) onConnect();
-      }
-    } catch(e) {
-      addLog(`OAuth failed: ${e.message}`, "error");
-    }
-    setTesting(false);
+  const connectOAuth = () => {
+    if (!appId) { addLog("App ID is required", "error"); return; }
+    // Build the Wix authorization URL — user logs in with their Wix account
+    // This gives a user-level token that works for creating blog posts
+    const authUrl = new URL("https://www.wix.com/oauth/access");
+    authUrl.searchParams.set("appId",        appId);
+    authUrl.searchParams.set("redirectUrl",  "https://blogbunker.netlify.app/api/wix-callback");
+    authUrl.searchParams.set("response_type","code");
+    authUrl.searchParams.set("state",        "wix_connect");
+    addLog("Opening Wix authorization page…");
+    window.open(authUrl.toString(), "_blank", "width=600,height=700");
+    addLog("Complete the login in the popup, then come back here.", "info");
   };
+
+  // Handle OAuth token returned via URL hash after callback
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (!hash.includes("wix_token=")) return;
+    const params = new URLSearchParams(hash.slice(1));
+    const token   = params.get("wix_token");
+    const refresh = params.get("wix_refresh");
+    if (!token) return;
+    addLog("✓ OAuth token received from Wix!", "success");
+    const newCfg = { ...cfg, oauthToken: token, oauthRefresh: refresh, connected: true };
+    saveWixConfig(newCfg); setCfg(newCfg); setOauthToken(token); setStatus("connected");
+    if (onConnect) onConnect();
+    // Clean up URL hash
+    window.history.replaceState(null, "", window.location.pathname);
+    addLog("✓ Connected with full user-level access — publishing will work!", "success");
+  }, []);
 
   const pullPosts = async () => {
     setSyncing(true);
@@ -1406,29 +1411,34 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
       {!isConnected && authMode === "oauth" && (
         <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
           <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--amber-glow)", border:"1px solid var(--amber)33", fontSize:12, color:"var(--text-secondary)", lineHeight:1.8 }}>
-            <strong style={{color:"var(--amber)"}}>Setup (one time):</strong><br/>
-            1. Go to <a href="https://dev.wix.com/apps" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>dev.wix.com/apps</a> → Create New App<br/>
-            2. In your app: <strong style={{color:"var(--text)"}}>Add APIs</strong> → add <strong style={{color:"var(--text)"}}>Wix Blog</strong> with read + write permissions<br/>
-            3. Go to <strong style={{color:"var(--text)"}}>OAuth</strong> → copy your <strong style={{color:"var(--text)"}}>App ID</strong> and <strong style={{color:"var(--text)"}}>App Secret</strong><br/>
-            4. Install your app on caskandstream.com → copy the <strong style={{color:"var(--text)"}}>Instance ID</strong> from the install URL<br/>
-            5. Paste all three below and click Connect
+            <strong style={{color:"var(--amber)"}}>One-time setup:</strong><br/>
+            1. Go to <a href="https://dev.wix.com/apps" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>dev.wix.com/apps</a> → your Blog Bunker app<br/>
+            2. Make sure <strong style={{color:"var(--text)"}}>Wix Blog</strong> permission is added with read + write<br/>
+            3. Add redirect URI: <code style={{background:"var(--bg-elevated)",padding:"1px 6px",borderRadius:4}}>https://blogbunker.netlify.app/api/wix-callback</code><br/>
+            4. Paste your App ID below and click Connect
           </div>
-          {[
-            {label:"App ID",     val:appId,      set:setAppId,     ph:"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
-            {label:"App Secret", val:appSecret,  set:setAppSecret, ph:"your-app-secret-key", pwd:true},
-            {label:"Site ID",    val:siteId,     set:setSiteId,    ph:"964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3"},
-            {label:"Instance ID (optional)",val:instanceId, set:setInstanceId,ph:"leave blank to try without"},
-          ].map(f=>(
-            <div key={f.label}>
-              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
-              <input type={f.pwd?"password":"text"} style={{...iS, fontFamily:"monospace"}} placeholder={f.ph} value={f.val} onChange={e=>f.set(e.target.value)}
-                onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
-            </div>
-          ))}
-          <button onClick={connectOAuth} disabled={!appId||!appSecret||testing}
-            style={{ padding:"10px 24px", borderRadius:8, border:"none", background:appId&&appSecret&&!testing?"var(--amber)":"var(--bg-elevated)", color:appId&&appSecret&&!testing?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:appId&&appSecret&&!testing?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
-            {testing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Connecting…</> : "🔑 Connect with OAuth"}
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>App ID</label>
+            <input style={{...iS, fontFamily:"monospace"}} placeholder="fae5e105-3953-450f-8db1-dde65eb4141d" value={appId} onChange={e=>setAppId(e.target.value)}
+              onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Site ID</label>
+            <input style={{...iS, fontFamily:"monospace"}} placeholder="964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3" value={siteId} onChange={e=>setSiteId(e.target.value)}
+              onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+          <button onClick={connectOAuth} disabled={!appId}
+            style={{ padding:"12px 24px", borderRadius:8, border:"none", background:appId?"var(--amber)":"var(--bg-elevated)", color:appId?"#0e0f11":"var(--muted)", fontSize:14, fontWeight:700, cursor:appId?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:10, alignSelf:"flex-start" }}>
+            <span style={{fontSize:18}}>⊕</span> Connect with Wix
           </button>
+          <p style={{ fontSize:11, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+            A Wix login popup will open. Sign in with your Wix account and approve Blog Bunker. You'll be redirected back automatically.
+          </p>
+          {log.length > 0 && (
+            <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+              {log[log.length-1]?.msg}
+            </div>
+          )}
         </div>
       )}
 
