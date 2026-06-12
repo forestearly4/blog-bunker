@@ -1,25 +1,21 @@
 /**
  * netlify/functions/wix-oauth-callback.js
- * Handles the Wix OAuth Authorization Code callback
- * 
- * Flow:
- * 1. User clicks "Connect with Wix" in Blog Bunker
- * 2. Browser opens Wix authorization URL
- * 3. User approves → Wix redirects to this function with ?code=xxx
- * 4. This function exchanges the code for tokens
- * 5. Redirects back to Blog Bunker with the token in the URL hash
+ * Handles Wix OAuth Authorization Code callback for Headless client
  */
 
 export default async (req) => {
-  const url  = new URL(req.url);
-  const code = url.searchParams.get("code");
-  const state = url.searchParams.get("state") || "";
+  const url   = new URL(req.url);
+  const code  = url.searchParams.get("code");
 
-  const appId     = process.env.WIX_APP_ID     || "";
-  const appSecret = process.env.WIX_APP_SECRET || "";
+  const clientId     = process.env.WIX_CLIENT_ID     || process.env.WIX_APP_ID     || "c6500272-f2ac-4fad-aeef-6cd500382297";
+  const clientSecret = process.env.WIX_CLIENT_SECRET || process.env.WIX_APP_SECRET || "";
+  const redirectUri  = "https://blogbunker.netlify.app/api/wix-callback";
 
   if (!code) {
-    return new Response("Missing authorization code", { status: 400 });
+    return new Response(`<html><body style="font-family:sans-serif;padding:40px;background:#0e0f11;color:#fff">
+      <h2 style="color:#c47c2b">Missing authorization code</h2>
+      <p>Close this window and try again.</p>
+    </body></html>`, { status: 400, headers: { "Content-Type": "text/html" } });
   }
 
   try {
@@ -28,30 +24,55 @@ export default async (req) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         grant_type:    "authorization_code",
-        client_id:     appId,
-        client_secret: appSecret,
+        client_id:     clientId,
+        client_secret: clientSecret,
         code,
-        redirect_uri:  "https://blogbunker.netlify.app/api/wix-callback",
+        redirect_uri:  redirectUri,
       }),
     });
 
     const data = await res.json();
 
-    if (!res.ok || data.error) {
-      const msg = data.error_description || data.error || "Token exchange failed";
-      return new Response(`OAuth error: ${msg}`, { status: 400 });
+    if (!res.ok || !data.access_token) {
+      const msg = data.error_description || data.error || JSON.stringify(data);
+      return new Response(`<html><body style="font-family:sans-serif;padding:40px;background:#0e0f11;color:#fff">
+        <h2 style="color:#c47c2b">Token exchange failed</h2>
+        <p style="color:#aaa">${msg}</p>
+        <p>Close this window and try again.</p>
+      </body></html>`, { status: 400, headers: { "Content-Type": "text/html" } });
     }
 
     const { access_token, refresh_token, expires_in } = data;
 
-    // Redirect back to Blog Bunker with tokens in URL hash
-    // Hash is not sent to server — stays client-side only
-    const redirectUrl = `https://blogbunker.netlify.app/#wix_token=${access_token}&wix_refresh=${refresh_token || ""}&wix_expires=${expires_in || 3600}`;
-
-    return new Response(null, {
-      status: 302,
-      headers: { Location: redirectUrl },
-    });
+    return new Response(`<!DOCTYPE html>
+    <html>
+    <head><title>Blog Bunker — Connected!</title></head>
+    <body style="font-family:sans-serif;padding:40px;background:#0e0f11;color:#fff;text-align:center">
+      <div style="max-width:400px;margin:60px auto">
+        <div style="font-size:56px;margin-bottom:16px">✓</div>
+        <h2 style="color:#5cba6c;margin-bottom:8px">Wix Connected!</h2>
+        <p style="color:#aaa">Blog Bunker now has full access to your Wix Blog.</p>
+        <p style="color:#555;font-size:12px;margin-top:24px">Closing automatically…</p>
+      </div>
+      <script>
+        const payload = {
+          type:          "wix_oauth_success",
+          access_token:  ${JSON.stringify(access_token)},
+          refresh_token: ${JSON.stringify(refresh_token || "")},
+          expires_in:    ${expires_in || 3600},
+        };
+        if (window.opener) {
+          window.opener.postMessage(payload, "https://blogbunker.netlify.app");
+          setTimeout(() => window.close(), 2000);
+        } else {
+          // Popup was blocked — redirect parent
+          window.location.href = "https://blogbunker.netlify.app/#wix_token="
+            + encodeURIComponent(payload.access_token)
+            + "&wix_refresh=" + encodeURIComponent(payload.refresh_token);
+        }
+      </script>
+    </body>
+    </html>`, { status: 200, headers: { "Content-Type": "text/html" } });
 
   } catch (err) {
     return new Response(`Server error: ${err.message}`, { status: 500 });
