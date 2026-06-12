@@ -1,15 +1,15 @@
 /**
  * netlify/functions/wix-oauth-callback.js
- * Handles Wix OAuth Authorization Code callback for Headless client
+ * Handles Wix Headless OAuth Authorization Code callback
+ * Headless Web clients don't use a client_secret
  */
 
 export default async (req) => {
-  const url   = new URL(req.url);
-  const code  = url.searchParams.get("code");
+  const url  = new URL(req.url);
+  const code = url.searchParams.get("code");
 
-  const clientId     = process.env.WIX_CLIENT_ID     || process.env.WIX_APP_ID     || "c6500272-f2ac-4fad-aeef-6cd500382297";
-  const clientSecret = process.env.WIX_CLIENT_SECRET || process.env.WIX_APP_SECRET || "";
-  const redirectUri  = "https://blogbunker.netlify.app/api/wix-callback";
+  const clientId   = "c6500272-f2ac-4fad-aeef-6cd500382297";
+  const redirectUri = "https://blogbunker.netlify.app/api/wix-callback";
 
   if (!code) {
     return new Response(`<html><body style="font-family:sans-serif;padding:40px;background:#0e0f11;color:#fff">
@@ -19,15 +19,15 @@ export default async (req) => {
   }
 
   try {
+    // Wix Headless Web client token exchange — no client_secret needed
     const res = await fetch("https://www.wixapis.com/oauth2/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        grant_type:    "authorization_code",
-        client_id:     clientId,
-        client_secret: clientSecret,
+        grant_type:   "authorization_code",
+        client_id:    clientId,
         code,
-        redirect_uri:  redirectUri,
+        redirect_uri: redirectUri,
       }),
     });
 
@@ -65,7 +65,6 @@ export default async (req) => {
           window.opener.postMessage(payload, "https://blogbunker.netlify.app");
           setTimeout(() => window.close(), 2000);
         } else {
-          // Popup was blocked — redirect parent
           window.location.href = "https://blogbunker.netlify.app/#wix_token="
             + encodeURIComponent(payload.access_token)
             + "&wix_refresh=" + encodeURIComponent(payload.refresh_token);
@@ -75,7 +74,10 @@ export default async (req) => {
     </html>`, { status: 200, headers: { "Content-Type": "text/html" } });
 
   } catch (err) {
-    return new Response(`Server error: ${err.message}`, { status: 500 });
+    return new Response(`<html><body style="font-family:sans-serif;padding:40px;background:#0e0f11;color:#fff">
+      <h2 style="color:#c47c2b">Server error</h2>
+      <p>${err.message}</p>
+    </body></html>`, { status: 500, headers: { "Content-Type": "text/html" } });
   }
 };
 
