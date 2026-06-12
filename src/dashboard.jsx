@@ -1258,7 +1258,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
   const [showKey,   setShowKey]  = useState(false);
   // OAuth fields
   const [authMode,  setAuthMode] = useState(cfg.oauthToken ? "oauth" : "apikey");
-  const [appId,     setAppId]    = useState(cfg.appId || "");
+  const [appId,     setAppId]    = useState(cfg.appId || "c6500272-f2ac-4fad-aeef-6cd500382297");
   const [appSecret, setAppSecret]= useState(cfg.appSecret || "");
   const [instanceId,setInstanceId]=useState(cfg.instanceId || "");
   const [oauthToken,setOauthToken]=useState(cfg.oauthToken || "");
@@ -1302,34 +1302,54 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
   };
 
   const connectOAuth = () => {
-    if (!appId) { addLog("App ID is required", "error"); return; }
-    // Build the Wix authorization URL — user logs in with their Wix account
-    // This gives a user-level token that works for creating blog posts
-    const authUrl = new URL("https://www.wix.com/oauth/access");
-    authUrl.searchParams.set("appId",        appId);
-    authUrl.searchParams.set("redirectUrl",  "https://blogbunker.netlify.app/api/wix-callback");
-    authUrl.searchParams.set("response_type","code");
-    authUrl.searchParams.set("state",        "wix_connect");
+    if (!appId) { addLog("App ID / Client ID is required", "error"); return; }
+    // Use Wix installer URL — works for both App Market and Headless OAuth
+    const params = new URLSearchParams({
+      appId:       appId,
+      redirectUrl: "https://blogbunker.netlify.app/api/wix-callback",
+      state:       "wix_connect",
+    });
+    const authUrl = `https://www.wix.com/installer/install?${params}`;
     addLog("Opening Wix authorization page…");
-    window.open(authUrl.toString(), "_blank", "width=600,height=700");
-    addLog("Complete the login in the popup, then come back here.", "info");
+    const popup = window.open(authUrl, "wix_auth", "width=650,height=750,scrollbars=yes");
+    if (!popup) {
+      addLog("Popup blocked — allow popups for blogbunker.netlify.app and try again.", "error");
+    } else {
+      addLog("Complete the authorization in the popup, then come back here.", "info");
+    }
   };
 
-  // Handle OAuth token returned via URL hash after callback
+  // Handle OAuth token — either via postMessage from popup or URL hash fallback
   useEffect(() => {
+    // postMessage handler (popup sends token to parent)
+    const handleMessage = (event) => {
+      if (event.origin !== "https://blogbunker.netlify.app") return;
+      if (event.data?.type !== "wix_oauth_success") return;
+      const { access_token, refresh_token } = event.data;
+      if (!access_token) return;
+      addLog("✓ OAuth token received from Wix!", "success");
+      const newCfg = { ...loadWixConfig(), oauthToken: access_token, oauthRefresh: refresh_token || "", connected: true };
+      saveWixConfig(newCfg); setCfg(newCfg); setOauthToken(access_token); setStatus("connected");
+      if (onConnect) onConnect();
+      addLog("✓ Connected! Publishing to Wix should now work.", "success");
+    };
+    window.addEventListener("message", handleMessage);
+
+    // Hash fallback (if popup was blocked, callback redirects parent)
     const hash = window.location.hash;
-    if (!hash.includes("wix_token=")) return;
-    const params = new URLSearchParams(hash.slice(1));
-    const token   = params.get("wix_token");
-    const refresh = params.get("wix_refresh");
-    if (!token) return;
-    addLog("✓ OAuth token received from Wix!", "success");
-    const newCfg = { ...cfg, oauthToken: token, oauthRefresh: refresh, connected: true };
-    saveWixConfig(newCfg); setCfg(newCfg); setOauthToken(token); setStatus("connected");
-    if (onConnect) onConnect();
-    // Clean up URL hash
-    window.history.replaceState(null, "", window.location.pathname);
-    addLog("✓ Connected with full user-level access — publishing will work!", "success");
+    if (hash.includes("wix_token=")) {
+      const params = new URLSearchParams(hash.slice(1));
+      const token  = params.get("wix_token");
+      if (token) {
+        addLog("✓ OAuth token received!", "success");
+        const newCfg = { ...loadWixConfig(), oauthToken: token, oauthRefresh: params.get("wix_refresh") || "", connected: true };
+        saveWixConfig(newCfg); setCfg(newCfg); setOauthToken(token); setStatus("connected");
+        if (onConnect) onConnect();
+        window.history.replaceState(null, "", window.location.pathname);
+      }
+    }
+
+    return () => window.removeEventListener("message", handleMessage);
   }, []);
 
   const pullPosts = async () => {
@@ -1419,7 +1439,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
           </div>
           <div>
             <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>App ID</label>
-            <input style={{...iS, fontFamily:"monospace"}} placeholder="fae5e105-3953-450f-8db1-dde65eb4141d" value={appId} onChange={e=>setAppId(e.target.value)}
+            <input style={{...iS, fontFamily:"monospace"}} placeholder="c6500272-f2ac-4fad-aeef-6cd500382297" value={appId} onChange={e=>setAppId(e.target.value)}
               onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
           </div>
           <div>
@@ -2860,59 +2880,37 @@ function getWixCfgWithAccount(cfg) {
 
 // Push post via Wix Velo HTTP function (runs as site identity — no memberId needed)
 async function wixVeloPush(form, publishNow = false, cfg = {}) {
-  // Use Wix REST API through the /api/wix proxy
-  // Sends oauthToken if available (bypasses memberId requirement)
-  // Falls back to apiKey auth
-  const makeWixCall = async (endpoint, method, data) => {
-    const res = await fetch("/api/wix", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        endpoint,
-        method,
-        data,
-        apiKey:     cfg.apiKey     || "",
-        siteId:     cfg.siteId     || "",
-        oauthToken: cfg.oauthToken || "",
-        accountId:  "8ac069ef-24ac-441a-9b21-0108361be0d7",
-      })
-    });
-    const text = await res.text();
-    let json;
-    try { json = JSON.parse(text); } catch { throw new Error(`Proxy error (${res.status}): ${text.slice(0,200)}`); }
-    if (!res.ok || json.error) throw new Error(json.error || `API ${res.status}`);
-    return json;
-  };
+  // Use Wix JS SDK with OAuth token for blog post creation
+  // SDK handles auth properly — no memberId needed
+  const { createClient, OAuthStrategy } = await import("@wix/sdk");
+  const { posts: blogPosts } = await import("@wix/blog");
 
-  // Fetch the site owner's memberId first — required by Wix Blog API
-  let memberId = loadWixConfig().memberId || "";
-  if (!memberId) {
-    try {
-      const memberRes = await makeWixCall("/members/v1/members/my", "GET", null);
-      memberId = memberRes?.member?.id || memberRes?.member?._id || "";
-      if (memberId) {
-        const c = loadWixConfig();
-        saveWixConfig({ ...c, memberId });
-      }
-    } catch(e) { /* ignore — proceed without memberId */ }
-  }
-
-  const draftPostData = {
-    title:       form.title,
-    excerpt:     (form.body || "").slice(0, 200).replace(/[^a-zA-Z0-9 .!?,]/g, " ").slice(0, 200).trim(),
-    richContent: textToWixContent(form.body),
-  };
-  // Deliberately omitting memberId to see raw Wix error
-
-  const createRes = await makeWixCall("/blog/v3/draft-posts", "POST", {
-    draftPost: draftPostData,
+  const client = createClient({
+    modules: { blogPosts },
+    auth: OAuthStrategy({
+      clientId: "c6500272-f2ac-4fad-aeef-6cd500382297",
+      tokens: {
+        accessToken:  { value: cfg.oauthToken || "", expiresAt: 9999999999 },
+        refreshToken: { role: "member", value: cfg.oauthRefresh || "" },
+      },
+    }),
   });
 
-  const draftId = createRes.draftPost?.id || createRes.draftPost?._id;
-  if (!draftId) throw new Error(`No draft ID returned: ${JSON.stringify(createRes).slice(0,200)}`);
+  // Create the post using SDK
+  const richContent = textToWixContent(form.body);
+  const result = await client.blogPosts.createDraftPost({
+    draftPost: {
+      title:       form.title,
+      excerpt:     (form.body || "").slice(0, 200).replace(/[^a-zA-Z0-9 .,!?]/g, " ").trim(),
+      richContent,
+    }
+  });
+
+  const draftId = result?.draftPost?._id || result?._id;
+  if (!draftId) throw new Error(`No draft ID returned: ${JSON.stringify(result).slice(0,200)}`);
 
   if (publishNow) {
-    await makeWixCall(`/blog/v3/draft-posts/${draftId}/publish`, "POST", {});
+    await client.blogPosts.publishDraftPost(draftId);
   }
 
   return { success: true, postId: draftId };
