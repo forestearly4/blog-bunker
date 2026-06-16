@@ -1303,15 +1303,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
 
   const connectOAuth = () => {
     if (!appId) { addLog("App ID / Client ID is required", "error"); return; }
-    // Wix Headless OAuth authorization URL
-    const params = new URLSearchParams({
-      client_id:     appId,
-      redirect_uri:  "https://blogbunker.netlify.app/api/wix-callback",
-      response_type: "code",
-      scope:         "offline_access",
-      state:         "wix_connect",
-    });
-    const authUrl = `https://www.wix.com/oauth/authorize?${params}`;
+    const redirectUri = "https://blogbunker.netlify.app/api/wix-callback";
+    const authUrl = `https://www.wix.com/oauth/authorize?client_id=${appId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=offline_access`;
     addLog("Opening Wix authorization page…");
     const popup = window.open(authUrl, "wix_auth", "width=650,height=750,scrollbars=yes");
     if (!popup) {
@@ -2453,17 +2446,51 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
                 <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
                   {[
                     { key:"addToCalendar", label:"Add to Blog Bunker calendar", always:true },
-                    { key:"publishToWix", label:"Publish to Wix Blog (caskandstream.com)", disabled:!wixConnected, note:!wixConnected?"— connect Wix first in Settings":wixConnected?"● Connected":null },
                   ].map(opt=>(
-                    <label key={opt.key} style={{ display:"flex", alignItems:"center", gap:10, cursor:opt.disabled?"not-allowed":"pointer", opacity:opt.disabled?0.5:1 }}>
-                      <div onClick={()=>!opt.disabled&&setSchedule(s=>({...s,[opt.key]:!s[opt.key]}))}
-                        style={{ width:20, height:20, borderRadius:5, border:`2px solid ${schedule[opt.key]&&!opt.disabled?"var(--amber)":"var(--border)"}`, background:schedule[opt.key]&&!opt.disabled?"var(--amber)":"transparent", display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.2s", flexShrink:0, cursor:opt.disabled?"not-allowed":"pointer" }}>
-                        {schedule[opt.key]&&!opt.disabled&&<span style={{ fontSize:12, color:"#0e0f11", fontWeight:700 }}>✓</span>}
+                    <label key={opt.key} style={{ display:"flex", alignItems:"center", gap:10, cursor:"pointer" }}>
+                      <div onClick={()=>setSchedule(s=>({...s,[opt.key]:!s[opt.key]}))}
+                        style={{ width:20, height:20, borderRadius:5, border:`2px solid ${schedule[opt.key]?"var(--amber)":"var(--border)"}`, background:schedule[opt.key]?"var(--amber)":"transparent", display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.2s", flexShrink:0 }}>
+                        {schedule[opt.key]&&<span style={{ fontSize:12, color:"#0e0f11", fontWeight:700 }}>✓</span>}
                       </div>
                       <span style={{ fontSize:13 }}>{opt.label}</span>
-                      {opt.note && <span style={{ fontSize:11, color:wixConnected?"#5cba6c":"var(--muted)" }}>{opt.note}</span>}
                     </label>
                   ))}
+
+                  {/* Copy for Wix — pastes clean HTML into Wix blog editor */}
+                  <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                    <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+                      📋 Copy to Wix Blog
+                    </div>
+                    <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 10px", lineHeight:1.6 }}>
+                      Copy your post as formatted HTML, then paste it into the Wix Blog editor. Opens Wix Blog in a new tab automatically.
+                    </p>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <button onClick={() => {
+                        // Convert markdown body to clean HTML for Wix editor
+                        const html = (draft.body || "")
+                          .split("\n\n").filter(Boolean)
+                          .map(block => {
+                            if (block.startsWith("# "))  return `<h1>${block.slice(2)}</h1>`;
+                            if (block.startsWith("## ")) return `<h2>${block.slice(3)}</h2>`;
+                            if (block.startsWith("### "))return `<h3>${block.slice(4)}</h3>`;
+                            if (block.startsWith("- ") || block.startsWith("* ")) {
+                              const items = block.split("\n").map(l => `<li>${l.slice(2)}</li>`).join("");
+                              return `<ul>${items}</ul>`;
+                            }
+                            const formatted = block.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\*(.*?)\*/g, "<em>$1</em>");
+                            return `<p>${formatted}</p>`;
+                          }).join("\n");
+                        navigator.clipboard.writeText(`<h1>${enhance.metaTitle || draft.title}</h1>\n${html}`);
+                      }}
+                        style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                        📋 Copy as HTML
+                      </button>
+                      <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
+                        style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                        ↗ Open Wix Blog
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -3000,30 +3027,34 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
           <textarea rows={14} value={form.body} onChange={e=>setForm(f=>({...f,body:e.target.value}))} placeholder="Write your post here…" style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
         </div>
 
-        {/* Wix push section */}
-        {wixConnected && (
-          <div style={{ padding:"14px 16px", borderRadius:10, border:"1px solid #5cba6c44", background:"#5cba6c08" }}>
-            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>
-              ◉ Publish to Wix Blog
-              {post?.wixId && <span style={{ marginLeft:8, fontWeight:400, color:"var(--text-secondary)" }}>· Already on Wix</span>}
-            </div>
-            <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
-              <button onClick={() => handlePublishToWix(false)} disabled={!form.title.trim() || wixLoading}
-                style={{ padding:"8px 18px", borderRadius:8, border:"none", background:!form.title.trim()||wixLoading?"var(--bg-elevated)":"#5cba6c", color:!form.title.trim()||wixLoading?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:!form.title.trim()||wixLoading?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:6 }}>
-                {wixLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{wixStatus||"Working…"}</> : post?.wixId ? "↑ Update on Wix" : "↑ Publish to Wix"}
-              </button>
-              <button onClick={() => handlePublishToWix(true)} disabled={!form.title.trim() || wixLoading}
-                style={{ padding:"8px 16px", borderRadius:8, border:"1px solid #5cba6c44", background:"transparent", color:"#5cba6c", fontSize:13, cursor:!form.title.trim()||wixLoading?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif" }}>
-                Save as Draft on Wix
-              </button>
-              {wixStatus && !wixLoading && <span style={{ fontSize:12, color:"#5cba6c", fontWeight:600 }}>{wixStatus}</span>}
-              {wixError && <span style={{ fontSize:12, color:"var(--red)" }}>{wixError}</span>}
-            </div>
-            <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"8px 0 0", lineHeight:1.5 }}>
-              Posts are converted from markdown to Wix rich content format automatically.
-            </p>
+        {/* Copy to Wix */}
+        <div style={{ padding:"14px 16px", borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)" }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+            📋 Copy to Wix Blog
           </div>
-        )}
+          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+            <button onClick={() => {
+              const html = (form.body || "").split("\n\n").filter(Boolean).map(block => {
+                if (block.startsWith("# "))  return `<h1>${block.slice(2)}</h1>`;
+                if (block.startsWith("## ")) return `<h2>${block.slice(3)}</h2>`;
+                if (block.startsWith("### "))return `<h3>${block.slice(4)}</h3>`;
+                const formatted = block.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\*(.*?)\*/g, "<em>$1</em>");
+                return `<p>${formatted}</p>`;
+              }).join("\n");
+              navigator.clipboard.writeText(`<h1>${form.title}</h1>\n${html}`);
+            }}
+              style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+              📋 Copy as HTML
+            </button>
+            <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
+              style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+              ↗ Open Wix Blog
+            </button>
+          </div>
+          <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"8px 0 0", lineHeight:1.5 }}>
+            Copy post as HTML → Open Wix Blog → click HTML view → paste. Takes about 30 seconds.
+          </p>
+        </div>
 
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <div style={{ display:"flex", gap:8 }}>
