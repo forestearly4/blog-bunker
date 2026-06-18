@@ -329,26 +329,54 @@ async function generateImage(prompt, platId, apiKeys) {
   }
 
   if (provider === "gemini-image") {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent?key=${apiKeys["gemini"]}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
-          generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
-        }),
+    // Gemini image generation — retry up to 3 times on overload errors
+    const GEMINI_IMAGE_MODELS = [
+      "gemini-2.0-flash-preview-image-generation",
+      "imagen-3.0-generate-002",
+    ];
+    let lastErr = "";
+    for (const model of GEMINI_IMAGE_MODELS) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKeys["gemini"]}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
+                generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+              }),
+            }
+          );
+          const data = await res.json();
+          if (data.error) {
+            const msg = data.error.message || "";
+            // On overload or rate limit, wait and retry
+            if (msg.includes("overloaded") || msg.includes("RESOURCE_EXHAUSTED") || res.status === 503 || res.status === 429) {
+              lastErr = `Gemini overloaded (attempt ${attempt}) — retrying…`;
+              await new Promise(r => setTimeout(r, 2000 * attempt));
+              continue;
+            }
+            lastErr = `Gemini Image error (${model}): ${msg}`;
+            break; // Try next model
+          }
+          const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+          if (!part?.inlineData) {
+            lastErr = `Gemini Image (${model}): no image data returned`;
+            break;
+          }
+          const byteStr = atob(part.inlineData.data);
+          const bytes = new Uint8Array(byteStr.length);
+          for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+          const blob = new Blob([bytes], { type: part.inlineData.mimeType || "image/png" });
+          return URL.createObjectURL(blob);
+        } catch(e) {
+          lastErr = e.message;
+        }
       }
-    );
-    const data = await res.json();
-    if (data.error) throw new Error(`Gemini Image error: ${data.error.message}`);
-    const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-    if (!part?.inlineData) throw new Error("Gemini Image returned no image data.");
-    const byteStr = atob(part.inlineData.data);
-    const bytes = new Uint8Array(byteStr.length);
-    for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
-    const blob = new Blob([bytes], { type: part.inlineData.mimeType || "image/png" });
-    return URL.createObjectURL(blob);
+    }
+    throw new Error(`Gemini Image failed: ${lastErr}`);
   }
 
   throw new Error("Unknown image provider");
@@ -847,15 +875,32 @@ const ThreatBadge = ({level}) => {
 
 // ─── PROVIDER PICKER ──────────────────────────────────────────────────────────
 
-function ProviderPicker({ activeProvider, activeModel, onProviderChange, onModelChange, keys }) {
-  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
-  const hasKey = !!keys[activeProvider];
-  const isAnthropic = activeProvider === "anthropic";
+function ProviderPicker({ activeProvider, activeModel, onProviderChange, onModelChange, keys, compact = false }) {
+  const provider  = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const hasKey    = !!keys[activeProvider];
+  const isAnthro  = activeProvider === "anthropic";
+
+  if (compact) {
+    // Compact inline switcher — just the provider pills, no model
+    return (
+      <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:12}}>
+        {AI_PROVIDERS.filter(p => p.id !== "stability").map(p => {
+          const hasK = !!keys[p.id] || p.id === "anthropic";
+          return (
+            <button key={p.id} onClick={() => onProviderChange(p.id)} title={hasK ? p.name : `${p.name} — add key in Settings`}
+              style={{padding:"4px 10px",borderRadius:99,border:activeProvider===p.id?`1px solid ${p.color}`:"1px solid var(--border)",background:activeProvider===p.id?p.color+"18":"transparent",color:activeProvider===p.id?p.color:"var(--text-secondary)",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:4,opacity:hasK?1:0.45}}>
+              <span>{p.logo}</span>{p.name}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
 
   return (
     <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20,flexWrap:"wrap"}}>
-      <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>AI Provider</div>
-      <div style={{display:"flex",gap:6}}>
+      <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>AI</div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
         {AI_PROVIDERS.filter(p => p.id !== "stability").map(p => {
           const hasK = !!keys[p.id] || p.id === "anthropic";
           return (
@@ -874,11 +919,94 @@ function ProviderPicker({ activeProvider, activeModel, onProviderChange, onModel
           {provider.models.map(m => <option key={m} value={m}>{m}</option>)}
         </select>
       </div>
-      {!hasKey && !isAnthropic && (
+      {!hasKey && !isAnthro && (
         <div style={{width:"100%",fontSize:11,color:"var(--amber)",padding:"6px 12px",borderRadius:6,background:"var(--amber-glow)",border:"1px solid var(--amber)33"}}>
           ⚠ No API key for {provider.name}. Add one in Settings → API Keys.
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── GLOBAL AI QUICK-SWITCHER ─────────────────────────────────────────────────
+// Floating bar for quickly comparing AI outputs across providers
+
+function AIQuickSwitcher({ activeProvider, activeModel, onProviderChange, onModelChange, apiKeys }) {
+  const [open,        setOpen]       = useState(false);
+  const [imageProvider, setImageProvider] = useState(() => getImageProvider(apiKeys) || "stability");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const imgProviderLabel = getImageProviderLabel(getImageProvider(apiKeys));
+
+  return (
+    <div style={{ position:"fixed", bottom:24, right:24, zIndex:999, display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
+      {open && (
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:14, padding:20, width:320, boxShadow:"0 8px 40px rgba(0,0,0,0.4)", display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Text AI */}
+          <div>
+            <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+              ✦ Text AI — {provider.name}
+            </div>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:10 }}>
+              {AI_PROVIDERS.filter(p => p.id !== "stability").map(p => {
+                const hasK = !!apiKeys[p.id] || p.id === "anthropic";
+                return (
+                  <button key={p.id} onClick={() => onProviderChange(p.id)}
+                    style={{ padding:"6px 12px", borderRadius:99, border:activeProvider===p.id?`1px solid ${p.color}`:"1px solid var(--border)", background:activeProvider===p.id?p.color+"22":"transparent", color:activeProvider===p.id?p.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:hasK?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5, opacity:hasK?1:0.45 }}>
+                    <span>{p.logo}</span>{p.name}
+                    {!hasK && <span style={{fontSize:9}}>no key</span>}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>Model</div>
+              <select value={activeModel} onChange={e => onModelChange(e.target.value)}
+                style={{ flex:1, padding:"5px 10px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", cursor:"pointer" }}>
+                {provider.models.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {/* Image AI */}
+          <div>
+            <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>
+              ▣ Image AI — {imgProviderLabel}
+            </div>
+            <div style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.6 }}>
+              {getImageProvider(apiKeys)
+                ? `Using ${imgProviderLabel} (priority order: Stability AI → GPT Image → Gemini)`
+                : "No image provider — add Stability AI, OpenAI, or Gemini key in Settings → API Keys"}
+            </div>
+            <div style={{ display:"flex", gap:6, marginTop:8, flexWrap:"wrap" }}>
+              {[
+                { id:"stability", label:"Stability AI", key:"stability" },
+                { id:"dalle",     label:"GPT Image",    key:"openai"    },
+                { id:"gemini-image", label:"Gemini",    key:"gemini"    },
+              ].map(ip => {
+                const hasK = !!apiKeys[ip.key];
+                const isActive = getImageProvider(apiKeys) === ip.id;
+                return (
+                  <div key={ip.id}
+                    style={{ padding:"4px 10px", borderRadius:99, border:isActive?`1px solid #7c3aed44`:"1px solid var(--border)", background:isActive?"#7c3aed18":"transparent", color:isActive?"#a78bfa":"var(--text-secondary)", fontSize:11, opacity:hasK?1:0.4 }}>
+                    {ip.label}{isActive?" ✓":""}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ fontSize:10, color:"var(--muted)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", lineHeight:1.6 }}>
+            💡 Tip: Generate the same post with different AIs to compare outputs. Switch here and hit Regenerate in the pipeline.
+          </div>
+        </div>
+      )}
+
+      {/* Toggle button */}
+      <button onClick={() => setOpen(o => !o)}
+        style={{ width:48, height:48, borderRadius:99, border:"none", background:open?"var(--amber)":"var(--bg-surface)", color:open?"#0e0f11":"var(--amber)", fontSize:20, cursor:"pointer", boxShadow:"0 4px 20px rgba(0,0,0,0.4)", border:`1px solid ${open?"transparent":"var(--amber)44"}`, display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.2s" }}
+        title="Switch AI provider">
+        {open ? "✕" : "✦"}
+      </button>
     </div>
   );
 }
@@ -3036,7 +3164,8 @@ function MetaConnectPanel({ onConnected }) {
   const connect = () => {
     if (!appId) { setLog("Paste your Meta App ID first."); return; }
     const redirectUri = "https://blogbunker.netlify.app/api/meta-callback";
-    const scope = "pages_show_list,pages_read_engagement,pages_manage_posts,instagram_basic,instagram_content_publish";
+    // Use only scopes valid for Pages + Instagram content management use cases
+    const scope = "pages_show_list,pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish,business_management";
     const authUrl = `https://www.facebook.com/dialog/oauth?client_id=${appId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&response_type=code`;
     setLog("Opening Facebook authorization…");
     const popup = window.open(authUrl, "meta_auth", "width=650,height=700,scrollbars=yes");
@@ -3808,7 +3937,14 @@ export default function Dashboard({ user, workspace, onLogout }) {
       <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;700;900&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
 
-      {/* ── MODALS ── */}
+      {/* ── GLOBAL AI QUICK-SWITCHER ── */}
+      <AIQuickSwitcher
+        activeProvider={activeProvider}
+        activeModel={activeModel}
+        onProviderChange={handleProviderChange}
+        onModelChange={handleModelChange}
+        apiKeys={apiKeys}
+      />
       {postEditorOpen && (
         <PostEditor
           post={editingPost}
