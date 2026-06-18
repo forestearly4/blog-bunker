@@ -495,7 +495,7 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
 
 // ─── SOCIAL POST GENERATOR ────────────────────────────────────────────────────
 
-function SocialPostTab({ activeProvider, activeModel, apiKeys, dark }) {
+function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig = {} }) {
   const [input,       setInput]       = useState("");
   const [inputMode,   setInputMode]   = useState("topic");
   const [loading,     setLoading]     = useState(false);
@@ -657,13 +657,63 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark }) {
               )}
 
               {/* Action buttons */}
-              <div style={{ display:"flex", gap:8, marginTop:16 }}>
-                <button style={{ padding:"7px 16px", borderRadius:7, border:"none", background:plat.color, color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                  Schedule Post
-                </button>
-                <button style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                  Save as Draft
-                </button>
+              <div style={{ display:"flex", gap:8, marginTop:16, flexWrap:"wrap" }}>
+                {/* Facebook direct post */}
+                {(plat.id === "facebook") && metaConfig?.connected && metaConfig?.pages?.length > 0 && (() => {
+                  const [posting, setPosting] = useState(false);
+                  const [postResult, setPostResult] = useState("");
+                  const page = metaConfig.pages[0]; // Use first page
+                  const post = async () => {
+                    setPosting(true); setPostResult("");
+                    try {
+                      const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: posts[plat.id] || "", platforms: ["facebook"] });
+                      setPostResult(res.facebook?.success ? "✓ Posted to Facebook!" : `Error: ${res.facebook?.error}`);
+                    } catch(e) { setPostResult(`Error: ${e.message}`); }
+                    setPosting(false);
+                  };
+                  return (
+                    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                      <button onClick={post} disabled={posting || !posts[plat.id]}
+                        style={{ padding:"7px 16px", borderRadius:7, border:"none", background:posting||!posts[plat.id]?"var(--bg-elevated)":"#1877f2", color:posting||!posts[plat.id]?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:posting||!posts[plat.id]?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                        {posting ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Posting…</> : "↑ Post to Facebook"}
+                      </button>
+                      {postResult && <span style={{ fontSize:11, color:postResult.startsWith("✓")?"var(--green)":"var(--red)" }}>{postResult}</span>}
+                    </div>
+                  );
+                })()}
+
+                {/* Instagram direct post */}
+                {(plat.id === "instagram") && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id) && (() => {
+                  const [posting, setPosting] = useState(false);
+                  const [postResult, setPostResult] = useState("");
+                  const page = metaConfig.pages.find(p => p.instagram_id);
+                  const post = async (imageUrl) => {
+                    if (!imageUrl) { setPostResult("Generate an image first — Instagram requires a photo."); return; }
+                    setPosting(true); setPostResult("");
+                    try {
+                      const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: posts[plat.id] || "", imageUrl, platforms: ["instagram"] });
+                      setPostResult(res.instagram?.success ? "✓ Posted to Instagram!" : `Error: ${res.instagram?.error}`);
+                    } catch(e) { setPostResult(`Error: ${e.message}`); }
+                    setPosting(false);
+                  };
+                  return (
+                    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                      <button onClick={()=> post(null)} disabled={posting || !posts[plat.id]}
+                        style={{ padding:"7px 16px", borderRadius:7, border:"none", background:posting||!posts[plat.id]?"var(--bg-elevated)":"#e1306c", color:posting||!posts[plat.id]?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:posting||!posts[plat.id]?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                        {posting ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Posting…</> : "↑ Post to Instagram"}
+                      </button>
+                      {postResult && <span style={{ fontSize:11, color:postResult.startsWith("✓")?"var(--green)":"var(--red)" }}>{postResult}</span>}
+                    </div>
+                  );
+                })()}
+
+                {/* Fallback copy button */}
+                {(!metaConfig?.connected || (plat.id !== "facebook" && plat.id !== "instagram")) && (
+                  <button onClick={()=>handleCopy(plat.id, posts[plat.id])}
+                    style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${plat.color}44`, background:"transparent", color:plat.color, fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    {copied[plat.id] ? "✓ Copied" : `Copy ${plat.name} Post`}
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -2191,8 +2241,11 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
           {inspiration.length > 0 && (
             <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
               <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>Use from Inspiration Board</div>
-              <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:160, overflow:"auto" }}>
-                {inspiration.slice(0,6).map(item => (
+              <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:280, overflow:"auto" }}>
+                {inspiration.length === 0 && (
+                  <div style={{ fontSize:12, color:"var(--muted)", padding:"8px 0" }}>No inspiration saved yet — use the Research tab to add ideas.</div>
+                )}
+                {inspiration.map(item => (
                   <button key={item.id} onClick={() => setBrief(b => ({ ...b, topic:item.title, angle:item.notes||"", inspiration:item }))}
                     style={{ padding:"8px 12px", borderRadius:8, border:brief.inspiration?.id===item.id?"1px solid var(--amber)":"1px solid var(--border)", background:brief.inspiration?.id===item.id?"var(--amber-glow)":"var(--bg-elevated)", color:"var(--text)", fontSize:12, cursor:"pointer", textAlign:"left", fontFamily:"'DM Sans',sans-serif" }}>
                     <span style={{ fontWeight:600 }}>{item.title}</span>
@@ -2257,6 +2310,16 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
             </button>
             <button onClick={() => setStage("brief")} style={btnS}>← Back to Brief</button>
           </div>
+
+          {draft.title && (
+            <HeadlineImagePanel
+              title={draft.title}
+              body={draft.body}
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+            />
+          )}
         </div>
       )}
 
@@ -2827,6 +2890,218 @@ function GSCAnalyticsView({ data, onRefresh }) {
   );
 }
 
+// ─── POSTS TAB ────────────────────────────────────────────────────────────────
+
+function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, savePost, openEditPost, card }) {
+  const [selectedIds, setSelectedIds] = useState([]);
+  const allSelected = filteredPosts.length > 0 && filteredPosts.every(p => selectedIds.includes(p.id));
+
+  const toggleSelect  = (id)  => setSelectedIds(s => s.includes(id) ? s.filter(x=>x!==id) : [...s, id]);
+  const toggleAll     = ()    => setSelectedIds(allSelected ? [] : filteredPosts.map(p=>p.id));
+  const bulkDelete    = ()    => {
+    if (window.confirm(`Delete ${selectedIds.length} post${selectedIds.length>1?"s":""}?`)) {
+      setPosts(all => all.filter(p => !selectedIds.includes(p.id)));
+      setSelectedIds([]);
+    }
+  };
+  const bulkSetStatus = (status) => {
+    setPosts(all => all.map(p => selectedIds.includes(p.id) ? {...p, status} : p));
+    setSelectedIds([]);
+  };
+
+  const chk = (checked, amber) => ({
+    width:16, height:16, borderRadius:4,
+    border:`2px solid ${checked ? "var(--amber)" : "var(--border)"}`,
+    background: checked ? "var(--amber)" : "transparent",
+    cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0,
+  });
+
+  return (
+    <div>
+      <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center",flexWrap:"wrap"}}>
+        {["all","published","draft","scheduled"].map(f=>(
+          <button key={f} onClick={()=>{ setPostFilter(f); setSelectedIds([]); }}
+            style={{padding:"6px 14px",borderRadius:99,border:postFilter===f?"1px solid var(--amber)":"1px solid var(--border)",background:postFilter===f?"var(--amber-glow)":"transparent",color:postFilter===f?"var(--amber)":"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",textTransform:"capitalize"}}>
+            {f==="all"?`All (${posts.length})`:`${f} (${posts.filter(p=>p.status===f).length})`}
+          </button>
+        ))}
+
+        {selectedIds.length > 0 && (
+          <div style={{display:"flex",gap:6,marginLeft:"auto",alignItems:"center"}}>
+            <span style={{fontSize:11,color:"var(--text-secondary)"}}>{selectedIds.length} selected</span>
+            <select onChange={e=>{ if(e.target.value){ bulkSetStatus(e.target.value); e.target.value=""; } }} defaultValue=""
+              style={{padding:"5px 10px",borderRadius:7,border:"1px solid var(--border)",background:"var(--bg-elevated)",color:"var(--text)",fontSize:12,cursor:"pointer",fontFamily:"var(--font-body)"}}>
+              <option value="" disabled>Change status…</option>
+              <option value="published">→ Published</option>
+              <option value="draft">→ Draft</option>
+              <option value="scheduled">→ Scheduled</option>
+            </select>
+            <button onClick={bulkDelete}
+              style={{padding:"5px 12px",borderRadius:7,border:"1px solid var(--red)44",background:"var(--red)0a",color:"var(--red)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)"}}>
+              🗑 Delete {selectedIds.length}
+            </button>
+            <button onClick={()=>setSelectedIds([])}
+              style={{padding:"5px 10px",borderRadius:7,border:"1px solid var(--border)",background:"transparent",color:"var(--text-secondary)",fontSize:12,cursor:"pointer",fontFamily:"var(--font-body)"}}>
+              ✕ Clear
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div style={{...card, padding:0, overflow:"hidden"}}>
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <thead>
+            <tr style={{borderBottom:"1px solid var(--border)"}}>
+              <th style={{padding:"12px 16px",width:36}}>
+                <div onClick={toggleAll} style={chk(allSelected)}>
+                  {allSelected&&<span style={{fontSize:10,color:"#0e0f11",fontWeight:900}}>✓</span>}
+                </div>
+              </th>
+              {["Title","Category","Status","Date","Views"].map(h=>(
+                <th key={h} style={{textAlign:"left",padding:"12px 16px",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filteredPosts.map(p => {
+              const sel = selectedIds.includes(p.id);
+              return (
+                <tr key={p.id} style={{borderBottom:"1px solid var(--border)",background:sel?"var(--amber-glow)":"transparent"}}
+                  onMouseEnter={e=>{ if(!sel) e.currentTarget.style.background="var(--bg-hover)"; }}
+                  onMouseLeave={e=>{ e.currentTarget.style.background=sel?"var(--amber-glow)":"transparent"; }}>
+                  <td style={{padding:"12px 16px"}} onClick={e=>{ e.stopPropagation(); toggleSelect(p.id); }}>
+                    <div style={chk(sel)}>
+                      {sel&&<span style={{fontSize:10,color:"#0e0f11",fontWeight:900}}>✓</span>}
+                    </div>
+                  </td>
+                  <td style={{padding:"14px 16px",fontWeight:600,fontSize:13,cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.title}</td>
+                  <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)",cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.category}</td>
+                  <td style={{padding:"10px 16px"}} onClick={e=>e.stopPropagation()}>
+                    <select value={p.status} onChange={e=>savePost({...p,status:e.target.value})}
+                      style={{padding:"4px 8px",borderRadius:6,border:"1px solid var(--border)",background:"var(--bg-elevated)",color:"var(--text)",fontSize:11,cursor:"pointer",fontFamily:"var(--font-body)"}}>
+                      <option value="draft">Draft</option>
+                      <option value="published">Published</option>
+                      <option value="scheduled">Scheduled</option>
+                    </select>
+                  </td>
+                  <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)",cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.date}</td>
+                  <td style={{padding:"14px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.views>0?p.views.toLocaleString():"—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── META (FACEBOOK + INSTAGRAM) INTEGRATION ─────────────────────────────────
+
+const META_STORAGE = "bb_meta_config";
+function loadMetaConfig() { try { return JSON.parse(localStorage.getItem(META_STORAGE) || "{}"); } catch { return {}; } }
+function saveMetaConfig(d) { try { localStorage.setItem(META_STORAGE, JSON.stringify(d)); } catch {} }
+
+async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, link, platforms }) {
+  const res = await fetch("/api/meta-post", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pageId, pageToken, instagramId, message, imageUrl, link, platforms }),
+  });
+  return await res.json();
+}
+
+function MetaConnectPanel({ onConnected }) {
+  const [cfg,      setCfg]     = useState(loadMetaConfig);
+  const [appId,    setAppId]   = useState(cfg.appId || "");
+  const [loading,  setLoading] = useState(false);
+  const [log,      setLog]     = useState("");
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
+
+  // Listen for OAuth callback postMessage
+  useEffect(() => {
+    const handleMsg = (e) => {
+      if (e.origin !== "https://blogbunker.netlify.app") return;
+      if (e.data?.type !== "meta_oauth_success") return;
+      const { user_token, pages } = e.data;
+      const newCfg = { ...cfg, appId, userToken: user_token, pages, connected: true, connectedAt: new Date().toISOString() };
+      saveMetaConfig(newCfg); setCfg(newCfg);
+      setLog(`✓ Connected! Found ${pages.length} page${pages.length!==1?"s":""}${pages.some(p=>p.instagram_id)?" + Instagram":""}. Select which page to post to in Social settings.`);
+      if (onConnected) onConnected(newCfg);
+    };
+    window.addEventListener("message", handleMsg);
+    return () => window.removeEventListener("message", handleMsg);
+  }, [appId, cfg]);
+
+  const connect = () => {
+    if (!appId) { setLog("Paste your Meta App ID first."); return; }
+    const redirectUri = "https://blogbunker.netlify.app/api/meta-callback";
+    const scope = "pages_show_list,pages_read_engagement,pages_manage_posts,instagram_basic,instagram_content_publish";
+    const authUrl = `https://www.facebook.com/dialog/oauth?client_id=${appId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&response_type=code`;
+    setLog("Opening Facebook authorization…");
+    const popup = window.open(authUrl, "meta_auth", "width=650,height=700,scrollbars=yes");
+    if (!popup) setLog("Popup blocked — allow popups for blogbunker.netlify.app and try again.");
+  };
+
+  const disconnect = () => {
+    saveMetaConfig({}); setCfg({}); setLog("");
+    if (onConnected) onConnected({});
+  };
+
+  if (cfg.connected && cfg.pages) {
+    return (
+      <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+        <div style={{ padding:14, borderRadius:10, border:"1px solid #5cba6c44", background:"#5cba6c0a", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <div>
+            <div style={{ fontWeight:700, fontSize:14 }}>✓ Facebook & Instagram Connected</div>
+            <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:3 }}>
+              {cfg.pages.length} page{cfg.pages.length!==1?"s":""} · {cfg.pages.filter(p=>p.instagram_id).length} Instagram linked
+            </div>
+          </div>
+          <button onClick={disconnect} style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>Disconnect</button>
+        </div>
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Your Pages</div>
+          {cfg.pages.map(p => (
+            <div key={p.id} style={{ padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", marginBottom:6, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <div style={{ fontWeight:600, fontSize:13 }}>{p.name}</div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)" }}>
+                  Facebook Page {p.instagram_id ? "· Instagram linked ✓" : "· No Instagram"}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--amber-glow)", border:"1px solid var(--amber)33", fontSize:12, color:"var(--text-secondary)", lineHeight:1.8 }}>
+        <strong style={{color:"var(--amber)"}}>Setup (one time):</strong><br/>
+        1. Go to <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>developers.facebook.com/apps</a> → Create App → Business type<br/>
+        2. Add <strong style={{color:"var(--text)"}}>Facebook Login</strong> product → set redirect URI to:<br/>
+        <code style={{background:"var(--bg-elevated)",padding:"2px 6px",borderRadius:4,fontSize:11}}>https://blogbunker.netlify.app/api/meta-callback</code><br/>
+        3. Add <strong style={{color:"var(--text)"}}>Instagram Graph API</strong> product for Instagram posting<br/>
+        4. In Netlify env vars add <code style={{background:"var(--bg-elevated)",padding:"1px 4px",borderRadius:3,fontSize:11}}>META_APP_ID</code> and <code style={{background:"var(--bg-elevated)",padding:"1px 4px",borderRadius:3,fontSize:11}}>META_APP_SECRET</code><br/>
+        5. Paste your App ID below and click Connect
+      </div>
+      <div>
+        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Meta App ID</label>
+        <input style={iS} placeholder="1234567890123456" value={appId} onChange={e=>setAppId(e.target.value)}
+          onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+      </div>
+      <button onClick={connect} disabled={!appId || loading}
+        style={{ padding:"11px 24px", borderRadius:8, border:"none", background:appId&&!loading?"#1877f2":"var(--bg-elevated)", color:appId&&!loading?"#fff":"var(--muted)", fontSize:13, fontWeight:700, cursor:appId&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:10, alignSelf:"flex-start" }}>
+        <span style={{fontSize:16}}>f</span> Connect with Facebook
+      </button>
+      {log && <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>{log}</div>}
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -2849,7 +3124,136 @@ function Modal({ title, onClose, children, wide }) {
   );
 }
 
-// ─── WIX CONTENT CONVERTER ───────────────────────────────────────────────────
+// ─── HEADLINE IMAGE ───────────────────────────────────────────────────────────
+
+// Blog headline images use a wide 16:9 ratio
+const HEADLINE_IMAGE_SPEC = {
+  ratio: "16:9",
+  label: "Blog Headline (16:9)",
+  style: "cinematic editorial photography, moody atmospheric, fly fishing and whiskey lifestyle, amber and teal tones, wide landscape",
+};
+
+function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys }) {
+  const [imageUrl,   setImageUrl]   = useState(null);
+  const [prompt,     setPrompt]     = useState("");
+  const [loading,    setLoading]    = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [error,      setError]      = useState("");
+  const [copied,     setCopied]     = useState(false);
+
+  const provider = getImageProvider(apiKeys);
+  const providerLabel = getImageProviderLabel(provider);
+
+  const generate = async (customPrompt) => {
+    setLoading(true); setError(""); setImageUrl(null);
+    try {
+      const usePrompt = customPrompt || prompt;
+      let finalPrompt = usePrompt;
+      if (!finalPrompt) {
+        // Generate prompt from title + body excerpt
+        const topic = `${title}. ${(body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim()}`;
+        finalPrompt = await generateImagePrompt(topic, "facebook", activeProvider, activeModel, apiKeys[activeProvider]);
+        // Append headline style
+        finalPrompt += `, ${HEADLINE_IMAGE_SPEC.style}, wide editorial banner`;
+        setPrompt(finalPrompt);
+      }
+      // Use facebook spec for 3:2 wide ratio (closest to 16:9 available)
+      const url = await generateImage(finalPrompt, "facebook", apiKeys);
+      setImageUrl(url);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const handleDownload = () => {
+    if (!imageUrl) return;
+    const a = document.createElement("a");
+    a.href = imageUrl;
+    a.download = `headline-${(title||"blog").toLowerCase().replace(/\s+/g,"-").slice(0,30)}.webp`;
+    a.click();
+  };
+
+  return (
+    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <div style={{ fontWeight:700, fontSize:14 }}>🖼 Headline Image</div>
+          <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>
+            Wide banner image for your blog post header · {HEADLINE_IMAGE_SPEC.label}
+            {provider && <span style={{ marginLeft:8, color:"#5cba6c" }}>via {providerLabel}</span>}
+            {!provider && <span style={{ marginLeft:8, color:"var(--amber)" }}>Add image provider key in Settings</span>}
+          </div>
+        </div>
+        <div style={{ display:"flex", gap:8 }}>
+          {prompt && (
+            <button onClick={()=>setShowPrompt(s=>!s)}
+              style={{ padding:"5px 12px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {showPrompt ? "Hide" : "Edit"} Prompt
+            </button>
+          )}
+          <button onClick={()=>generate()} disabled={loading || !title?.trim() || !provider}
+            style={{ padding:"7px 18px", borderRadius:8, border:"none", background:loading||!title?.trim()||!provider?"var(--bg-elevated)":"#7c3aed", color:loading||!title?.trim()||!provider?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:loading||!title?.trim()||!provider?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : imageUrl ? "↻ Regenerate" : "▣ Generate Headline Image"}
+          </button>
+        </div>
+      </div>
+
+      {/* Editable prompt */}
+      {showPrompt && prompt && (
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Prompt (editable)</div>
+          <div style={{ display:"flex", gap:8 }}>
+            <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} rows={3}
+              style={{ flex:1, padding:"10px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", resize:"vertical", lineHeight:1.5 }} />
+            <button onClick={()=>generate(prompt)} disabled={loading}
+              style={{ padding:"8px 14px", borderRadius:8, border:"none", background:"#7c3aed", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start", whiteSpace:"nowrap" }}>
+              Run →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>
+      )}
+
+      {/* Image output */}
+      {imageUrl ? (
+        <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)" }}>
+          <img src={imageUrl} alt="Blog headline" style={{ width:"100%", display:"block", borderRadius:10 }} />
+          <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
+            <button onClick={handleDownload}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              ↓ Download
+            </button>
+            <button onClick={()=>generate()}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              ↻ New
+            </button>
+            <button onClick={()=>{ navigator.clipboard.writeText(imageUrl); setCopied(true); setTimeout(()=>setCopied(false),2000); }}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              {copied ? "✓ Copied URL" : "Copy URL"}
+            </button>
+          </div>
+        </div>
+      ) : !loading && (
+        <div style={{ height:160, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:8 }}>
+          <span style={{ fontSize:32, opacity:0.25 }}>🖼</span>
+          <span style={{ fontSize:12, color:"var(--muted)" }}>
+            {!provider ? "Add Stability AI, OpenAI, or Gemini key in Settings" : !title?.trim() ? "Enter a title first" : "Click Generate to create your headline image"}
+          </span>
+        </div>
+      )}
+
+      {loading && (
+        <div style={{ height:160, borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
+          <span style={{ animation:"spin 1s linear infinite", display:"inline-block", fontSize:20, opacity:0.4 }}>◌</span>
+          <span style={{ fontSize:12, color:"var(--muted)" }}>Generating headline image with {providerLabel}…</span>
+        </div>
+      )}
+    </div>
+  );
+}
 // Converts plain text / basic markdown → Wix rich content document format
 
 function textToWixContent(text) {
@@ -2949,7 +3353,7 @@ async function wixVeloPush(form, publishNow = false, cfg = {}) {
 
 const CATEGORIES = ["Culture", "Whiskey", "Gear", "Destinations", "Technique", "Lifestyle", "Reviews", "News"];
 
-function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
+function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {}, activeProvider = "anthropic", activeModel = "claude-sonnet-4-6" }) {
   const isNew = !post?.id;
   const [form, setForm] = useState({
     title:    post?.title    || "",
@@ -3026,6 +3430,15 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
           </label>
           <textarea rows={14} value={form.body} onChange={e=>setForm(f=>({...f,body:e.target.value}))} placeholder="Write your post here…" style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
         </div>
+
+        {/* Headline Image */}
+        <HeadlineImagePanel
+          title={form.title}
+          body={form.body}
+          activeProvider={activeProvider || "anthropic"}
+          activeModel={activeModel || "claude-sonnet-4-6"}
+          apiKeys={apiKeys || {}}
+        />
 
         {/* Copy to Wix */}
         <div style={{ padding:"14px 16px", borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)" }}>
@@ -3289,6 +3702,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const deleteCalEvent = (idx) => setCalEvents(all => all.filter((_, i) => i !== idx));
 
   const [gscData, setGscData] = useState(loadGSCData);
+  const [metaConfig, setMetaConfig] = useState(loadMetaConfig);
   const [wixConnected, setWixConnected] = useState(() => !!loadWixConfig().connected);
 
   // Re-check wix connection state whenever settings tab is visited
@@ -3382,6 +3796,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
     { id:"general",  label:"General"             },
     { id:"apikeys",  label:"API Keys"            },
     { id:"gsc",      label:"Search Console"      },
+    { id:"meta",     label:"Facebook & Instagram"},
     { id:"social",   label:"Social Media"        },
     { id:"wix",      label:"Wix Integration"     },
     { id:"billing",  label:"Billing & Plan"      },
@@ -3401,6 +3816,9 @@ export default function Dashboard({ user, workspace, onLogout }) {
           onClose={() => setPostEditorOpen(false)}
           onDelete={deletePost}
           wixConnected={wixConnected}
+          apiKeys={apiKeys}
+          activeProvider={activeProvider}
+          activeModel={activeModel}
         />
       )}
       {addCompetitorOpen && (
@@ -3512,35 +3930,17 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
           {/* ══ POSTS ══ */}
           {activeTab==="posts"&&(
-            <div>
-              <div style={{display:"flex",gap:8,marginBottom:20}}>
-                {["all","published","draft","scheduled"].map(f=>(
-                  <button key={f} onClick={()=>setPostFilter(f)} style={{padding:"6px 14px",borderRadius:99,border:postFilter===f?"1px solid var(--amber)":"1px solid var(--border)",background:postFilter===f?"var(--amber-glow)":"transparent",color:postFilter===f?"var(--amber)":"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",textTransform:"capitalize"}}>
-                    {f==="all"?`All (${posts.length})`:`${f} (${posts.filter(p=>p.status===f).length})`}
-                  </button>
-                ))}
-              </div>
-              <div style={{...card,padding:0,overflow:"hidden"}}>
-                <table style={{width:"100%",borderCollapse:"collapse"}}>
-                  <thead><tr style={{borderBottom:"1px solid var(--border)"}}>
-                    {["Title","Status","Category","Date","Views"].map(h=>(
-                      <th key={h} style={{textAlign:"left",padding:"12px 16px",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{h}</th>
-                    ))}
-                  </tr></thead>
-                  <tbody>
-                    {filteredPosts.map(p=>(
-                      <tr key={p.id} onClick={()=>openEditPost(p)} style={{borderBottom:"1px solid var(--border)",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                        <td style={{padding:"14px 16px",fontWeight:600,fontSize:13}}>{p.title}</td>
-                        <td style={{padding:"14px 16px"}}><StatusBadge status={p.status}/></td>
-                        <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{p.category}</td>
-                        <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{p.date}</td>
-                        <td style={{padding:"14px 16px",fontSize:13,fontWeight:600}}>{p.views>0?p.views.toLocaleString():"—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <PostsTab
+              posts={posts}
+              filteredPosts={filteredPosts}
+              postFilter={postFilter}
+              setPostFilter={setPostFilter}
+              setPosts={setPosts}
+              savePost={savePost}
+              openEditPost={openEditPost}
+              card={card}
+              btnP={btnP}
+            />
           )}
 
           {/* ══ ANALYTICS ══ */}
@@ -3760,6 +4160,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
                 activeModel={activeModel}
                 apiKeys={apiKeys}
                 dark={dark}
+                metaConfig={metaConfig}
               />
             </div>
           )}
@@ -3799,6 +4200,16 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
                 {settingsSection==="gsc"&&(
                   <GSCPanel onDataLoaded={(data)=>{ setGscData(data); saveGSCData(data); }} />
+                )}
+
+                {settingsSection==="meta"&&(
+                  <div>
+                    <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Facebook & Instagram</h3>
+                    <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 20px", lineHeight:1.6 }}>
+                      Connect your Facebook Page and Instagram Business account to publish directly from Blog Bunker.
+                    </p>
+                    <MetaConnectPanel onConnected={(cfg) => setMetaConfig(cfg)} />
+                  </div>
                 )}
 
                 {settingsSection==="social"&&(
