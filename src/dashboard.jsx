@@ -3231,6 +3231,551 @@ function MetaConnectPanel({ onConnected }) {
   );
 }
 
+// ─── SOCIAL STUDIO ────────────────────────────────────────────────────────────
+// Full standalone social media creation studio with sub-tabs
+
+function SocialStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, onAddInspiration, handleProviderChange, handleModelChange }) {
+  const [tab, setTab] = useState("create");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  const TABS = [
+    { id:"create",    label:"Create Post",     icon:"◈" },
+    { id:"research",  label:"Research",        icon:"◎" },
+    { id:"hashtags",  label:"Hashtags",        icon:"#" },
+    { id:"image",     label:"Image Studio",    icon:"▣" },
+    { id:"calendar",  label:"Post Ideas",      icon:"✦" },
+  ];
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Social Studio</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Create, research, and publish social content — all in one place.</p>
+        </div>
+        <ProviderPicker activeProvider={activeProvider} activeModel={activeModel} onProviderChange={handleProviderChange} onModelChange={handleModelChange} keys={apiKeys} compact />
+      </div>
+
+      {/* Sub-tabs */}
+      <div style={{ display:"flex", gap:4, marginBottom:24, background:"var(--bg-surface)", borderRadius:10, padding:4, border:"1px solid var(--border)", width:"fit-content" }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            style={{ padding:"8px 16px", borderRadius:8, border:"none", background:tab===t.id?"var(--amber)":"transparent", color:tab===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            <span>{t.icon}</span>{t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── CREATE POST ── */}
+      {tab === "create" && (
+        <SocialPostTab
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          dark={dark}
+          metaConfig={metaConfig}
+        />
+      )}
+
+      {/* ── RESEARCH ── */}
+      {tab === "research" && (
+        <SocialResearch
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          inspiration={inspiration}
+          onAddInspiration={onAddInspiration}
+        />
+      )}
+
+      {/* ── HASHTAGS ── */}
+      {tab === "hashtags" && (
+        <HashtagOptimizer
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+        />
+      )}
+
+      {/* ── IMAGE STUDIO ── */}
+      {tab === "image" && (
+        <SocialImageStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+        />
+      )}
+
+      {/* ── POST IDEAS ── */}
+      {tab === "calendar" && (
+        <SocialPostIdeas
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          inspiration={inspiration}
+          onAddInspiration={onAddInspiration}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── SOCIAL RESEARCH ──────────────────────────────────────────────────────────
+
+function SocialResearch({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
+  const [topic,   setTopic]   = useState("");
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const research = async () => {
+    if (!topic.trim()) return;
+    setLoading(true); setError(""); setResults(null);
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a social media strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Research the given topic and return ONLY valid JSON (no fences):
+{
+  "trending": [{"topic":"...","why":"...","platforms":["instagram","tiktok"]}],
+  "angles": [{"angle":"...","hook":"...","platform":"..."}],
+  "competitors": [{"account":"...","what_works":"..."}],
+  "bestTimes": {"instagram":"...","facebook":"...","tiktok":"..."},
+  "contentIdeas": ["...", "..."]
+}`,
+        `Research social media opportunities for: ${topic}\nExisting posts: ${posts.slice(0,5).map(p=>p.title).join(", ")}`,
+        apiKeys[activeProvider]
+      );
+      setResults(JSON.parse(text.replace(/```json|```/g,"").trim()));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Research Topic or Niche</div>
+        <div style={{ display:"flex", gap:10 }}>
+          <input style={{ ...iS }} placeholder="e.g. dry fly fishing on freestone streams, bourbon cocktails for outdoors…" value={topic} onChange={e=>setTopic(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&research()}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          <button onClick={research} disabled={!topic.trim()||loading}
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:topic.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:topic.trim()&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:8 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Researching…</> : `${provider.logo} Research`}
+          </button>
+        </div>
+      </div>
+
+      {error && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>}
+
+      {results && (
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+          {/* Trending */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)", marginBottom:14 }}>🔥 Trending Topics</div>
+            {results.trending?.map((t,i) => (
+              <div key={i} style={{ padding:"10px 0", borderBottom:"1px solid var(--border)", display:"flex", flexDirection:"column", gap:4 }}>
+                <div style={{ fontWeight:600, fontSize:13 }}>{t.topic}</div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)" }}>{t.why}</div>
+                <div style={{ display:"flex", gap:4, marginTop:2 }}>
+                  {t.platforms?.map(p => <span key={p} style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:"var(--bg-elevated)", color:"var(--muted)", border:"1px solid var(--border)" }}>{p}</span>)}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Angles */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:14 }}>💡 Content Angles</div>
+            {results.angles?.map((a,i) => (
+              <div key={i} style={{ padding:"10px 0", borderBottom:"1px solid var(--border)" }}>
+                <div style={{ fontWeight:600, fontSize:13, marginBottom:3 }}>{a.angle}</div>
+                <div style={{ fontSize:11, color:"var(--amber)", marginBottom:3 }}>Hook: {a.hook}</div>
+                <div style={{ fontSize:10, color:"var(--muted)" }}>Best for: {a.platform}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Best times */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7c3aed", marginBottom:14 }}>⏰ Best Posting Times</div>
+            {results.bestTimes && Object.entries(results.bestTimes).map(([plat, time]) => (
+              <div key={plat} style={{ display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom:"1px solid var(--border)" }}>
+                <span style={{ fontSize:12, textTransform:"capitalize", fontWeight:500 }}>{plat}</span>
+                <span style={{ fontSize:12, color:"var(--text-secondary)" }}>{time}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Content ideas */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📋 Quick Ideas</div>
+            {results.contentIdeas?.map((idea,i) => (
+              <div key={i} style={{ display:"flex", gap:10, padding:"8px 0", borderBottom:"1px solid var(--border)", alignItems:"flex-start" }}>
+                <span style={{ color:"var(--amber)", fontSize:11, flexShrink:0, marginTop:1 }}>→</span>
+                <span style={{ fontSize:12 }}>{idea}</span>
+                <button onClick={() => onAddInspiration({ id:Date.now()+i, title:idea, source:"Social Research", type:"article", notes:`Topic: ${topic}` })}
+                  style={{ marginLeft:"auto", padding:"2px 8px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:10, cursor:"pointer", fontFamily:"var(--font-body)", flexShrink:0 }}>
+                  + Board
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── HASHTAG OPTIMIZER ────────────────────────────────────────────────────────
+
+function HashtagOptimizer({ activeProvider, activeModel, apiKeys }) {
+  const [topic,    setTopic]    = useState("");
+  const [platform, setPlatform] = useState("instagram");
+  const [results,  setResults]  = useState(null);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState("");
+  const [copied,   setCopied]   = useState("");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const generate = async () => {
+    if (!topic.trim()) return;
+    setLoading(true); setError(""); setResults(null);
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a hashtag strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Generate optimized hashtags. Return ONLY valid JSON (no fences):
+{
+  "primary": ["#tag1","#tag2"],
+  "niche": ["#tag1","#tag2"],
+  "trending": ["#tag1","#tag2"],
+  "branded": ["#CaskAndStream","#CastAtDawn"],
+  "sets": {
+    "max_reach": "full hashtag string for copy-paste",
+    "niche_focus": "niche hashtag string",
+    "branded_only": "branded only string"
+  }
+}
+primary = 5 high-volume (100k-1M posts), niche = 8 medium-volume (10k-100k), trending = 5 current trends, branded = 3-4 brand-specific`,
+        `Topic: ${topic}\nPlatform: ${platform}`,
+        apiKeys[activeProvider]
+      );
+      setResults(JSON.parse(text.replace(/```json|```/g,"").trim()));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const copySet = (key, val) => {
+    navigator.clipboard.writeText(val);
+    setCopied(key);
+    setTimeout(() => setCopied(""), 2000);
+  };
+
+  const PLATS = [{ id:"instagram", label:"Instagram" },{ id:"tiktok", label:"TikTok" },{ id:"facebook", label:"Facebook" },{ id:"twitter", label:"X/Twitter" }];
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        <div style={{ display:"flex", gap:10, marginBottom:14 }}>
+          {PLATS.map(p => (
+            <button key={p.id} onClick={() => setPlatform(p.id)}
+              style={{ padding:"6px 14px", borderRadius:99, border:platform===p.id?"1px solid var(--amber)":"1px solid var(--border)", background:platform===p.id?"var(--amber-glow)":"transparent", color:platform===p.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ display:"flex", gap:10 }}>
+          <input style={iS} placeholder="e.g. dry fly fishing, bourbon tasting, fly tying…" value={topic} onChange={e=>setTopic(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&generate()}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          <button onClick={generate} disabled={!topic.trim()||loading}
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:topic.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:topic.trim()&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:8 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : "# Generate Hashtags"}
+          </button>
+        </div>
+      </div>
+
+      {error && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11" }}>{error}</div>}
+
+      {results && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Tag groups */}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12 }}>
+            {[
+              { key:"primary",  label:"High Volume",  color:"var(--amber)" },
+              { key:"niche",    label:"Niche Focus",  color:"#5cba6c"      },
+              { key:"trending", label:"Trending",     color:"#7c3aed"      },
+              { key:"branded",  label:"Branded",      color:"var(--amber)", span:3 },
+            ].map(g => (
+              <div key={g.key} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:14, ...(g.span?{gridColumn:`span ${g.span}`}:{}) }}>
+                <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:g.color, marginBottom:10 }}>{g.label}</div>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                  {results[g.key]?.map((tag,i) => (
+                    <span key={i} onClick={() => { navigator.clipboard.writeText(tag); }}
+                      style={{ fontSize:12, padding:"4px 10px", borderRadius:99, background:g.color+"15", color:g.color, border:`1px solid ${g.color}33`, cursor:"pointer", fontWeight:500 }}
+                      title="Click to copy">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Ready-to-use sets */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📋 Ready-to-Use Sets</div>
+            {results.sets && Object.entries(results.sets).map(([key, val]) => (
+              <div key={key} style={{ padding:"12px 0", borderBottom:"1px solid var(--border)" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+                  <div style={{ fontSize:12, fontWeight:600, textTransform:"capitalize" }}>{key.replace(/_/g," ")}</div>
+                  <button onClick={() => copySet(key, val)}
+                    style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied===key?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    {copied===key ? "✓ Copied!" : "Copy All"}
+                  </button>
+                </div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.7, wordBreak:"break-word" }}>{val}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SOCIAL IMAGE STUDIO ──────────────────────────────────────────────────────
+
+function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
+  const [topic,    setTopic]    = useState("");
+  const [style,    setStyle]    = useState("cinematic");
+  const [platform, setPlatform] = useState("instagram");
+  const [prompt,   setPrompt]   = useState("");
+  const [imageUrl, setImageUrl] = useState(null);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState("");
+  const provider = getImageProvider(apiKeys);
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const STYLES = [
+    { id:"cinematic",   label:"Cinematic"    },
+    { id:"editorial",   label:"Editorial"    },
+    { id:"lifestyle",   label:"Lifestyle"    },
+    { id:"minimal",     label:"Minimal"      },
+    { id:"vintage",     label:"Vintage Film" },
+    { id:"moody",       label:"Dark & Moody" },
+  ];
+
+  const generate = async () => {
+    if (!topic.trim() || !provider) return;
+    setLoading(true); setError(""); setImageUrl(null);
+    try {
+      const styleMap = {
+        cinematic:  "cinematic photography, anamorphic lens, golden hour, film grain",
+        editorial:  "editorial photography, clean composition, magazine quality",
+        lifestyle:  "lifestyle photography, authentic, natural light, candid",
+        minimal:    "minimalist photography, negative space, simple composition",
+        vintage:    "vintage film photography, faded colors, grain, retro aesthetic",
+        moody:      "dark moody photography, dramatic shadows, rich tones, atmospheric",
+      };
+      const aiPrompt = `Generate an image prompt for a Cask & Stream (fly fishing and whiskey lifestyle brand) ${platform} post. Style: ${styleMap[style]}. Topic: ${topic}. Amber and teal color palette. Return ONLY the prompt, no explanation.`;
+      const generatedPrompt = await callAI(activeProvider, activeModel, "You generate concise, vivid image prompts. Return only the prompt string.", aiPrompt, apiKeys[activeProvider]);
+      setPrompt(generatedPrompt.trim());
+      const url = await generateImage(generatedPrompt.trim(), platform, apiKeys);
+      setImageUrl(url);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const PLATS = ["instagram","facebook","tiktok","twitter"];
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
+        {/* Platform */}
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Platform</div>
+          <div style={{ display:"flex", gap:6 }}>
+            {PLATS.map(p => (
+              <button key={p} onClick={() => setPlatform(p)}
+                style={{ padding:"5px 14px", borderRadius:99, border:platform===p?"1px solid var(--amber)":"1px solid var(--border)", background:platform===p?"var(--amber-glow)":"transparent", color:platform===p?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
+                {p}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Style */}
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Visual Style</div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+            {STYLES.map(s => (
+              <button key={s.id} onClick={() => setStyle(s.id)}
+                style={{ padding:"5px 14px", borderRadius:99, border:style===s.id?"1px solid #7c3aed":"1px solid var(--border)", background:style===s.id?"#7c3aed18":"transparent", color:style===s.id?"#a78bfa":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Topic */}
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Topic / Subject</div>
+          <input style={iS} placeholder="e.g. dry fly fishing at sunset, aged bourbon on river rocks, fly tying…" value={topic} onChange={e=>setTopic(e.target.value)}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        </div>
+
+        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+          <button onClick={generate} disabled={!topic.trim()||loading||!provider}
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:topic.trim()&&!loading&&provider?"#7c3aed":"var(--bg-elevated)", color:topic.trim()&&!loading&&provider?"#fff":"var(--muted)", fontSize:13, fontWeight:700, cursor:topic.trim()&&!loading&&provider?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : "▣ Generate Image"}
+          </button>
+          {!provider && <span style={{ fontSize:11, color:"var(--amber)" }}>Add Stability AI, OpenAI, or Gemini key in Settings → API Keys</span>}
+          {error && <span style={{ fontSize:12, color:"var(--red)" }}>{error}</span>}
+        </div>
+      </div>
+
+      {/* Generated prompt display */}
+      {prompt && (
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:14 }}>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Generated Prompt</div>
+          <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} rows={2}
+            style={{ ...iS, resize:"none", fontSize:12, lineHeight:1.5 }} />
+          <button onClick={async () => { setLoading(true); setError(""); setImageUrl(null); try { const url = await generateImage(prompt, platform, apiKeys); setImageUrl(url); } catch(e) { setError(e.message); } setLoading(false); }}
+            disabled={loading}
+            style={{ marginTop:8, padding:"5px 14px", borderRadius:7, border:"none", background:"#7c3aed", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            ↻ Regenerate with this prompt
+          </button>
+        </div>
+      )}
+
+      {/* Image output */}
+      {imageUrl && (
+        <div style={{ position:"relative", borderRadius:12, overflow:"hidden", border:"1px solid var(--border)" }}>
+          <img src={imageUrl} alt="Generated" style={{ width:"100%", display:"block" }} />
+          <div style={{ position:"absolute", bottom:12, right:12, display:"flex", gap:6 }}>
+            <button onClick={() => { const a=document.createElement("a"); a.href=imageUrl; a.download=`social-${platform}-${Date.now()}.webp`; a.click(); }}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              ↓ Download
+            </button>
+            <button onClick={generate}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              ↻ New
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SOCIAL POST IDEAS ────────────────────────────────────────────────────────
+
+function SocialPostIdeas({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
+  const [ideas,   setIdeas]   = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+  const [saved,   setSaved]   = useState({});
+  const [filter,  setFilter]  = useState("all");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  const FILTERS = [
+    { id:"all",       label:"All Platforms" },
+    { id:"instagram", label:"Instagram"     },
+    { id:"facebook",  label:"Facebook"      },
+    { id:"tiktok",    label:"TikTok"        },
+    { id:"twitter",   label:"X/Twitter"     },
+  ];
+
+  const generate = async () => {
+    setLoading(true); setError(""); setSaved({});
+    try {
+      const existingTitles = posts.slice(0,10).map(p=>p.title).join(", ");
+      const text = await callAI(activeProvider, activeModel,
+        `You are a social media strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Generate 15 specific, actionable social post ideas. Return ONLY valid JSON array (no fences):
+[{"platform":"instagram","type":"reel|carousel|photo|story","hook":"...","caption_idea":"...","visual":"...","hashtag_theme":"..."}]
+Mix platforms. Make hooks compelling and specific. Visual should describe exactly what the image/video shows.`,
+        `Cask & Stream social post ideas. Existing content: ${existingTitles}. Generate 15 fresh ideas covering Instagram, TikTok, Facebook, and X.`,
+        apiKeys[activeProvider]
+      );
+      setIdeas(JSON.parse(text.replace(/```json|```/g,"").trim()));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const saveIdea = (idea, i) => {
+    onAddInspiration({ id:Date.now()+i, title:idea.hook, source:`Social Ideas — ${idea.platform}`, type:"article", notes:`${idea.caption_idea}\n\nVisual: ${idea.visual}\nHashtag theme: ${idea.hashtag_theme}` });
+    setSaved(s => ({...s, [i]:true}));
+  };
+
+  const filtered = filter === "all" ? ideas : ideas.filter(i => i.platform === filter);
+  const platColor = { instagram:"#e1306c", facebook:"#1877f2", tiktok:"#010101", twitter:"#1da1f2" };
+  const platIcon  = { instagram:"📸", facebook:"👍", tiktok:"🎵", twitter:"🐦" };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 4px" }}>Social Post Ideas</h3>
+          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>AI-generated post ideas tailored to Cask & Stream — save to Inspiration Board.</p>
+        </div>
+        <button onClick={generate} disabled={loading}
+          style={{ padding:"10px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : `${provider.logo} Generate 15 Ideas`}
+        </button>
+      </div>
+
+      {error && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11" }}>{error}</div>}
+
+      {ideas.length > 0 && (
+        <>
+          <div style={{ display:"flex", gap:6 }}>
+            {FILTERS.map(f => (
+              <button key={f.id} onClick={() => setFilter(f.id)}
+                style={{ padding:"5px 12px", borderRadius:99, border:filter===f.id?"1px solid var(--amber)":"1px solid var(--border)", background:filter===f.id?"var(--amber-glow)":"transparent", color:filter===f.id?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                {f.label} {f.id!=="all"&&`(${ideas.filter(i=>i.platform===f.id).length})`}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {filtered.map((idea, i) => (
+              <div key={i} style={{ background:"var(--bg-surface)", border:`1px solid ${saved[ideas.indexOf(idea)]?"var(--green)44":"var(--border)"}`, borderRadius:10, padding:"14px 16px", display:"flex", gap:12, alignItems:"flex-start" }}>
+                <div style={{ width:36, height:36, borderRadius:8, background:(platColor[idea.platform]||"var(--amber)")+"15", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>
+                  {platIcon[idea.platform] || "📱"}
+                </div>
+                <div style={{ flex:1 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+                    <span style={{ fontSize:10, fontWeight:700, color:platColor[idea.platform]||"var(--amber)", textTransform:"uppercase" }}>{idea.platform}</span>
+                    <span style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:"var(--bg-elevated)", color:"var(--muted)", border:"1px solid var(--border)" }}>{idea.type}</span>
+                  </div>
+                  <div style={{ fontWeight:600, fontSize:13, marginBottom:4 }}>{idea.hook}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>{idea.caption_idea}</div>
+                  <div style={{ fontSize:11, color:"var(--muted)", fontStyle:"italic" }}>🎬 {idea.visual}</div>
+                </div>
+                <button onClick={() => saveIdea(idea, ideas.indexOf(idea))} disabled={saved[ideas.indexOf(idea)]}
+                  style={{ padding:"5px 12px", borderRadius:6, border:"none", background:saved[ideas.indexOf(idea)]?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[ideas.indexOf(idea)]?"default":"pointer", fontFamily:"var(--font-body)", flexShrink:0, whiteSpace:"nowrap" }}>
+                  {saved[ideas.indexOf(idea)] ? "✓ Saved" : "+ Board"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {!ideas.length && !loading && (
+        <div style={{ textAlign:"center", padding:"48px 20px", color:"var(--muted)", fontSize:13 }}>
+          <div style={{ fontSize:32, marginBottom:12 }}>◈</div>
+          Click "Generate 15 Ideas" to get platform-specific post ideas for Cask & Stream.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -4286,19 +4831,18 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
           {/* ══ SOCIAL ══ */}
           {activeTab==="social"&&(
-            <div>
-              <div style={{marginBottom:24}}>
-                <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:"0 0 4px"}}>Social Media Posts</h2>
-                <p style={{fontSize:13,color:"var(--text-secondary)",margin:0}}>Generate from a topic or blog post — adapted automatically for each platform.</p>
-              </div>
-              <SocialPostTab
-                activeProvider={activeProvider}
-                activeModel={activeModel}
-                apiKeys={apiKeys}
-                dark={dark}
-                metaConfig={metaConfig}
-              />
-            </div>
+            <SocialStudio
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+              dark={dark}
+              metaConfig={metaConfig}
+              posts={posts}
+              inspiration={inspiration}
+              onAddInspiration={saveInspiration}
+              handleProviderChange={handleProviderChange}
+              handleModelChange={handleModelChange}
+            />
           )}
 
           {/* ══ SETTINGS ══ */}
