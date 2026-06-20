@@ -1,6 +1,34 @@
 import { useState, useRef, useEffect } from "react";
 
-// ─── SEED DATA ────────────────────────────────────────────────────────────────
+// ─── CLOUD SYNC (Netlify Blobs) ──────────────────────────────────────────────
+// Syncs key data to server-side storage so it survives localStorage clearing.
+// Falls back silently to localStorage-only if the network call fails.
+
+async function cloudGet(key, userId) {
+  try {
+    const res = await fetch(`/api/data?key=${encodeURIComponent(key)}&userId=${encodeURIComponent(userId)}`);
+    const data = await res.json();
+    return data.value;
+  } catch { return null; }
+}
+
+async function cloudSet(key, userId, value) {
+  try {
+    await fetch("/api/data", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, userId, value }),
+    });
+    return true;
+  } catch { return false; }
+}
+
+// Debounced cloud save — avoids hammering the API on every keystroke
+const cloudSaveTimers = {};
+function cloudSaveDebounced(key, userId, value, delay = 1500) {
+  clearTimeout(cloudSaveTimers[key]);
+  cloudSaveTimers[key] = setTimeout(() => cloudSet(key, userId, value), delay);
+}
 
 const DEFAULT_POSTS = [
   { id:1, title:"Cast at Dawn, Sip at Dusk: A Philosophy",           status:"published", date:"2026-03-28", views:1843, category:"Culture"      },
@@ -4336,6 +4364,34 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const [calEvents,   setCalEvents]   = useState(() => { try { const s = localStorage.getItem("bb_cal_events"); return s ? JSON.parse(s) : CALENDAR_EVENTS; } catch { return CALENDAR_EVENTS; } });
   const [wsSettings,  setWsSettings]  = useState(() => { try { const s = localStorage.getItem("bb_ws_settings"); return s ? JSON.parse(s) : null; } catch { return null; } });
 
+  // ── Cloud sync (Netlify Blobs) — survives localStorage clearing ──────────
+  const userId = user?.id || user?.email || "anonymous";
+  const [cloudSynced, setCloudSynced] = useState(false);
+
+  // Pull from cloud once on mount — cloud wins if it has data
+  useEffect(() => {
+    (async () => {
+      const cloudPosts = await cloudGet("posts", userId);
+      if (cloudPosts && Array.isArray(cloudPosts) && cloudPosts.length > 0) {
+        setPosts(cloudPosts);
+      }
+      const cloudInspiration = await cloudGet("inspiration", userId);
+      if (cloudInspiration && Array.isArray(cloudInspiration)) {
+        setInspiration(cloudInspiration);
+      }
+      const cloudCompetitors = await cloudGet("competitors", userId);
+      if (cloudCompetitors && Array.isArray(cloudCompetitors)) {
+        setCompetitors(cloudCompetitors);
+      }
+      setCloudSynced(true);
+    })();
+  }, []);
+
+  // Push to cloud whenever posts/inspiration/competitors change (debounced)
+  useEffect(() => { if (cloudSynced) cloudSaveDebounced("posts", userId, posts); }, [posts, cloudSynced]);
+  useEffect(() => { if (cloudSynced) cloudSaveDebounced("inspiration", userId, inspiration); }, [inspiration, cloudSynced]);
+  useEffect(() => { if (cloudSynced) cloudSaveDebounced("competitors", userId, competitors); }, [competitors, cloudSynced]);
+
   // Persist whenever data changes
   useEffect(() => { try { localStorage.setItem("bb_posts",       JSON.stringify(posts));       } catch {} }, [posts]);
   useEffect(() => { try { localStorage.setItem("bb_competitors", JSON.stringify(competitors)); } catch {} }, [competitors]);
@@ -4543,6 +4599,10 @@ export default function Dashboard({ user, workspace, onLogout }) {
           </div>
           <div style={{fontSize:10,marginTop:4,color:"var(--text-secondary)"}}>
             <span style={{color:fixedGreen}}>◈</span> {connectedProviders} AI · {connectedSocial} social
+          </div>
+          <div style={{fontSize:10,marginTop:4,color:cloudSynced?fixedGreen:"var(--muted)"}}>
+            <span style={{width:6,height:6,borderRadius:99,background:cloudSynced?fixedGreen:"var(--muted)",display:"inline-block",marginRight:4}}/>
+            {cloudSynced?"☁ Cloud synced":"☁ Syncing…"}
           </div>
         </div>
 
