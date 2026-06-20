@@ -32,3 +32,18 @@
   from   = "/api/wix-callback"
   to     = "/.netlify/functions/wix-oauth-callback"
   status = 200
+
+[[redirects]]
+  from   = "/api/meta-callback"
+  to     = "/.netlify/functions/meta-oauth-callback"
+  status = 200
+
+[[redirects]]
+  from   = "/api/meta-post"
+  to     = "/.netlify/functions/meta-post"
+  status = 200
+
+[[redirects]]
+  from   = "/api/data"
+  to     = "/.netlify/functions/data"
+  status = 200
