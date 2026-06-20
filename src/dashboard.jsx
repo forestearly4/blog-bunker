@@ -30,6 +30,50 @@ function cloudSaveDebounced(key, userId, value, delay = 1500) {
   cloudSaveTimers[key] = setTimeout(() => cloudSet(key, userId, value), delay);
 }
 
+// ─── ROBUST JSON PARSER ───────────────────────────────────────────────────────
+// AI responses sometimes get truncated mid-string (token limits, overload).
+// This attempts to repair common truncation issues before giving up.
+
+function parseAIJson(text) {
+  let cleaned = text.replace(/```json|```/g, "").trim();
+
+  try { return JSON.parse(cleaned); } catch {}
+
+  // Repair 1 — close unterminated string, trim to last complete element
+  try {
+    let repaired = cleaned;
+    const quoteCount = (repaired.match(/(?<!\\)"/g) || []).length;
+    if (quoteCount % 2 !== 0) repaired += '"';
+
+    let depth = 0, lastValidEnd = -1, inString = false, escape = false;
+    for (let i = 0; i < repaired.length; i++) {
+      const ch = repaired[i];
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{" || ch === "[") depth++;
+      if (ch === "}" || ch === "]") { depth--; if (depth === 0) lastValidEnd = i; }
+    }
+    if (lastValidEnd > -1 && lastValidEnd < repaired.length - 1) {
+      repaired = repaired.slice(0, lastValidEnd + 1);
+    }
+    return JSON.parse(repaired);
+  } catch {}
+
+  // Repair 2 — array truncated mid-object, trim to last complete item
+  try {
+    if (cleaned.trim().startsWith("[")) {
+      const lastComplete = cleaned.lastIndexOf("},");
+      if (lastComplete > -1) return JSON.parse(cleaned.slice(0, lastComplete + 1) + "]");
+      const lastBrace = cleaned.lastIndexOf("}");
+      if (lastBrace > -1) return JSON.parse(cleaned.slice(0, lastBrace + 1) + "]");
+    }
+  } catch {}
+
+  throw new Error("AI response was cut off and couldn't be repaired — try again.");
+}
+
 const DEFAULT_POSTS = [
   { id:1, title:"Cast at Dawn, Sip at Dusk: A Philosophy",           status:"published", date:"2026-03-28", views:1843, category:"Culture"      },
   { id:2, title:"Whiskey & Waders: Perfect Pairings for the Stream",  status:"published", date:"2026-03-22", views:1204, category:"Whiskey"      },
@@ -1128,7 +1172,7 @@ function HeadlineGenerator({ activeProvider, activeModel, apiKeys }) {
         `Topic: ${topic}`,
         apiKeys[activeProvider]
       );
-      setHeadlines(JSON.parse(text.replace(/```json|```/g,"").trim()));
+      setHeadlines(parseAIJson(text));
     } catch(e) { setError(e.message || "Could not generate headlines. Try again."); }
     setLoading(false);
   };
@@ -1176,7 +1220,7 @@ function SEOOptimizer({ activeProvider, activeModel, apiKeys }) {
         `Analyze:\n\n${draft.slice(0,1500)}`,
         apiKeys[activeProvider]
       );
-      setResult(JSON.parse(text.replace(/```json|```/g,"").trim()));
+      setResult(parseAIJson(text));
     } catch(e) { setError(e.message || "Could not parse SEO analysis. Try again."); }
     setLoading(false);
   };
@@ -1793,7 +1837,7 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
         `Focus area: ${focusMap[focus]}\n\nAlready published/drafted (avoid these angles):\n${existingTitles}\n\nGenerate 10 fresh content ideas.`,
         apiKeys[activeProvider]
       );
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      const parsed = parseAIJson(text);
       setIdeas(parsed);
     } catch(e) {
       setError(e.message || "Generation failed.");
@@ -1917,7 +1961,7 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
         `Competitor: ${comp.name} (${comp.url})\nKnown focus: ${comp.strengths}\nThreat level: ${comp.threat}\n\nGenerate 5 posts they likely published recently and the counter-opportunity for Cask & Stream.`,
         apiKeys[activeProvider]
       );
-      const posts = JSON.parse(text.replace(/```json|```/g, "").trim());
+      const posts = parseAIJson(text);
       const updated = {
         ...tracking,
         [comp.name]: {
@@ -2220,7 +2264,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
         `Analyze and optimize:\nTitle: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0,1000)}`,
         apiKeys[activeProvider]
       );
-      const seo = JSON.parse(seoText.replace(/```json|```/g,"").trim());
+      const seo = parseAIJson(seoText);
 
       setLoadMsg("Generating headline options…");
       const hlText = await callAI(activeProvider, activeModel,
@@ -2228,7 +2272,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
         `Original title: ${draft.title}\nTopic: ${brief.topic}`,
         apiKeys[activeProvider]
       );
-      const headlines = JSON.parse(hlText.replace(/```json|```/g,"").trim());
+      const headlines = parseAIJson(hlText);
 
       setEnhance({ ...seo, headlines, improved: seo.metaTitle });
       markDone("enhance");
@@ -3377,7 +3421,7 @@ function SocialResearch({ activeProvider, activeModel, apiKeys, posts, inspirati
         `Research social media opportunities for: ${topic}\nExisting posts: ${posts.slice(0,5).map(p=>p.title).join(", ")}`,
         apiKeys[activeProvider]
       );
-      setResults(JSON.parse(text.replace(/```json|```/g,"").trim()));
+      setResults(parseAIJson(text));
     } catch(e) { setError(e.message); }
     setLoading(false);
   };
@@ -3491,7 +3535,7 @@ primary = 5 high-volume (100k-1M posts), niche = 8 medium-volume (10k-100k), tre
         `Topic: ${topic}\nPlatform: ${platform}`,
         apiKeys[activeProvider]
       );
-      setResults(JSON.parse(text.replace(/```json|```/g,"").trim()));
+      setResults(parseAIJson(text));
     } catch(e) { setError(e.message); }
     setLoading(false);
   };
@@ -3723,13 +3767,13 @@ function SocialPostIdeas({ activeProvider, activeModel, apiKeys, posts, inspirat
     try {
       const existingTitles = posts.slice(0,10).map(p=>p.title).join(", ");
       const text = await callAI(activeProvider, activeModel,
-        `You are a social media strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Generate 15 specific, actionable social post ideas. Return ONLY valid JSON array (no fences):
+        `You are a social media strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Generate 10 specific, actionable social post ideas. Return ONLY valid JSON array (no fences):
 [{"platform":"instagram","type":"reel|carousel|photo|story","hook":"...","caption_idea":"...","visual":"...","hashtag_theme":"..."}]
 Mix platforms. Make hooks compelling and specific. Visual should describe exactly what the image/video shows.`,
-        `Cask & Stream social post ideas. Existing content: ${existingTitles}. Generate 15 fresh ideas covering Instagram, TikTok, Facebook, and X.`,
+        `Cask & Stream social post ideas. Existing content: ${existingTitles}. Generate 10 fresh ideas covering Instagram, TikTok, Facebook, and X.`,
         apiKeys[activeProvider]
       );
-      setIdeas(JSON.parse(text.replace(/```json|```/g,"").trim()));
+      setIdeas(parseAIJson(text));
     } catch(e) { setError(e.message); }
     setLoading(false);
   };
@@ -3752,7 +3796,7 @@ Mix platforms. Make hooks compelling and specific. Visual should describe exactl
         </div>
         <button onClick={generate} disabled={loading}
           style={{ padding:"10px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
-          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : `${provider.logo} Generate 15 Ideas`}
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : `${provider.logo} Generate 10 Ideas`}
         </button>
       </div>
 
@@ -3797,7 +3841,7 @@ Mix platforms. Make hooks compelling and specific. Visual should describe exactl
       {!ideas.length && !loading && (
         <div style={{ textAlign:"center", padding:"48px 20px", color:"var(--muted)", fontSize:13 }}>
           <div style={{ fontSize:32, marginBottom:12 }}>◈</div>
-          Click "Generate 15 Ideas" to get platform-specific post ideas for Cask & Stream.
+          Click "Generate 10 Ideas" to get platform-specific post ideas for Cask & Stream.
         </div>
       )}
     </div>
