@@ -3386,11 +3386,12 @@ function MetaConnectPanel({ onConnected }) {
 // Full standalone social media creation studio with sub-tabs
 
 function SocialStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, onAddInspiration, handleProviderChange, handleModelChange }) {
-  const [tab, setTab] = useState("create");
+  const [tab, setTab] = useState("pipeline");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
 
   const TABS = [
-    { id:"create",    label:"Create Post",     icon:"◈" },
+    { id:"pipeline",  label:"Pipeline",        icon:"◈", highlight:true },
+    { id:"create",    label:"Quick Post",      icon:"✎" },
     { id:"research",  label:"Research",        icon:"◎" },
     { id:"hashtags",  label:"Hashtags",        icon:"#" },
     { id:"image",     label:"Image Studio",    icon:"▣" },
@@ -3414,9 +3415,23 @@ function SocialStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, 
           <button key={t.id} onClick={() => setTab(t.id)}
             style={{ padding:"8px 16px", borderRadius:8, border:"none", background:tab===t.id?"var(--amber)":"transparent", color:tab===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
             <span>{t.icon}</span>{t.label}
+            {t.highlight && tab !== t.id && <span style={{ fontSize:8, fontWeight:700, padding:"1px 5px", borderRadius:99, background:"var(--amber)", color:"#0e0f11", marginLeft:2 }}>NEW</span>}
           </button>
         ))}
       </div>
+
+      {/* ── SOCIAL PIPELINE ── */}
+      {tab === "pipeline" && (
+        <SocialPipeline
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          dark={dark}
+          metaConfig={metaConfig}
+          inspiration={inspiration}
+          onAddInspiration={onAddInspiration}
+        />
+      )}
 
       {/* ── CREATE POST ── */}
       {tab === "create" && (
@@ -3931,6 +3946,495 @@ Mix platforms across instagram, tiktok, facebook, twitter. Be concise — brevit
         <div style={{ textAlign:"center", padding:"48px 20px", color:"var(--muted)", fontSize:13 }}>
           <div style={{ fontSize:32, marginBottom:12 }}>◈</div>
           Click "Generate 10 Ideas" to get platform-specific post ideas for Cask & Stream.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SOCIAL PIPELINE ──────────────────────────────────────────────────────────
+// 5-stage workflow: Idea → Caption → Hashtags → Image → Publish
+
+const SOCIAL_PIPELINE_STORAGE = "bb_social_pipeline_draft";
+function loadSocialPipelineDraft() { try { return JSON.parse(localStorage.getItem(SOCIAL_PIPELINE_STORAGE) || "null"); } catch { return null; } }
+function saveSocialPipelineDraft(d) { try { localStorage.setItem(SOCIAL_PIPELINE_STORAGE, JSON.stringify(d)); } catch {} }
+function clearSocialPipelineDraft() { try { localStorage.removeItem(SOCIAL_PIPELINE_STORAGE); } catch {} }
+
+const SOCIAL_STAGES = [
+  { id:"idea",     num:1, label:"Idea",     icon:"✦", desc:"Pick or write a concept" },
+  { id:"caption",  num:2, label:"Caption",  icon:"✎", desc:"Write the post"          },
+  { id:"hashtags", num:3, label:"Hashtags", icon:"#", desc:"Optimize for reach"       },
+  { id:"image",    num:4, label:"Image",    icon:"▣", desc:"Generate visual"          },
+  { id:"publish",  num:5, label:"Publish",  icon:"↑", desc:"Post or schedule"         },
+];
+
+function SocialPipelineProgress({ stage, setStage, completed }) {
+  return (
+    <div style={{ display:"flex", alignItems:"center", marginBottom:28, padding:"20px 28px", background:"var(--bg-surface)", borderRadius:12, border:"1px solid var(--border)" }}>
+      {SOCIAL_STAGES.map((s, i) => {
+        const isActive    = stage === s.id;
+        const isDone      = completed.includes(s.id);
+        const isReachable = i === 0 || completed.includes(SOCIAL_STAGES[i-1].id) || isDone || isActive;
+        return (
+          <div key={s.id} style={{ display:"contents" }}>
+            <div onClick={() => isReachable && setStage(s.id)}
+              style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:6, cursor:isReachable?"pointer":"default", opacity:isReachable?1:0.4, transition:"opacity 0.2s" }}>
+              <div style={{ width:40, height:40, borderRadius:99, display:"flex", alignItems:"center", justifyContent:"center", fontSize:isActive?18:14, fontWeight:700, background:isDone?"var(--green)":isActive?"var(--amber)":"var(--bg-elevated)", border:isDone?"none":isActive?"none":"1px solid var(--border)", color:isDone?"#fff":isActive?"#0e0f11":"var(--muted)", transition:"all 0.3s", boxShadow:isActive?"0 0 20px var(--amber-glow)":"none" }}>
+                {isDone ? "✓" : s.icon}
+              </div>
+              <div style={{ textAlign:"center" }}>
+                <div style={{ fontSize:11, fontWeight:isActive?700:500, color:isActive?"var(--amber)":isDone?"var(--green)":"var(--text-secondary)" }}>{s.label}</div>
+                <div style={{ fontSize:9, color:"var(--muted)", letterSpacing:"0.04em" }}>{s.desc}</div>
+              </div>
+            </div>
+            {i < SOCIAL_STAGES.length-1 && (
+              <div style={{ flex:1, height:2, background:completed.includes(s.id)?"var(--green)":isActive?"var(--amber)33":"var(--border)", margin:"0 12px", marginBottom:24, borderRadius:99, transition:"background 0.4s" }} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration }) {
+  const saved = loadSocialPipelineDraft();
+  const [stage,     setStage]     = useState(saved?.stage || "idea");
+  const [completed, setCompleted] = useState(saved?.completed || []);
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  const [idea, setIdea] = useState(saved?.idea || { topic:"", platform:"instagram", type:"photo", inspirationSource:null });
+  const [caption, setCaption] = useState(saved?.caption || { text:"", platform:"instagram" });
+  const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"" });
+  const [imageData, setImageData] = useState(saved?.imageData || { prompt:"", url:null, imgProvider: resolveImageProvider(apiKeys) });
+  const [schedule, setSchedule] = useState(saved?.schedule || { date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
+
+  const [loading, setLoading] = useState(false);
+  const [loadMsg, setLoadMsg] = useState("");
+  const [error,   setError]   = useState("");
+  const [success, setSuccess] = useState("");
+  const [savedAt, setSavedAt] = useState(saved?.savedAt || null);
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+  const btnA = { padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 };
+  const btnS = { padding:"10px 20px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" };
+
+  // Auto-save draft
+  useEffect(() => {
+    if (!idea.topic && !caption.text) return;
+    const data = { stage, completed, idea, caption, hashtags, imageData: { ...imageData, url:null }, schedule, savedAt:new Date().toISOString() };
+    saveSocialPipelineDraft(data);
+    setSavedAt(data.savedAt);
+  }, [stage, completed, idea, caption, hashtags, imageData.prompt, imageData.imgProvider, schedule]);
+
+  const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
+  const advance  = (next) => { setStage(next); setError(""); setSuccess(""); };
+
+  const PLATFORMS = [
+    { id:"instagram", label:"Instagram", color:"#e1306c", icon:"📸" },
+    { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
+    { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
+    { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
+  ];
+
+  // ── STAGE 1: IDEA ───────────────────────────────────────────────────────────
+
+  const useInspirationIdea = (item) => {
+    setIdea(i => ({ ...i, topic: item.title, inspirationSource: item }));
+  };
+
+  const generateIdeaFromScratch = async () => {
+    setLoading(true); setLoadMsg("Generating idea…"); setError("");
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a social strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Suggest ONE compelling, specific social post idea. Return ONLY the topic/concept as a single sentence, nothing else.`,
+        `Platform: ${idea.platform}. Suggest a fresh post idea.`,
+        apiKeys[activeProvider]
+      );
+      setIdea(i => ({ ...i, topic: text.trim() }));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 2: CAPTION ────────────────────────────────────────────────────────
+
+  const generateCaption = async () => {
+    if (!idea.topic.trim()) return;
+    setLoading(true); setLoadMsg("Writing caption…"); setError("");
+    try {
+      const plat = PLATFORMS.find(p => p.id === idea.platform);
+      const toneMap = {
+        instagram: "warm, visual storytelling, evocative — Instagram caption style",
+        facebook:  "conversational, community-focused, slightly longer form",
+        tiktok:    "punchy, trend-aware, hook-first, short sentences",
+        twitter:   "concise, witty, under 280 characters",
+      };
+      const text = await callAI(activeProvider, activeModel,
+        `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${toneMap[idea.platform]}.`,
+        `Write a ${idea.platform} caption (post type: ${idea.type}) about: ${idea.topic}`,
+        apiKeys[activeProvider]
+      );
+      setCaption({ text: text.trim(), platform: idea.platform });
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 3: HASHTAGS ───────────────────────────────────────────────────────
+
+  const generateHashtagsForPost = async () => {
+    setLoading(true); setLoadMsg("Optimizing hashtags…"); setError("");
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a hashtag strategist for Cask & Stream. Return ONLY valid JSON (no fences): {"primary":["#tag1","#tag2"],"niche":["#tag1"],"branded":["#CaskAndStream"],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags.`,
+        `Topic: ${idea.topic}\nPlatform: ${idea.platform}`,
+        apiKeys[activeProvider]
+      );
+      const parsed = parseAIJson(text);
+      setHashtags({ sets: parsed, selected: parsed.full_set || "" });
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 4: IMAGE ──────────────────────────────────────────────────────────
+
+  const generateSocialPipelineImage = async () => {
+    setLoading(true); setLoadMsg("Writing image prompt…"); setError("");
+    try {
+      const aiPrompt = await generateImagePrompt(idea.topic, idea.platform, activeProvider, activeModel, apiKeys[activeProvider]);
+      setImageData(d => ({ ...d, prompt: aiPrompt }));
+      setLoadMsg(`Generating with ${getImageProviderLabel(imageData.imgProvider)}…`);
+      const url = await generateImage(aiPrompt, idea.platform, apiKeys, imageData.imgProvider);
+      setImageData(d => ({ ...d, prompt: aiPrompt, url }));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  const regenerateImageWithPrompt = async () => {
+    setLoading(true); setLoadMsg("Generating image…"); setError("");
+    try {
+      const url = await generateImage(imageData.prompt, idea.platform, apiKeys, imageData.imgProvider);
+      setImageData(d => ({ ...d, url }));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 5: PUBLISH ────────────────────────────────────────────────────────
+
+  const handlePublish = async () => {
+    setLoading(true); setError(""); setSuccess("");
+    const plat = PLATFORMS.find(p => p.id === idea.platform);
+    try {
+      if (idea.platform === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
+        setLoadMsg("Posting to Facebook…");
+        const page = metaConfig.pages[0];
+        const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: `${caption.text}\n\n${hashtags.selected}`, imageUrl: imageData.url, platforms: ["facebook"] });
+        if (!res.facebook?.success) throw new Error(res.facebook?.error || "Facebook post failed");
+        setSuccess("✓ Posted to Facebook!");
+      } else if (idea.platform === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
+        if (!imageData.url) throw new Error("Instagram requires an image — go back to the Image stage.");
+        setLoadMsg("Posting to Instagram…");
+        const page = metaConfig.pages.find(p => p.instagram_id);
+        const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: `${caption.text}\n\n${hashtags.selected}`, imageUrl: imageData.url, platforms: ["instagram"] });
+        if (!res.instagram?.success) throw new Error(res.instagram?.error || "Instagram post failed");
+        setSuccess("✓ Posted to Instagram!");
+      } else {
+        // No direct connection — copy to clipboard as fallback
+        navigator.clipboard.writeText(`${caption.text}\n\n${hashtags.selected}`);
+        setSuccess(`✓ Copied caption + hashtags to clipboard! ${plat?.label} isn't connected for direct posting — paste this into the ${plat?.label} app.${imageData.url ? " Don't forget to download and attach the image." : ""}`);
+      }
+      markDone("publish");
+      clearSocialPipelineDraft();
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  const resetPipeline = () => {
+    clearSocialPipelineDraft();
+    setStage("idea"); setCompleted([]); setError(""); setSuccess(""); setSavedAt(null);
+    setIdea({ topic:"", platform:"instagram", type:"photo", inspirationSource:null });
+    setCaption({ text:"", platform:"instagram" });
+    setHashtags({ sets:null, selected:"" });
+    setImageData({ prompt:"", url:null, imgProvider: resolveImageProvider(apiKeys) });
+  };
+
+  const platColor = PLATFORMS.find(p => p.id === idea.platform)?.color || "var(--amber)";
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Social Pipeline</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>
+            From idea to published — one seamless social workflow.
+            {savedAt && <span style={{ color:"var(--green)", marginLeft:8, fontSize:11 }}>✓ Draft auto-saved {new Date(savedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</span>}
+          </p>
+        </div>
+        {(completed.length > 0 || idea.topic) && (
+          <button onClick={resetPipeline} style={btnS}>↺ New Post</button>
+        )}
+      </div>
+
+      <SocialPipelineProgress stage={stage} setStage={setStage} completed={completed} />
+
+      {error   && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>{error}</div>}
+      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", color:"#5cba6c", fontSize:13 }}>{success}</div>}
+      {loading && (
+        <div style={{ marginBottom:16, padding:"12px 16px", borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)44", display:"flex", alignItems:"center", gap:10, fontSize:13, color:"var(--amber)" }}>
+          <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>
+          {loadMsg || "Working…"}
+        </div>
+      )}
+
+      {/* ── STAGE 1: IDEA ── */}
+      {stage === "idea" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+            <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 16px" }}>What's the post about?</h3>
+
+            <div style={{ marginBottom:16 }}>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Platform</label>
+              <div style={{ display:"flex", gap:6 }}>
+                {PLATFORMS.map(p => (
+                  <button key={p.id} onClick={() => setIdea(i => ({...i, platform:p.id}))}
+                    style={{ padding:"7px 16px", borderRadius:99, border:idea.platform===p.id?`1px solid ${p.color}`:"1px solid var(--border)", background:idea.platform===p.id?p.color+"18":"transparent", color:idea.platform===p.id?p.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                    <span>{p.icon}</span>{p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom:16 }}>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Post Type</label>
+              <div style={{ display:"flex", gap:6 }}>
+                {["photo","reel","carousel","story"].map(t => (
+                  <button key={t} onClick={() => setIdea(i => ({...i, type:t}))}
+                    style={{ padding:"6px 14px", borderRadius:99, border:idea.type===t?"1px solid var(--amber)":"1px solid var(--border)", background:idea.type===t?"var(--amber-glow)":"transparent", color:idea.type===t?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Topic / Concept *</label>
+              <div style={{ display:"flex", gap:10 }}>
+                <input style={iS} placeholder="e.g. golden hour on the river, pouring bourbon by the fire…" value={idea.topic} onChange={e=>setIdea(i=>({...i,topic:e.target.value}))} autoFocus
+                  onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                <button onClick={generateIdeaFromScratch} disabled={loading}
+                  style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)", whiteSpace:"nowrap" }}>
+                  ✦ Surprise Me
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Inspiration board quick-select */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>Use from Inspiration Board</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:240, overflow:"auto" }}>
+              {inspiration.length === 0 && (
+                <div style={{ fontSize:12, color:"var(--muted)", padding:"8px 0" }}>No inspiration saved yet — use Research or Post Ideas tabs to add some.</div>
+              )}
+              {inspiration.map(item => (
+                <button key={item.id} onClick={() => useInspirationIdea(item)}
+                  style={{ padding:"10px 14px", borderRadius:8, border:idea.inspirationSource?.id===item.id?"1px solid var(--amber)":"1px solid var(--border)", background:idea.inspirationSource?.id===item.id?"var(--amber-glow)":"var(--bg-elevated)", color:"var(--text)", fontSize:12, cursor:"pointer", textAlign:"left", fontFamily:"var(--font-body)" }}>
+                  <div style={{ fontWeight:600, marginBottom:2 }}>{item.title}</div>
+                  <div style={{ fontSize:10, color:"var(--muted)" }}>{item.source}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={() => { markDone("idea"); advance("caption"); }} disabled={!idea.topic.trim()}
+              style={{ ...btnA, background:idea.topic.trim()?"var(--amber)":"var(--bg-elevated)", color:idea.topic.trim()?"#0e0f11":"var(--muted)", cursor:idea.topic.trim()?"pointer":"not-allowed" }}>
+              Continue to Caption →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 2: CAPTION ── */}
+      {stage === "caption" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+              <div>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:platColor }}>{PLATFORMS.find(p=>p.id===idea.platform)?.icon} {idea.platform}</div>
+                <div style={{ fontSize:12, color:"var(--text-secondary)", marginTop:2 }}>{idea.topic}</div>
+              </div>
+              <button onClick={generateCaption} disabled={loading}
+                style={{ padding:"9px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Writing…</> : caption.text ? "↻ Regenerate" : `${provider.logo} Write Caption`}
+              </button>
+            </div>
+            <textarea value={caption.text} onChange={e=>setCaption(c=>({...c,text:e.target.value}))} rows={8}
+              placeholder="Caption will appear here — or write your own…"
+              style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
+            <div style={{ fontSize:11, color:"var(--muted)", marginTop:6, textAlign:"right" }}>{caption.text.length} characters</div>
+          </div>
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={() => { markDone("caption"); advance("hashtags"); }} disabled={!caption.text.trim()}
+              style={{ ...btnA, background:caption.text.trim()?"var(--amber)":"var(--bg-elevated)", color:caption.text.trim()?"#0e0f11":"var(--muted)", cursor:caption.text.trim()?"pointer":"not-allowed" }}>
+              Continue to Hashtags →
+            </button>
+            <button onClick={() => setStage("idea")} style={btnS}>← Back to Idea</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 3: HASHTAGS ── */}
+      {stage === "hashtags" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {!hashtags.sets ? (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:32, textAlign:"center" }}>
+              <div style={{ fontSize:32, marginBottom:12 }}>#</div>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8 }}>Optimize Your Hashtags</h3>
+              <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24, maxWidth:400, margin:"0 auto 24px" }}>
+                Generate a mix of high-volume, niche, and branded hashtags tailored to your post.
+              </p>
+              <button onClick={generateHashtagsForPost} disabled={loading} style={btnA}>
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : "# Generate Hashtags"}
+              </button>
+            </div>
+          ) : (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:16 }}>
+                {[
+                  { key:"primary", label:"High Volume", color:"var(--amber)" },
+                  { key:"niche",   label:"Niche",        color:"#5cba6c"      },
+                  { key:"branded", label:"Branded",      color:"#7c3aed"      },
+                ].map(g => (
+                  <div key={g.key}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:g.color, marginBottom:8 }}>{g.label}</div>
+                    <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+                      {hashtags.sets[g.key]?.map((tag,i) => (
+                        <span key={i} style={{ fontSize:11, padding:"3px 8px", borderRadius:99, background:g.color+"15", color:g.color, border:`1px solid ${g.color}33` }}>{tag}</span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Final Set (editable — will be added to caption)</label>
+              <textarea value={hashtags.selected} onChange={e=>setHashtags(h=>({...h,selected:e.target.value}))} rows={3}
+                style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
+              <button onClick={generateHashtagsForPost} disabled={loading}
+                style={{ marginTop:8, padding:"5px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                ↻ Re-generate
+              </button>
+            </div>
+          )}
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={() => { markDone("hashtags"); advance("image"); }} style={btnA}>Continue to Image →</button>
+            <button onClick={() => setStage("caption")} style={btnS}>← Back to Caption</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 4: IMAGE ── */}
+      {stage === "image" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16, flexWrap:"wrap", gap:10 }}>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Visual</h3>
+              <ImageProviderPicker apiKeys={apiKeys} value={imageData.imgProvider} onChange={(id)=>{ setImageData(d=>({...d,imgProvider:id})); saveImageProviderPref(id); }} compact />
+            </div>
+
+            {!imageData.url && !loading && (
+              <div style={{ height:160, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:10, marginBottom:14 }}>
+                <span style={{ fontSize:28, opacity:0.3 }}>▣</span>
+                <button onClick={generateSocialPipelineImage} disabled={!imageData.imgProvider}
+                  style={{ padding:"8px 20px", borderRadius:8, border:"none", background:imageData.imgProvider?"#7c3aed":"var(--bg-elevated)", color:imageData.imgProvider?"#fff":"var(--muted)", fontSize:12, fontWeight:700, cursor:imageData.imgProvider?"pointer":"not-allowed", fontFamily:"var(--font-body)" }}>
+                  ▣ Generate Image
+                </button>
+              </div>
+            )}
+
+            {imageData.url && (
+              <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)", marginBottom:14 }}>
+                <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
+                <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
+                  <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-${idea.platform}-${Date.now()}.webp`; a.click(); }}
+                    style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    ↓ Download
+                  </button>
+                  <button onClick={regenerateImageWithPrompt}
+                    style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    ↻ New
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {imageData.prompt && (
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Prompt (editable)</label>
+                <div style={{ display:"flex", gap:8 }}>
+                  <textarea value={imageData.prompt} onChange={e=>setImageData(d=>({...d,prompt:e.target.value}))} rows={2}
+                    style={{ ...iS, resize:"vertical", fontSize:12 }} />
+                  <button onClick={regenerateImageWithPrompt} disabled={loading}
+                    style={{ padding:"8px 14px", borderRadius:8, border:"none", background:"#7c3aed", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start", whiteSpace:"nowrap" }}>
+                    Run →
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={() => { markDone("image"); advance("publish"); }} style={btnA}>Continue to Publish →</button>
+            <button onClick={() => setStage("hashtags")} style={btnS}>← Back to Hashtags</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 5: PUBLISH ── */}
+      {stage === "publish" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {success ? (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:40, textAlign:"center" }}>
+              <div style={{ fontSize:48, marginBottom:16 }}>✓</div>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, marginBottom:8 }}>Done!</h3>
+              <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:24 }}>{success}</p>
+              <button onClick={resetPipeline} style={btnA}>Start New Post</button>
+            </div>
+          ) : (
+            <>
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+                <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 20px" }}>Review & Publish</h3>
+                <div style={{ display:"grid", gridTemplateColumns: imageData.url ? "1fr 1fr" : "1fr", gap:16, marginBottom:20 }}>
+                  <div>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:platColor, marginBottom:8 }}>
+                      {PLATFORMS.find(p=>p.id===idea.platform)?.icon} {idea.platform}
+                    </div>
+                    <div style={{ padding:14, borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, lineHeight:1.6, whiteSpace:"pre-wrap" }}>
+                      {caption.text}
+                      {hashtags.selected && <div style={{ marginTop:8, color:"var(--amber)" }}>{hashtags.selected}</div>}
+                    </div>
+                  </div>
+                  {imageData.url && (
+                    <div>
+                      <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Image</div>
+                      <img src={imageData.url} alt="" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ padding:14, borderRadius:8, background:idea.platform==="facebook"&&metaConfig?.connected ? "#1877f20a" : idea.platform==="instagram"&&metaConfig?.connected ? "#e1306c0a" : "var(--bg-elevated)", border:`1px solid ${(idea.platform==="facebook"||idea.platform==="instagram")&&metaConfig?.connected?"#5cba6c44":"var(--border)"}`, fontSize:12 }}>
+                  {(idea.platform==="facebook" && metaConfig?.connected && metaConfig?.pages?.length>0) && <span style={{color:"#5cba6c"}}>● Connected — will publish directly to your Facebook Page</span>}
+                  {(idea.platform==="instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) && <span style={{color:"#5cba6c"}}>● Connected — will publish directly to Instagram{!imageData.url && " (image required)"}</span>}
+                  {!((idea.platform==="facebook"||idea.platform==="instagram") && metaConfig?.connected) && <span style={{color:"var(--text-secondary)"}}>⚠ {PLATFORMS.find(p=>p.id===idea.platform)?.label} not connected — caption will be copied to clipboard to paste manually. Connect in Settings → Facebook & Instagram for direct publishing.</span>}
+                </div>
+              </div>
+
+              <div style={{ display:"flex", gap:10 }}>
+                <button onClick={handlePublish} disabled={loading} style={{ ...btnA, background:loading?"var(--bg-elevated)":"#5cba6c", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
+                  {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : "↑ Publish Now"}
+                </button>
+                <button onClick={() => setStage("image")} style={btnS}>← Back to Image</button>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
