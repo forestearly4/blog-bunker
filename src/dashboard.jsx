@@ -71,6 +71,19 @@ function parseAIJson(text) {
     }
   } catch {}
 
+  // Repair 3 — extract individual {...} objects via regex, parse each independently
+  // Recovers as many valid objects as possible even if overall structure is broken
+  try {
+    const objectMatches = cleaned.match(/\{[^{}]*\}/g);
+    if (objectMatches && objectMatches.length > 0) {
+      const recovered = [];
+      for (const m of objectMatches) {
+        try { recovered.push(JSON.parse(m)); } catch {}
+      }
+      if (recovered.length > 0) return recovered;
+    }
+  } catch {}
+
   throw new Error("AI response was cut off and couldn't be repaired — try again.");
 }
 
@@ -205,7 +218,7 @@ function saveModels(models) {
 
 // ─── MULTI-PROVIDER AI CALLER ─────────────────────────────────────────────────
 
-async function callAI(providerId, model, system, userMsg, apiKey) {
+async function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 1500) {
   if (providerId === "anthropic") {
     // Route through Netlify proxy if no client key, otherwise call directly
     const useProxy = !apiKey;
@@ -215,7 +228,7 @@ async function callAI(providerId, model, system, userMsg, apiKey) {
       : { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
     const res = await fetch(endpoint, {
       method: "POST", headers,
-      body: JSON.stringify({ model, max_tokens: 1500, system, messages: [{ role:"user", content: userMsg }] }),
+      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role:"user", content: userMsg }] }),
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error.message || "Anthropic error");
@@ -227,7 +240,7 @@ async function callAI(providerId, model, system, userMsg, apiKey) {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages: [{ role:"system", content: system }, { role:"user", content: userMsg }], max_tokens: 1500 }),
+      body: JSON.stringify({ model, messages: [{ role:"system", content: system }, { role:"user", content: userMsg }], max_tokens: maxTokens }),
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error.message || "OpenAI error");
@@ -241,7 +254,7 @@ async function callAI(providerId, model, system, userMsg, apiKey) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: `${system}\n\n${userMsg}` }] }],
-        generationConfig: { maxOutputTokens: 1500 },
+        generationConfig: { maxOutputTokens: maxTokens },
       }),
     });
     const data = await res.json();
@@ -3765,13 +3778,14 @@ function SocialPostIdeas({ activeProvider, activeModel, apiKeys, posts, inspirat
   const generate = async () => {
     setLoading(true); setError(""); setSaved({});
     try {
-      const existingTitles = posts.slice(0,10).map(p=>p.title).join(", ");
+      const existingTitles = posts.slice(0,8).map(p=>p.title).join(", ");
       const text = await callAI(activeProvider, activeModel,
-        `You are a social media strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Generate 10 specific, actionable social post ideas. Return ONLY valid JSON array (no fences):
-[{"platform":"instagram","type":"reel|carousel|photo|story","hook":"...","caption_idea":"...","visual":"...","hashtag_theme":"..."}]
-Mix platforms. Make hooks compelling and specific. Visual should describe exactly what the image/video shows.`,
-        `Cask & Stream social post ideas. Existing content: ${existingTitles}. Generate 10 fresh ideas covering Instagram, TikTok, Facebook, and X.`,
-        apiKeys[activeProvider]
+        `You are a social media strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Generate 10 social post ideas. Return ONLY valid JSON array, no markdown fences, no explanation before or after. Keep every field SHORT — one sentence max per field:
+[{"platform":"instagram","type":"reel","hook":"short hook","caption_idea":"one sentence","visual":"one sentence","hashtag_theme":"2-3 words"}]
+Mix platforms across instagram, tiktok, facebook, twitter. Be concise — brevity matters more than detail here.`,
+        `Cask & Stream. Existing: ${existingTitles}. Generate exactly 10 ideas, keep all fields brief.`,
+        apiKeys[activeProvider],
+        2200
       );
       setIdeas(parseAIJson(text));
     } catch(e) { setError(e.message); }
