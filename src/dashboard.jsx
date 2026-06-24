@@ -365,12 +365,28 @@ function getImageProviderLabel(provider) {
   return { stability:"Stability AI", dalle:"GPT Image (OpenAI)", "gemini-image":"Gemini Image" }[provider] || "No image provider";
 }
 
-async function generateImage(prompt, platId, apiKeys) {
-  const provider = getImageProvider(apiKeys);
+// Returns list of all image providers that have a key configured
+function getAvailableImageProviders(apiKeys) {
+  const all = [
+    { id:"stability",     label:"Stability AI",        keyName:"stability", logo:"◆" },
+    { id:"dalle",         label:"GPT Image (OpenAI)",  keyName:"openai",    logo:"●" },
+    { id:"gemini-image",  label:"Gemini Image",        keyName:"gemini",    logo:"✦" },
+  ];
+  return all.map(p => ({ ...p, available: !!apiKeys[p.keyName] }));
+}
+
+async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
+  const provider = forceProvider || getImageProvider(apiKeys);
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
 
   if (!provider) {
     throw new Error("No image provider connected. Add a Stability AI, OpenAI, or Gemini key in Settings → API Keys.");
+  }
+  if (forceProvider) {
+    const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
+    if (!apiKeys[keyMap[forceProvider]]) {
+      throw new Error(`${getImageProviderLabel(forceProvider)} key not set. Add it in Settings → API Keys.`);
+    }
   }
 
   if (provider === "stability") {
@@ -467,7 +483,60 @@ async function generateImage(prompt, platId, apiKeys) {
   throw new Error("Unknown image provider");
 }
 
-// Generate an image prompt via text AI
+// ─── IMAGE PROVIDER PREFERENCE ───────────────────────────────────────────────
+
+const IMAGE_PROVIDER_STORAGE = "bb_image_provider";
+function loadImageProviderPref() { return localStorage.getItem(IMAGE_PROVIDER_STORAGE) || null; }
+function saveImageProviderPref(id) {
+  if (id) localStorage.setItem(IMAGE_PROVIDER_STORAGE, id);
+  else localStorage.removeItem(IMAGE_PROVIDER_STORAGE);
+}
+
+// Returns the provider to actually use: explicit pref if valid, else auto-priority
+function resolveImageProvider(apiKeys) {
+  const pref = loadImageProviderPref();
+  const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
+  if (pref && apiKeys[keyMap[pref]]) return pref;
+  return getImageProvider(apiKeys);
+}
+
+function ImageProviderPicker({ apiKeys, value, onChange, compact = false }) {
+  const providers = getAvailableImageProviders(apiKeys);
+  const anyAvailable = providers.some(p => p.available);
+
+  if (!anyAvailable) {
+    return (
+      <div style={{ fontSize:11, color:"var(--amber)", padding:"6px 10px", borderRadius:6, background:"var(--amber-glow)", border:"1px solid var(--amber)33" }}>
+        ⚠ Add Stability AI, OpenAI, or Gemini key in Settings → API Keys
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+      {!compact && <span style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>Image AI:</span>}
+      {providers.map(p => (
+        <button key={p.id} onClick={() => p.available && onChange(p.id)} disabled={!p.available}
+          title={p.available ? p.label : `${p.label} — add key in Settings`}
+          style={{
+            padding: compact ? "4px 10px" : "5px 12px",
+            borderRadius:99,
+            border: value===p.id ? "1px solid #7c3aed" : "1px solid var(--border)",
+            background: value===p.id ? "#7c3aed18" : "transparent",
+            color: value===p.id ? "#a78bfa" : p.available ? "var(--text-secondary)" : "var(--muted)",
+            fontSize: compact ? 11 : 12,
+            fontWeight:600,
+            cursor: p.available ? "pointer" : "not-allowed",
+            fontFamily:"var(--font-body)",
+            display:"flex", alignItems:"center", gap:5,
+            opacity: p.available ? 1 : 0.4,
+          }}>
+          <span>{p.logo}</span>{p.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 async function generateImagePrompt(topic, platId, activeProvider, activeModel, apiKey) {
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
   const text = await callAI(
@@ -489,15 +558,18 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
   const [error,      setError]      = useState("");
   const [showPrompt, setShowPrompt] = useState(false);
 
-  const provider    = getImageProvider(apiKeys);
+  const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
+  const provider    = imgProvider;
   const providerLabel = getImageProviderLabel(provider);
   const spec        = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
   const isLoading   = genLoading || promptLoad;
 
+  const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
+
   const runGenerate = async (prompt) => {
     setGenLoading(true); setError(""); setImageUrl(null);
     try {
-      const url = await generateImage(prompt, platId, apiKeys);
+      const url = await generateImage(prompt, platId, apiKeys, imgProvider);
       setImageUrl(url);
     } catch(e) { setError(e.message); }
     setGenLoading(false);
@@ -527,20 +599,14 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
 
   return (
     <div style={{ marginTop:20, paddingTop:20, borderTop:"1px solid var(--border)" }}>
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12, flexWrap:"wrap", gap:8 }}>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ fontSize:13, fontWeight:700 }}>▣ Image</span>
           <span style={{ fontSize:10, color:"var(--muted)", padding:"1px 7px", borderRadius:99, border:"1px solid var(--border)" }}>{spec.label}</span>
-          {provider ? (
-            <span style={{ fontSize:10, color:"#5cba6c", padding:"1px 7px", borderRadius:99, background:"#5cba6c0a", border:"1px solid #5cba6c44" }}>
-              via {providerLabel}
-            </span>
-          ) : (
-            <span style={{ fontSize:10, color:"var(--amber)", padding:"1px 7px", borderRadius:99, background:"var(--amber-glow)", border:"1px solid var(--amber)44" }}>
-              Add Stability AI, OpenAI, or Gemini key
-            </span>
-          )}
         </div>
+        <ImageProviderPicker apiKeys={apiKeys} value={imgProvider} onChange={handleImgProviderChange} compact />
+      </div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", marginBottom:12 }}>
         <div style={{ display:"flex", gap:6 }}>
           {imgPrompt && !imageUrl && (
             <button onClick={()=>setShowPrompt(s=>!s)}
@@ -3642,8 +3708,11 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
   const [imageUrl, setImageUrl] = useState(null);
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState("");
-  const provider = getImageProvider(apiKeys);
+  const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
+  const provider = imgProvider;
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
 
   const STYLES = [
     { id:"cinematic",   label:"Cinematic"    },
@@ -3669,7 +3738,7 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
       const aiPrompt = `Generate an image prompt for a Cask & Stream (fly fishing and whiskey lifestyle brand) ${platform} post. Style: ${styleMap[style]}. Topic: ${topic}. Amber and teal color palette. Return ONLY the prompt, no explanation.`;
       const generatedPrompt = await callAI(activeProvider, activeModel, "You generate concise, vivid image prompts. Return only the prompt string.", aiPrompt, apiKeys[activeProvider]);
       setPrompt(generatedPrompt.trim());
-      const url = await generateImage(generatedPrompt.trim(), platform, apiKeys);
+      const url = await generateImage(generatedPrompt.trim(), platform, apiKeys, imgProvider);
       setImageUrl(url);
     } catch(e) { setError(e.message); }
     setLoading(false);
@@ -3706,6 +3775,12 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
           </div>
         </div>
 
+        {/* Image AI Provider */}
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Image AI</div>
+          <ImageProviderPicker apiKeys={apiKeys} value={imgProvider} onChange={handleImgProviderChange} />
+        </div>
+
         {/* Topic */}
         <div>
           <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Topic / Subject</div>
@@ -3718,7 +3793,7 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
             style={{ padding:"10px 20px", borderRadius:8, border:"none", background:topic.trim()&&!loading&&provider?"#7c3aed":"var(--bg-elevated)", color:topic.trim()&&!loading&&provider?"#fff":"var(--muted)", fontSize:13, fontWeight:700, cursor:topic.trim()&&!loading&&provider?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
             {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : "▣ Generate Image"}
           </button>
-          {!provider && <span style={{ fontSize:11, color:"var(--amber)" }}>Add Stability AI, OpenAI, or Gemini key in Settings → API Keys</span>}
+          {!provider && <span style={{ fontSize:11, color:"var(--amber)" }}>Select an image AI above</span>}
           {error && <span style={{ fontSize:12, color:"var(--red)" }}>{error}</span>}
         </div>
       </div>
@@ -3729,7 +3804,7 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
           <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Generated Prompt</div>
           <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} rows={2}
             style={{ ...iS, resize:"none", fontSize:12, lineHeight:1.5 }} />
-          <button onClick={async () => { setLoading(true); setError(""); setImageUrl(null); try { const url = await generateImage(prompt, platform, apiKeys); setImageUrl(url); } catch(e) { setError(e.message); } setLoading(false); }}
+          <button onClick={async () => { setLoading(true); setError(""); setImageUrl(null); try { const url = await generateImage(prompt, platform, apiKeys, imgProvider); setImageUrl(url); } catch(e) { setError(e.message); } setLoading(false); }}
             disabled={loading}
             style={{ marginTop:8, padding:"5px 14px", borderRadius:7, border:"none", background:"#7c3aed", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
             ↻ Regenerate with this prompt
@@ -3901,8 +3976,10 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
   const [error,      setError]      = useState("");
   const [copied,     setCopied]     = useState(false);
 
-  const provider = getImageProvider(apiKeys);
+  const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
+  const provider = imgProvider;
   const providerLabel = getImageProviderLabel(provider);
+  const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
 
   const generate = async (customPrompt) => {
     setLoading(true); setError(""); setImageUrl(null);
@@ -3918,7 +3995,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
         setPrompt(finalPrompt);
       }
       // Use facebook spec for 3:2 wide ratio (closest to 16:9 available)
-      const url = await generateImage(finalPrompt, "facebook", apiKeys);
+      const url = await generateImage(finalPrompt, "facebook", apiKeys, imgProvider);
       setImageUrl(url);
     } catch(e) { setError(e.message); }
     setLoading(false);
@@ -3935,15 +4012,16 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
   return (
     <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
       {/* Header */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10 }}>
         <div>
           <div style={{ fontWeight:700, fontSize:14 }}>🖼 Headline Image</div>
           <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>
             Wide banner image for your blog post header · {HEADLINE_IMAGE_SPEC.label}
-            {provider && <span style={{ marginLeft:8, color:"#5cba6c" }}>via {providerLabel}</span>}
-            {!provider && <span style={{ marginLeft:8, color:"var(--amber)" }}>Add image provider key in Settings</span>}
           </div>
         </div>
+        <ImageProviderPicker apiKeys={apiKeys} value={imgProvider} onChange={handleImgProviderChange} compact />
+      </div>
+      <div style={{ display:"flex", justifyContent:"flex-end" }}>
         <div style={{ display:"flex", gap:8 }}>
           {prompt && (
             <button onClick={()=>setShowPrompt(s=>!s)}
