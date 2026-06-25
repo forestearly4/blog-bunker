@@ -1,0 +1,50 @@
+[build]
+  command   = "npm run build"
+  publish   = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# Claude AI proxy
+[[redirects]]
+  from   = "/api/claude"
+  to     = "/.netlify/functions/claude-proxy"
+  status = 200
+
+# Wix proxy — Edge Function (no cold start, works on free tier)
+[[edge_functions]]
+  path     = "/api/wix"
+  function = "wix-proxy"
+
+# Wix OAuth token exchange
+[[redirects]]
+  from   = "/api/wix-token"
+  to     = "/.netlify/functions/wix-token"
+  status = 200
+
+[[redirects]]
+  from   = "/api/wix-callback"
+  to     = "/.netlify/functions/wix-oauth-callback"
+  status = 200
+
+[[redirects]]
+  from   = "/api/meta-callback"
+  to     = "/.netlify/functions/meta-oauth-callback"
+  status = 200
+
+[[redirects]]
+  from   = "/api/meta-post"
+  to     = "/.netlify/functions/meta-post"
+  status = 200
+
+[[redirects]]
+  from   = "/api/data"
+  to     = "/.netlify/functions/data"
+  status = 200
+
+# SPA fallback — MUST be last so it doesn't swallow API routes above
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
