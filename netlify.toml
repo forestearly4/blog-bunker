@@ -43,6 +43,16 @@
   to     = "/.netlify/functions/data"
   status = 200
 
+[[redirects]]
+  from   = "/api/upload-image"
+  to     = "/.netlify/functions/upload-image"
+  status = 200
+
+[[redirects]]
+  from   = "/api/get-image"
+  to     = "/.netlify/functions/get-image"
+  status = 200
+
 # SPA fallback — MUST be last so it doesn't swallow API routes above
 [[redirects]]
   from   = "/*"
