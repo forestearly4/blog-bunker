@@ -3,6 +3,10 @@
   publish   = "dist"
   functions = "netlify/functions"
 
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["@netlify/blobs"]
+
 [build.environment]
   NODE_VERSION = "20"
 
