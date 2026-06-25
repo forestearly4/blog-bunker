@@ -3289,22 +3289,34 @@ async function ensurePublicImageUrl(imageUrl) {
 
   // Fetch the blob and convert to base64 data URL
   const blobRes = await fetch(imageUrl);
+  if (!blobRes.ok) throw new Error(`Could not read generated image (${blobRes.status})`);
   const blob    = await blobRes.blob();
   const dataUrl = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload  = () => resolve(reader.result);
-    reader.onerror = reject;
+    reader.onerror = () => reject(new Error("Failed to encode image"));
     reader.readAsDataURL(blob);
   });
 
   // Upload to Netlify Blobs, get back a public URL
-  const res = await fetch("/api/upload-image", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ dataUrl }),
-  });
-  const data = await res.json();
-  if (!res.ok || data.error) throw new Error(data.error || "Image upload failed");
+  let res;
+  try {
+    res = await fetch("/api/upload-image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataUrl }),
+    });
+  } catch (e) {
+    throw new Error(`Could not reach /api/upload-image — network error: ${e.message}`);
+  }
+
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error(`Image upload failed (${res.status}): server returned non-JSON — ${text.slice(0,150)}`); }
+
+  if (!res.ok || data.error) throw new Error(`Image upload failed: ${data.error || res.status}`);
+  if (!data.url) throw new Error("Image upload succeeded but no URL was returned");
   return data.url;
 }
 
