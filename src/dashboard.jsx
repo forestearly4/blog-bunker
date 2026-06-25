@@ -3281,11 +3281,43 @@ const META_STORAGE = "bb_meta_config";
 function loadMetaConfig() { try { return JSON.parse(localStorage.getItem(META_STORAGE) || "{}"); } catch { return {}; } }
 function saveMetaConfig(d) { try { localStorage.setItem(META_STORAGE, JSON.stringify(d)); } catch {} }
 
+// Converts a blob: URL (from generated images) into a publicly fetchable URL.
+// Required for Instagram, which needs a real https:// URL it can fetch server-side.
+async function ensurePublicImageUrl(imageUrl) {
+  if (!imageUrl) return null;
+  if (!imageUrl.startsWith("blob:")) return imageUrl; // already public (e.g. http url)
+
+  // Fetch the blob and convert to base64 data URL
+  const blobRes = await fetch(imageUrl);
+  const blob    = await blobRes.blob();
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+
+  // Upload to Netlify Blobs, get back a public URL
+  const res = await fetch("/api/upload-image", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dataUrl }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || "Image upload failed");
+  return data.url;
+}
+
 async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, link, platforms }) {
+  let finalImageUrl = imageUrl;
+  // Instagram requires a publicly fetchable URL — convert blob: URLs
+  if (platforms.includes("instagram") && imageUrl?.startsWith("blob:")) {
+    finalImageUrl = await ensurePublicImageUrl(imageUrl);
+  }
   const res = await fetch("/api/meta-post", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pageId, pageToken, instagramId, message, imageUrl, link, platforms }),
+    body: JSON.stringify({ pageId, pageToken, instagramId, message, imageUrl: finalImageUrl, link, platforms }),
   });
   return await res.json();
 }
