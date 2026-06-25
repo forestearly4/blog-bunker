@@ -5,12 +5,6 @@
 [build.environment]
   NODE_VERSION = "20"
 
-# SPA fallback
-[[redirects]]
-  from   = "/*"
-  to     = "/index.html"
-  status = 200
-
 # Claude AI proxy
 [[redirects]]
   from   = "/api/claude"
@@ -46,4 +40,10 @@
 [[redirects]]
   from   = "/api/data"
   to     = "/.netlify/functions/data"
+  status = 200
+
+# SPA fallback — MUST be last so it doesn't swallow API routes above
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
   status = 200
