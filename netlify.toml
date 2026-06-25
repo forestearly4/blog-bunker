@@ -1,15 +1,10 @@
 [build]
   command   = "npm run build"
   publish   = "dist"
+  functions = "netlify/functions"
 
 [build.environment]
   NODE_VERSION = "20"
-
-# SPA fallback
-[[redirects]]
-  from   = "/*"
-  to     = "/index.html"
-  status = 200
 
 # Claude AI proxy
 [[redirects]]
@@ -22,7 +17,34 @@
   path     = "/api/wix"
   function = "wix-proxy"
 
-  [[redirects]]
+# Wix OAuth token exchange
+[[redirects]]
   from   = "/api/wix-token"
   to     = "/.netlify/functions/wix-token"
+  status = 200
+
+[[redirects]]
+  from   = "/api/wix-callback"
+  to     = "/.netlify/functions/wix-oauth-callback"
+  status = 200
+
+[[redirects]]
+  from   = "/api/meta-callback"
+  to     = "/.netlify/functions/meta-oauth-callback"
+  status = 200
+
+[[redirects]]
+  from   = "/api/meta-post"
+  to     = "/.netlify/functions/meta-post"
+  status = 200
+
+[[redirects]]
+  from   = "/api/data"
+  to     = "/.netlify/functions/data"
+  status = 200
+
+# SPA fallback — MUST be last so it doesn't swallow API routes above
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
   status = 200
