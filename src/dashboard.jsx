@@ -432,8 +432,8 @@ async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
   if (provider === "gemini-image") {
     // Gemini image generation — retry up to 3 times on overload errors
     const GEMINI_IMAGE_MODELS = [
-      "gemini-2.0-flash-preview-image-generation",
-      "imagen-3.0-generate-002",
+      "gemini-3.1-flash-image-preview",
+      "gemini-2.5-flash-image",
     ];
     let lastErr = "";
     for (const model of GEMINI_IMAGE_MODELS) {
