@@ -10,6 +10,12 @@
   },
   "dependencies": {
     "@netlify/blobs": "^10.7.9",
+    "@tiptap/extension-link": "^3.27.1",
+    "@tiptap/extension-placeholder": "^3.27.1",
+    "@tiptap/extension-underline": "^3.27.1",
+    "@tiptap/pm": "^3.27.1",
+    "@tiptap/react": "^3.27.1",
+    "@tiptap/starter-kit": "^3.27.1",
     "@wix/blog": "^1.0.615",
     "@wix/data": "^1.0.472",
     "@wix/members": "^1.0.470",
