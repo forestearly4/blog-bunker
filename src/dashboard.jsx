@@ -1,4 +1,9 @@
 import { useState, useRef, useEffect } from "react";
+import { useEditor, EditorContent } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import Link from "@tiptap/extension-link";
+import Placeholder from "@tiptap/extension-placeholder";
+import Underline from "@tiptap/extension-underline";
 
 // ─── CLOUD SYNC (Netlify Blobs) ──────────────────────────────────────────────
 // Syncs key data to server-side storage so it survives localStorage clearing.
@@ -1154,7 +1159,7 @@ function AIQuickSwitcher({ activeProvider, activeModel, onProviderChange, onMode
 
       {/* Toggle button */}
       <button onClick={() => setOpen(o => !o)}
-        style={{ width:48, height:48, borderRadius:99, border:"none", background:open?"var(--amber)":"var(--bg-surface)", color:open?"#0e0f11":"var(--amber)", fontSize:20, cursor:"pointer", boxShadow:"0 4px 20px rgba(0,0,0,0.4)", border:`1px solid ${open?"transparent":"var(--amber)44"}`, display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.2s" }}
+        style={{ width:48, height:48, borderRadius:99, background:open?"var(--amber)":"var(--bg-surface)", color:open?"#0e0f11":"var(--amber)", fontSize:20, cursor:"pointer", boxShadow:"0 4px 20px rgba(0,0,0,0.4)", border:`1px solid ${open?"transparent":"var(--amber)44"}`, display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.2s" }}
         title="Switch AI provider">
         {open ? "✕" : "✦"}
       </button>
@@ -2578,9 +2583,9 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
             </div>
             <div>
               <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-                Body <span style={{ fontWeight:400, letterSpacing:0, textTransform:"none", fontSize:10 }}>· Markdown: # H1 · ## H2 · **bold** · - list</span>
+                Body
               </label>
-              <textarea rows={18} value={draft.body} onChange={e=>setDraft(d=>({...d,body:e.target.value}))} style={{ ...iS, resize:"vertical", lineHeight:1.8, fontFamily:"'DM Sans',monospace", fontSize:13 }} />
+              <RichTextEditor value={draft.body} onChange={(md)=>setDraft(d=>({...d,body:md}))} minHeight={380} />
             </div>
           </div>
           <div style={{ display:"flex", gap:10 }}>
@@ -4661,6 +4666,187 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
     </div>
   );
 }
+// ─── MARKDOWN ↔ HTML CONVERTERS ──────────────────────────────────────────────
+// Keeps the rest of the app (AI generation, Wix push, pipeline) working with
+// plain markdown while the editor itself works with HTML.
+
+function markdownToHtml(md) {
+  if (!md) return "<p></p>";
+  const lines = md.split("\n");
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    if (line.startsWith("### "))      { blocks.push(`<h3>${inlineMd(line.slice(4))}</h3>`); i++; continue; }
+    if (line.startsWith("## "))       { blocks.push(`<h2>${inlineMd(line.slice(3))}</h2>`); i++; continue; }
+    if (line.startsWith("# "))        { blocks.push(`<h1>${inlineMd(line.slice(2))}</h1>`); i++; continue; }
+    if (/^[-*]\s/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^[-*]\s/.test(lines[i])) { items.push(`<li>${inlineMd(lines[i].slice(2))}</li>`); i++; }
+      blocks.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    }
+    if (/^\d+\.\s/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\d+\.\s/.test(lines[i])) { items.push(`<li>${inlineMd(lines[i].replace(/^\d+\.\s/, ""))}</li>`); i++; }
+      blocks.push(`<ol>${items.join("")}</ol>`);
+      continue;
+    }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !/^#{1,3}\s/.test(lines[i]) && !/^[-*]\s/.test(lines[i]) && !/^\d+\.\s/.test(lines[i])) {
+      para.push(lines[i]); i++;
+    }
+    blocks.push(`<p>${inlineMd(para.join(" "))}</p>`);
+  }
+  return blocks.join("\n") || "<p></p>";
+}
+
+function inlineMd(text) {
+  return text
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2">$1</a>');
+}
+
+function htmlToMarkdown(html) {
+  if (!html) return "";
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  const lines = [];
+
+  const walk = (node) => {
+    for (const child of node.childNodes) {
+      if (child.nodeType === 3) { lines.push(child.textContent); continue; }
+      const tag = child.tagName?.toLowerCase();
+      const inner = () => inlineHtmlToMd(child);
+      if (tag === "h1") lines.push(`\n# ${inner()}\n`);
+      else if (tag === "h2") lines.push(`\n## ${inner()}\n`);
+      else if (tag === "h3") lines.push(`\n### ${inner()}\n`);
+      else if (tag === "p") lines.push(`\n${inner()}\n`);
+      else if (tag === "ul") { for (const li of child.children) lines.push(`- ${inlineHtmlToMd(li)}\n`); lines.push(""); }
+      else if (tag === "ol") { let n=1; for (const li of child.children) { lines.push(`${n++}. ${inlineHtmlToMd(li)}\n`); } lines.push(""); }
+      else if (tag === "br") lines.push("\n");
+      else walk(child);
+    }
+  };
+  walk(div);
+  return lines.join("").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function inlineHtmlToMd(node) {
+  let out = "";
+  for (const child of node.childNodes) {
+    if (child.nodeType === 3) { out += child.textContent; continue; }
+    const tag = child.tagName?.toLowerCase();
+    if (tag === "strong" || tag === "b") out += `**${inlineHtmlToMd(child)}**`;
+    else if (tag === "em" || tag === "i") out += `*${inlineHtmlToMd(child)}*`;
+    else if (tag === "a") out += `[${inlineHtmlToMd(child)}](${child.getAttribute("href")})`;
+    else out += inlineHtmlToMd(child);
+  }
+  return out;
+}
+
+// ─── RICH TEXT EDITOR (TipTap) ────────────────────────────────────────────────
+
+function RichTextToolbar({ editor }) {
+  if (!editor) return null;
+  const btn = (active) => ({
+    width:32, height:32, borderRadius:6, border:"none",
+    background: active ? "var(--amber)" : "transparent",
+    color: active ? "#0e0f11" : "var(--text-secondary)",
+    cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center",
+    fontSize:13, fontWeight:700, fontFamily:"var(--font-body)",
+  });
+  const sep = { width:1, height:20, background:"var(--border)", margin:"0 4px" };
+
+  const setLink = () => {
+    const url = window.prompt("Link URL:", editor.getAttributes("link").href || "https://");
+    if (url === null) return;
+    if (url === "") { editor.chain().focus().extendMarkRange("link").unsetLink().run(); return; }
+    editor.chain().focus().extendMarkRange("link").setLink({ href: url }).run();
+  };
+
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:2, padding:"6px 8px", borderBottom:"1px solid var(--border)", background:"var(--bg-elevated)", borderRadius:"8px 8px 0 0", flexWrap:"wrap" }}>
+      <button type="button" onClick={() => editor.chain().focus().toggleBold().run()} style={btn(editor.isActive("bold"))} title="Bold">B</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleItalic().run()} style={{...btn(editor.isActive("italic")), fontStyle:"italic"}} title="Italic">I</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleUnderline().run()} style={{...btn(editor.isActive("underline")), textDecoration:"underline"}} title="Underline">U</button>
+      <div style={sep} />
+      <button type="button" onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} style={btn(editor.isActive("heading", {level:1}))} title="Heading 1">H1</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()} style={btn(editor.isActive("heading", {level:2}))} title="Heading 2">H2</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()} style={btn(editor.isActive("heading", {level:3}))} title="Heading 3">H3</button>
+      <div style={sep} />
+      <button type="button" onClick={() => editor.chain().focus().toggleBulletList().run()} style={btn(editor.isActive("bulletList"))} title="Bullet List">• ≡</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleOrderedList().run()} style={btn(editor.isActive("orderedList"))} title="Numbered List">1. ≡</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleBlockquote().run()} style={btn(editor.isActive("blockquote"))} title="Quote">"</button>
+      <div style={sep} />
+      <button type="button" onClick={setLink} style={btn(editor.isActive("link"))} title="Link">🔗</button>
+      <button type="button" onClick={() => editor.chain().focus().undo().run()} style={btn(false)} title="Undo">↺</button>
+      <button type="button" onClick={() => editor.chain().focus().redo().run()} style={btn(false)} title="Redo">↻</button>
+    </div>
+  );
+}
+
+function RichTextEditor({ value, onChange, placeholder = "Write your post here…", minHeight = 380 }) {
+  const isInternalUpdate = useRef(false);
+
+  const editor = useEditor({
+    extensions: [
+      StarterKit.configure({ heading: { levels: [1,2,3] } }),
+      Underline,
+      Link.configure({ openOnClick: false, autolink: true }),
+      Placeholder.configure({ placeholder }),
+    ],
+    content: markdownToHtml(value || ""),
+    onUpdate: ({ editor }) => {
+      isInternalUpdate.current = true;
+      const md = htmlToMarkdown(editor.getHTML());
+      onChange(md);
+    },
+  });
+
+  // Sync external changes (e.g. AI regenerating the draft) into the editor
+  useEffect(() => {
+    if (!editor) return;
+    if (isInternalUpdate.current) { isInternalUpdate.current = false; return; }
+    const currentMd = htmlToMarkdown(editor.getHTML());
+    if (currentMd.trim() !== (value || "").trim()) {
+      editor.commands.setContent(markdownToHtml(value || ""));
+    }
+  }, [value, editor]);
+
+  return (
+    <div style={{ border:"1px solid var(--border)", borderRadius:8, overflow:"hidden", background:"var(--bg-elevated)" }}>
+      <RichTextToolbar editor={editor} />
+      <div
+        onClick={() => editor?.chain().focus().run()}
+        style={{ padding:"14px 16px", minHeight, cursor:"text", fontSize:14, lineHeight:1.8, color:"var(--text)" }}>
+        <EditorContent editor={editor} />
+      </div>
+      <style>{`
+        .ProseMirror { outline: none; }
+        .ProseMirror p.is-editor-empty:first-child::before {
+          content: attr(data-placeholder);
+          color: var(--muted);
+          float: left;
+          pointer-events: none;
+          height: 0;
+        }
+        .ProseMirror h1 { font-family: var(--font-display); font-size: 1.7em; font-weight: 700; margin: 0.6em 0 0.3em; }
+        .ProseMirror h2 { font-family: var(--font-display); font-size: 1.4em; font-weight: 700; margin: 0.6em 0 0.3em; }
+        .ProseMirror h3 { font-family: var(--font-display); font-size: 1.15em; font-weight: 700; margin: 0.5em 0 0.3em; }
+        .ProseMirror p { margin: 0.5em 0; }
+        .ProseMirror ul, .ProseMirror ol { margin: 0.5em 0; padding-left: 1.4em; }
+        .ProseMirror blockquote { border-left: 3px solid var(--amber); padding-left: 14px; margin: 0.6em 0; color: var(--text-secondary); font-style: italic; }
+        .ProseMirror a { color: var(--amber); text-decoration: underline; }
+        .ProseMirror strong { font-weight: 700; }
+      `}</style>
+    </div>
+  );
+}
+
 // Converts plain text / basic markdown → Wix rich content document format
 
 function textToWixContent(text) {
@@ -4831,11 +5017,8 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
             Body
-            <span style={{ fontWeight:400, marginLeft:8, color:"var(--muted)", textTransform:"none", letterSpacing:0, fontSize:10 }}>
-              Markdown supported: # H1, ## H2, **bold**, - list
-            </span>
           </label>
-          <textarea rows={14} value={form.body} onChange={e=>setForm(f=>({...f,body:e.target.value}))} placeholder="Write your post here…" style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
+          <RichTextEditor value={form.body} onChange={(md)=>setForm(f=>({...f,body:md}))} placeholder="Write your post here…" minHeight={300} />
         </div>
 
         {/* Headline Image */}
