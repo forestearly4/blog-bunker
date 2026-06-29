@@ -4068,7 +4068,19 @@ function SocialPipelineProgress({ stage, setStage, completed }) {
 }
 
 function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration }) {
-  const saved = loadSocialPipelineDraft();
+  let saved = loadSocialPipelineDraft();
+
+  // Migrate old single-platform draft schema (idea.platform: string) to new multi-platform (idea.platforms: array)
+  if (saved?.idea && !Array.isArray(saved.idea.platforms)) {
+    const legacyPlatform = saved.idea.platform || "instagram";
+    saved = {
+      ...saved,
+      idea: { ...saved.idea, platforms: [legacyPlatform] },
+      captions: saved.caption?.text ? { [legacyPlatform]: { text: saved.caption.text } } : (saved.captions || {}),
+    };
+  }
+  if (saved && !saved.captions) saved.captions = {};
+
   const [stage,     setStage]     = useState(saved?.stage || "idea");
   const [completed, setCompleted] = useState(saved?.completed || []);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
