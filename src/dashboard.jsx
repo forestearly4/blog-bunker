@@ -4073,11 +4073,21 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   const [completed, setCompleted] = useState(saved?.completed || []);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
 
-  const [idea, setIdea] = useState(saved?.idea || { topic:"", platform:"instagram", type:"photo", inspirationSource:null });
-  const [caption, setCaption] = useState(saved?.caption || { text:"", platform:"instagram" });
+  const PLATFORMS = [
+    { id:"instagram", label:"Instagram", color:"#e1306c", icon:"📸" },
+    { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
+    { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
+    { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
+  ];
+
+  // idea.platforms is now an ARRAY — supports multi-select
+  const [idea, setIdea] = useState(saved?.idea || { topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
+  // captions is keyed by platform id: { instagram: {text}, facebook: {text}, ... }
+  const [captions, setCaptions] = useState(saved?.captions || {});
   const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"" });
   const [imageData, setImageData] = useState(saved?.imageData || { prompt:"", url:null, imgProvider: resolveImageProvider(apiKeys) });
   const [schedule, setSchedule] = useState(saved?.schedule || { date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
+  const [publishResults, setPublishResults] = useState({});
 
   const [loading, setLoading] = useState(false);
   const [loadMsg, setLoadMsg] = useState("");
@@ -4091,21 +4101,24 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
   // Auto-save draft
   useEffect(() => {
-    if (!idea.topic && !caption.text) return;
-    const data = { stage, completed, idea, caption, hashtags, imageData: { ...imageData, url:null }, schedule, savedAt:new Date().toISOString() };
+    if (!idea.topic && Object.keys(captions).length === 0) return;
+    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url:null }, schedule, savedAt:new Date().toISOString() };
     saveSocialPipelineDraft(data);
     setSavedAt(data.savedAt);
-  }, [stage, completed, idea, caption, hashtags, imageData.prompt, imageData.imgProvider, schedule]);
+  }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, schedule]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
   const advance  = (next) => { setStage(next); setError(""); setSuccess(""); };
 
-  const PLATFORMS = [
-    { id:"instagram", label:"Instagram", color:"#e1306c", icon:"📸" },
-    { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
-    { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
-    { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
-  ];
+  const togglePlatform = (platId) => {
+    setIdea(i => {
+      const has = i.platforms.includes(platId);
+      const next = has ? i.platforms.filter(p => p !== platId) : [...i.platforms, platId];
+      return { ...i, platforms: next.length ? next : i.platforms }; // never allow empty
+    });
+  };
+
+  const selectedPlatforms = PLATFORMS.filter(p => idea.platforms.includes(p.id));
 
   // ── STAGE 1: IDEA ───────────────────────────────────────────────────────────
 
@@ -4118,7 +4131,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     try {
       const text = await callAI(activeProvider, activeModel,
         `You are a social strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Suggest ONE compelling, specific social post idea. Return ONLY the topic/concept as a single sentence, nothing else.`,
-        `Platform: ${idea.platform}. Suggest a fresh post idea.`,
+        `Platforms: ${idea.platforms.join(", ")}. Suggest a fresh post idea that works across all of them.`,
         apiKeys[activeProvider]
       );
       setIdea(i => ({ ...i, topic: text.trim() }));
@@ -4126,37 +4139,53 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setLoading(false); setLoadMsg("");
   };
 
-  // ── STAGE 2: CAPTION ────────────────────────────────────────────────────────
+  // ── STAGE 2: CAPTIONS (one per selected platform) ───────────────────────────
 
-  const generateCaption = async () => {
+  const toneMap = {
+    instagram: "warm, visual storytelling, evocative — Instagram caption style",
+    facebook:  "conversational, community-focused, slightly longer form",
+    tiktok:    "punchy, trend-aware, hook-first, short sentences",
+    twitter:   "concise, witty, under 280 characters",
+  };
+
+  const generateCaptionFor = async (platId) => {
     if (!idea.topic.trim()) return;
-    setLoading(true); setLoadMsg("Writing caption…"); setError("");
+    setLoading(true); setLoadMsg(`Writing ${PLATFORMS.find(p=>p.id===platId)?.label} caption…`); setError("");
     try {
-      const plat = PLATFORMS.find(p => p.id === idea.platform);
-      const toneMap = {
-        instagram: "warm, visual storytelling, evocative — Instagram caption style",
-        facebook:  "conversational, community-focused, slightly longer form",
-        tiktok:    "punchy, trend-aware, hook-first, short sentences",
-        twitter:   "concise, witty, under 280 characters",
-      };
       const text = await callAI(activeProvider, activeModel,
-        `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${toneMap[idea.platform]}.`,
-        `Write a ${idea.platform} caption (post type: ${idea.type}) about: ${idea.topic}`,
+        `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${toneMap[platId]}.`,
+        `Write a ${platId} caption (post type: ${idea.type}) about: ${idea.topic}`,
         apiKeys[activeProvider]
       );
-      setCaption({ text: text.trim(), platform: idea.platform });
+      setCaptions(c => ({ ...c, [platId]: { text: text.trim() } }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
 
-  // ── STAGE 3: HASHTAGS ───────────────────────────────────────────────────────
+  const generateAllCaptions = async () => {
+    setLoading(true); setError("");
+    for (const plat of selectedPlatforms) {
+      setLoadMsg(`Writing ${plat.label} caption…`);
+      try {
+        const text = await callAI(activeProvider, activeModel,
+          `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${toneMap[plat.id]}.`,
+          `Write a ${plat.id} caption (post type: ${idea.type}) about: ${idea.topic}`,
+          apiKeys[activeProvider]
+        );
+        setCaptions(c => ({ ...c, [plat.id]: { text: text.trim() } }));
+      } catch(e) { setError(`${plat.label}: ${e.message}`); }
+    }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 3: HASHTAGS (shared across platforms) ─────────────────────────────
 
   const generateHashtagsForPost = async () => {
     setLoading(true); setLoadMsg("Optimizing hashtags…"); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
         `You are a hashtag strategist for Cask & Stream. Return ONLY valid JSON (no fences): {"primary":["#tag1","#tag2"],"niche":["#tag1"],"branded":["#CaskAndStream"],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags.`,
-        `Topic: ${idea.topic}\nPlatform: ${idea.platform}`,
+        `Topic: ${idea.topic}\nPlatforms: ${idea.platforms.join(", ")}`,
         apiKeys[activeProvider]
       );
       const parsed = parseAIJson(text);
@@ -4165,15 +4194,15 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setLoading(false); setLoadMsg("");
   };
 
-  // ── STAGE 4: IMAGE ──────────────────────────────────────────────────────────
+  // ── STAGE 4: IMAGE (shared across platforms) ────────────────────────────────
 
   const generateSocialPipelineImage = async () => {
     setLoading(true); setLoadMsg("Writing image prompt…"); setError("");
     try {
-      const aiPrompt = await generateImagePrompt(idea.topic, idea.platform, activeProvider, activeModel, apiKeys[activeProvider]);
+      const aiPrompt = await generateImagePrompt(idea.topic, selectedPlatforms[0]?.id || "instagram", activeProvider, activeModel, apiKeys[activeProvider]);
       setImageData(d => ({ ...d, prompt: aiPrompt }));
       setLoadMsg(`Generating with ${getImageProviderLabel(imageData.imgProvider)}…`);
-      const url = await generateImage(aiPrompt, idea.platform, apiKeys, imageData.imgProvider);
+      const url = await generateImage(aiPrompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
       setImageData(d => ({ ...d, prompt: aiPrompt, url }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
@@ -4182,52 +4211,75 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   const regenerateImageWithPrompt = async () => {
     setLoading(true); setLoadMsg("Generating image…"); setError("");
     try {
-      const url = await generateImage(imageData.prompt, idea.platform, apiKeys, imageData.imgProvider);
+      const url = await generateImage(imageData.prompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
       setImageData(d => ({ ...d, url }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
 
-  // ── STAGE 5: PUBLISH ────────────────────────────────────────────────────────
+  // ── STAGE 5: PUBLISH (one pass per selected platform) ───────────────────────
 
   const handlePublish = async () => {
-    setLoading(true); setError(""); setSuccess("");
-    const plat = PLATFORMS.find(p => p.id === idea.platform);
-    try {
-      if (idea.platform === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
-        setLoadMsg("Posting to Facebook…");
-        const page = metaConfig.pages[0];
-        const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: `${caption.text}\n\n${hashtags.selected}`, imageUrl: imageData.url, platforms: ["facebook"] });
-        if (!res.facebook?.success) throw new Error(res.facebook?.error || "Facebook post failed");
-        setSuccess("✓ Posted to Facebook!");
-      } else if (idea.platform === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
-        if (!imageData.url) throw new Error("Instagram requires an image — go back to the Image stage.");
-        setLoadMsg("Posting to Instagram…");
-        const page = metaConfig.pages.find(p => p.instagram_id);
-        const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: `${caption.text}\n\n${hashtags.selected}`, imageUrl: imageData.url, platforms: ["instagram"] });
-        if (!res.instagram?.success) throw new Error(res.instagram?.error || "Instagram post failed");
-        setSuccess("✓ Posted to Instagram!");
-      } else {
-        // No direct connection — copy to clipboard as fallback
-        navigator.clipboard.writeText(`${caption.text}\n\n${hashtags.selected}`);
-        setSuccess(`✓ Copied caption + hashtags to clipboard! ${plat?.label} isn't connected for direct posting — paste this into the ${plat?.label} app.${imageData.url ? " Don't forget to download and attach the image." : ""}`);
+    setLoading(true); setError(""); setSuccess(""); setPublishResults({});
+    const results = {};
+
+    for (const plat of selectedPlatforms) {
+      const captionText = captions[plat.id]?.text || "";
+      const fullMessage = `${captionText}\n\n${hashtags.selected}`;
+      setLoadMsg(`Publishing to ${plat.label}…`);
+
+      try {
+        if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
+          const page = metaConfig.pages[0];
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: imageData.url, platforms: ["facebook"] });
+          if (!res.facebook?.success) throw new Error(res.facebook?.error || "Facebook post failed");
+          results[plat.id] = { success: true, message: "✓ Posted to Facebook" };
+
+        } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
+          if (!imageData.url) throw new Error("Instagram requires an image");
+          const page = metaConfig.pages.find(p => p.instagram_id);
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: imageData.url, platforms: ["instagram"] });
+          if (!res.instagram?.success) throw new Error(res.instagram?.error || "Instagram post failed");
+          results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
+
+        } else {
+          // No direct connection — copy to clipboard as fallback (only most recent platform wins clipboard, but we note it)
+          results[plat.id] = { success: "manual", message: `Not connected — copy & paste manually${imageData.url ? " (download image too)" : ""}` };
+        }
+      } catch(e) {
+        results[plat.id] = { success: false, message: e.message };
       }
+      setPublishResults({ ...results });
+    }
+
+    // Copy the first manual-fallback platform's content to clipboard for convenience
+    const manualPlat = selectedPlatforms.find(p => results[p.id]?.success === "manual");
+    if (manualPlat) {
+      navigator.clipboard.writeText(`${captions[manualPlat.id]?.text || ""}\n\n${hashtags.selected}`);
+    }
+
+    const allOk = selectedPlatforms.every(p => results[p.id]?.success === true || results[p.id]?.success === "manual");
+    if (allOk) {
+      setSuccess(`Done! ${selectedPlatforms.length > 1 ? `Processed ${selectedPlatforms.length} platforms.` : ""}`);
       markDone("publish");
       clearSocialPipelineDraft();
-    } catch(e) { setError(e.message); }
+    } else {
+      setError("Some platforms failed — see results below. You can retry.");
+    }
+
     setLoading(false); setLoadMsg("");
   };
 
   const resetPipeline = () => {
     clearSocialPipelineDraft();
-    setStage("idea"); setCompleted([]); setError(""); setSuccess(""); setSavedAt(null);
-    setIdea({ topic:"", platform:"instagram", type:"photo", inspirationSource:null });
-    setCaption({ text:"", platform:"instagram" });
+    setStage("idea"); setCompleted([]); setError(""); setSuccess(""); setSavedAt(null); setPublishResults({});
+    setIdea({ topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
+    setCaptions({});
     setHashtags({ sets:null, selected:"" });
     setImageData({ prompt:"", url:null, imgProvider: resolveImageProvider(apiKeys) });
   };
 
-  const platColor = PLATFORMS.find(p => p.id === idea.platform)?.color || "var(--amber)";
+  const allCaptionsReady = selectedPlatforms.length > 0 && selectedPlatforms.every(p => captions[p.id]?.text?.trim());
 
   return (
     <div>
@@ -4236,7 +4288,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
         <div>
           <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Social Pipeline</h2>
           <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>
-            From idea to published — one seamless social workflow.
+            From idea to published — across as many platforms as you like, at once.
             {savedAt && <span style={{ color:"var(--green)", marginLeft:8, fontSize:11 }}>✓ Draft auto-saved {new Date(savedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</span>}
           </p>
         </div>
@@ -4263,15 +4315,28 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
             <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 16px" }}>What's the post about?</h3>
 
             <div style={{ marginBottom:16 }}>
-              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Platform</label>
-              <div style={{ display:"flex", gap:6 }}>
-                {PLATFORMS.map(p => (
-                  <button key={p.id} onClick={() => setIdea(i => ({...i, platform:p.id}))}
-                    style={{ padding:"7px 16px", borderRadius:99, border:idea.platform===p.id?`1px solid ${p.color}`:"1px solid var(--border)", background:idea.platform===p.id?p.color+"18":"transparent", color:idea.platform===p.id?p.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-                    <span>{p.icon}</span>{p.label}
-                  </button>
-                ))}
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>
+                Platforms <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0 }}>— select one or more</span>
+              </label>
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                {PLATFORMS.map(p => {
+                  const isSelected = idea.platforms.includes(p.id);
+                  return (
+                    <button key={p.id} onClick={() => togglePlatform(p.id)}
+                      style={{ padding:"7px 16px", borderRadius:99, border:isSelected?`1px solid ${p.color}`:"1px solid var(--border)", background:isSelected?p.color+"18":"transparent", color:isSelected?p.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                      <span style={{ width:14, height:14, borderRadius:4, border:`2px solid ${isSelected?p.color:"var(--border)"}`, background:isSelected?p.color:"transparent", display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:9, color:"#fff" }}>
+                        {isSelected ? "✓" : ""}
+                      </span>
+                      <span>{p.icon}</span>{p.label}
+                    </button>
+                  );
+                })}
               </div>
+              {idea.platforms.length > 1 && (
+                <div style={{ fontSize:11, color:"var(--amber)", marginTop:8 }}>
+                  ✦ {idea.platforms.length} platforms selected — you'll get a tailored caption for each, one shared image, and a one-click multi-publish at the end.
+                </div>
+              )}
             </div>
 
             <div style={{ marginBottom:16 }}>
@@ -4319,34 +4384,46 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
           <div style={{ display:"flex", gap:10 }}>
             <button onClick={() => { markDone("idea"); advance("caption"); }} disabled={!idea.topic.trim()}
               style={{ ...btnA, background:idea.topic.trim()?"var(--amber)":"var(--bg-elevated)", color:idea.topic.trim()?"#0e0f11":"var(--muted)", cursor:idea.topic.trim()?"pointer":"not-allowed" }}>
-              Continue to Caption →
+              Continue to Caption{idea.platforms.length>1?"s":""} →
             </button>
           </div>
         </div>
       )}
 
-      {/* ── STAGE 2: CAPTION ── */}
+      {/* ── STAGE 2: CAPTIONS ── */}
       {stage === "caption" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
-            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
-              <div>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:platColor }}>{PLATFORMS.find(p=>p.id===idea.platform)?.icon} {idea.platform}</div>
-                <div style={{ fontSize:12, color:"var(--text-secondary)", marginTop:2 }}>{idea.topic}</div>
-              </div>
-              <button onClick={generateCaption} disabled={loading}
+          {selectedPlatforms.length > 1 && (
+            <div style={{ display:"flex", justifyContent:"flex-end" }}>
+              <button onClick={generateAllCaptions} disabled={loading}
                 style={{ padding:"9px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Writing…</> : caption.text ? "↻ Regenerate" : `${provider.logo} Write Caption`}
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Write All ${selectedPlatforms.length} Captions`}
               </button>
             </div>
-            <textarea value={caption.text} onChange={e=>setCaption(c=>({...c,text:e.target.value}))} rows={8}
-              placeholder="Caption will appear here — or write your own…"
-              style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
-            <div style={{ fontSize:11, color:"var(--muted)", marginTop:6, textAlign:"right" }}>{caption.text.length} characters</div>
-          </div>
+          )}
+
+          {selectedPlatforms.map(plat => (
+            <div key={plat.id} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+                <div>
+                  <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:plat.color }}>{plat.icon} {plat.label}</div>
+                  <div style={{ fontSize:12, color:"var(--text-secondary)", marginTop:2 }}>{idea.topic}</div>
+                </div>
+                <button onClick={() => generateCaptionFor(plat.id)} disabled={loading}
+                  style={{ padding:"9px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                  {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>…</> : captions[plat.id]?.text ? "↻ Regenerate" : `${provider.logo} Write Caption`}
+                </button>
+              </div>
+              <textarea value={captions[plat.id]?.text || ""} onChange={e=>setCaptions(c=>({...c,[plat.id]:{text:e.target.value}}))} rows={5}
+                placeholder="Caption will appear here — or write your own…"
+                style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
+              <div style={{ fontSize:11, color:"var(--muted)", marginTop:6, textAlign:"right" }}>{(captions[plat.id]?.text || "").length} characters</div>
+            </div>
+          ))}
+
           <div style={{ display:"flex", gap:10 }}>
-            <button onClick={() => { markDone("caption"); advance("hashtags"); }} disabled={!caption.text.trim()}
-              style={{ ...btnA, background:caption.text.trim()?"var(--amber)":"var(--bg-elevated)", color:caption.text.trim()?"#0e0f11":"var(--muted)", cursor:caption.text.trim()?"pointer":"not-allowed" }}>
+            <button onClick={() => { markDone("caption"); advance("hashtags"); }} disabled={!allCaptionsReady}
+              style={{ ...btnA, background:allCaptionsReady?"var(--amber)":"var(--bg-elevated)", color:allCaptionsReady?"#0e0f11":"var(--muted)", cursor:allCaptionsReady?"pointer":"not-allowed" }}>
               Continue to Hashtags →
             </button>
             <button onClick={() => setStage("idea")} style={btnS}>← Back to Idea</button>
@@ -4362,7 +4439,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               <div style={{ fontSize:32, marginBottom:12 }}>#</div>
               <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8 }}>Optimize Your Hashtags</h3>
               <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24, maxWidth:400, margin:"0 auto 24px" }}>
-                Generate a mix of high-volume, niche, and branded hashtags tailored to your post.
+                One shared hashtag set, generated to work across {selectedPlatforms.map(p=>p.label).join(", ")}.
               </p>
               <button onClick={generateHashtagsForPost} disabled={loading} style={btnA}>
                 {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : "# Generate Hashtags"}
@@ -4386,7 +4463,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   </div>
                 ))}
               </div>
-              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Final Set (editable — will be added to caption)</label>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Final Set (editable — will be added to every caption)</label>
               <textarea value={hashtags.selected} onChange={e=>setHashtags(h=>({...h,selected:e.target.value}))} rows={3}
                 style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
               <button onClick={generateHashtagsForPost} disabled={loading}
@@ -4397,7 +4474,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
           )}
           <div style={{ display:"flex", gap:10 }}>
             <button onClick={() => { markDone("hashtags"); advance("image"); }} style={btnA}>Continue to Image →</button>
-            <button onClick={() => setStage("caption")} style={btnS}>← Back to Caption</button>
+            <button onClick={() => setStage("caption")} style={btnS}>← Back to Captions</button>
           </div>
         </div>
       )}
@@ -4407,7 +4484,10 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16, flexWrap:"wrap", gap:10 }}>
-              <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Visual</h3>
+              <div>
+                <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Visual</h3>
+                <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"4px 0 0" }}>One shared image for: {selectedPlatforms.map(p=>p.label).join(", ")}</p>
+              </div>
               <ImageProviderPicker apiKeys={apiKeys} value={imageData.imgProvider} onChange={(id)=>{ setImageData(d=>({...d,imgProvider:id})); saveImageProviderPref(id); }} compact />
             </div>
 
@@ -4425,7 +4505,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)", marginBottom:14 }}>
                 <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
                 <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
-                  <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-${idea.platform}-${Date.now()}.webp`; a.click(); }}
+                  <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-post-${Date.now()}.webp`; a.click(); }}
                     style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                     ↓ Download
                   </button>
@@ -4465,41 +4545,64 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
             <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:40, textAlign:"center" }}>
               <div style={{ fontSize:48, marginBottom:16 }}>✓</div>
               <h3 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, marginBottom:8 }}>Done!</h3>
-              <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:24 }}>{success}</p>
+              <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:20 }}>{success}</p>
+              <div style={{ display:"flex", flexDirection:"column", gap:8, maxWidth:380, margin:"0 auto 24px" }}>
+                {selectedPlatforms.map(plat => publishResults[plat.id] && (
+                  <div key={plat.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", textAlign:"left" }}>
+                    <span>{plat.icon}</span>
+                    <span style={{ fontSize:12, fontWeight:600, flex:1 }}>{plat.label}</span>
+                    <span style={{ fontSize:11, color:publishResults[plat.id].success===true?"#5cba6c":publishResults[plat.id].success==="manual"?"var(--amber)":"var(--red)" }}>
+                      {publishResults[plat.id].message}
+                    </span>
+                  </div>
+                ))}
+              </div>
               <button onClick={resetPipeline} style={btnA}>Start New Post</button>
             </div>
           ) : (
             <>
               <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
-                <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 20px" }}>Review & Publish</h3>
-                <div style={{ display:"grid", gridTemplateColumns: imageData.url ? "1fr 1fr" : "1fr", gap:16, marginBottom:20 }}>
-                  <div>
-                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:platColor, marginBottom:8 }}>
-                      {PLATFORMS.find(p=>p.id===idea.platform)?.icon} {idea.platform}
-                    </div>
-                    <div style={{ padding:14, borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, lineHeight:1.6, whiteSpace:"pre-wrap" }}>
-                      {caption.text}
-                      {hashtags.selected && <div style={{ marginTop:8, color:"var(--amber)" }}>{hashtags.selected}</div>}
-                    </div>
-                  </div>
-                  {imageData.url && (
-                    <div>
-                      <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Image</div>
-                      <img src={imageData.url} alt="" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
-                    </div>
-                  )}
+                <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 20px" }}>Review & Publish — {selectedPlatforms.length} Platform{selectedPlatforms.length>1?"s":""}</h3>
+
+                <div style={{ display:"flex", flexDirection:"column", gap:14, marginBottom:20 }}>
+                  {selectedPlatforms.map(plat => {
+                    const isConnected = (plat.id==="facebook" && metaConfig?.connected && metaConfig?.pages?.length>0) ||
+                                        (plat.id==="instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id));
+                    const prevResult = publishResults[plat.id];
+                    return (
+                      <div key={plat.id} style={{ display:"grid", gridTemplateColumns: imageData.url ? "auto 1fr 120px" : "auto 1fr", gap:14, alignItems:"flex-start", padding:14, borderRadius:10, background:"var(--bg-elevated)", border:`1px solid ${isConnected?"#5cba6c33":"var(--border)"}` }}>
+                        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4, width:70 }}>
+                          <span style={{ fontSize:20 }}>{plat.icon}</span>
+                          <span style={{ fontSize:10, fontWeight:700, color:plat.color }}>{plat.label}</span>
+                          {isConnected
+                            ? <span style={{ fontSize:9, color:"#5cba6c" }}>● Live</span>
+                            : <span style={{ fontSize:9, color:"var(--muted)" }}>Manual</span>}
+                        </div>
+                        <div style={{ fontSize:12, lineHeight:1.6, whiteSpace:"pre-wrap", color:"var(--text-secondary)" }}>
+                          {captions[plat.id]?.text}
+                          {hashtags.selected && <div style={{ marginTop:6, color:"var(--amber)" }}>{hashtags.selected}</div>}
+                          {prevResult && (
+                            <div style={{ marginTop:8, fontSize:11, color:prevResult.success===true?"#5cba6c":prevResult.success==="manual"?"var(--amber)":"var(--red)" }}>
+                              {prevResult.message}
+                            </div>
+                          )}
+                        </div>
+                        {imageData.url && <img src={imageData.url} alt="" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />}
+                      </div>
+                    );
+                  })}
                 </div>
 
-                <div style={{ padding:14, borderRadius:8, background:idea.platform==="facebook"&&metaConfig?.connected ? "#1877f20a" : idea.platform==="instagram"&&metaConfig?.connected ? "#e1306c0a" : "var(--bg-elevated)", border:`1px solid ${(idea.platform==="facebook"||idea.platform==="instagram")&&metaConfig?.connected?"#5cba6c44":"var(--border)"}`, fontSize:12 }}>
-                  {(idea.platform==="facebook" && metaConfig?.connected && metaConfig?.pages?.length>0) && <span style={{color:"#5cba6c"}}>● Connected — will publish directly to your Facebook Page</span>}
-                  {(idea.platform==="instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) && <span style={{color:"#5cba6c"}}>● Connected — will publish directly to Instagram{!imageData.url && " (image required)"}</span>}
-                  {!((idea.platform==="facebook"||idea.platform==="instagram") && metaConfig?.connected) && <span style={{color:"var(--text-secondary)"}}>⚠ {PLATFORMS.find(p=>p.id===idea.platform)?.label} not connected — caption will be copied to clipboard to paste manually. Connect in Settings → Facebook & Instagram for direct publishing.</span>}
+                <div style={{ padding:14, borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)" }}>
+                  {selectedPlatforms.some(p => (p.id==="facebook"||p.id==="instagram") && metaConfig?.connected)
+                    ? "● Connected platforms publish directly. Others copy to clipboard for manual posting."
+                    : "⚠ No platforms connected for direct publishing — captions will copy to clipboard. Connect in Settings → Facebook & Instagram."}
                 </div>
               </div>
 
               <div style={{ display:"flex", gap:10 }}>
                 <button onClick={handlePublish} disabled={loading} style={{ ...btnA, background:loading?"var(--bg-elevated)":"#5cba6c", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
-                  {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : "↑ Publish Now"}
+                  {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `↑ Publish to ${selectedPlatforms.length} Platform${selectedPlatforms.length>1?"s":""}`}
                 </button>
                 <button onClick={() => setStage("image")} style={btnS}>← Back to Image</button>
               </div>
