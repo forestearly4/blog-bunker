@@ -5,6 +5,57 @@ import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import Underline from "@tiptap/extension-underline";
 
+// ─── BRAND GUIDE ──────────────────────────────────────────────────────────────
+// Stores voice/tone/image style settings that get injected into every AI call.
+
+const BRAND_GUIDE_STORAGE = "bb_brand_guide";
+
+const DEFAULT_BRAND_GUIDE = {
+  brandName:      "",
+  tagline:        "",
+  audience:       "",
+  voiceTone:      "",
+  writingStyle:   "",
+  avoidWords:     "",
+  imageStyle:     "",
+  colorPalette:   "",
+  topics:         "",
+  competitors:    "",
+};
+
+function loadBrandGuide() {
+  try { return { ...DEFAULT_BRAND_GUIDE, ...JSON.parse(localStorage.getItem(BRAND_GUIDE_STORAGE) || "{}") }; }
+  catch { return { ...DEFAULT_BRAND_GUIDE }; }
+}
+
+function saveBrandGuide(data) {
+  try { localStorage.setItem(BRAND_GUIDE_STORAGE, JSON.stringify(data)); } catch {}
+}
+
+// Builds a system prompt prefix from the brand guide — injected into every AI call
+function buildBrandContext(guide) {
+  if (!guide) return "";
+  const parts = [];
+  if (guide.brandName)    parts.push(`Brand: ${guide.brandName}${guide.tagline ? ` — "${guide.tagline}"` : ""}`);
+  if (guide.audience)     parts.push(`Target audience: ${guide.audience}`);
+  if (guide.voiceTone)    parts.push(`Voice & tone: ${guide.voiceTone}`);
+  if (guide.writingStyle) parts.push(`Writing style: ${guide.writingStyle}`);
+  if (guide.avoidWords)   parts.push(`Never use these words/phrases: ${guide.avoidWords}`);
+  if (guide.topics)       parts.push(`Core topics: ${guide.topics}`);
+  if (!parts.length) return "";
+  return `BRAND GUIDE:\n${parts.join("\n")}\n\nAlways follow this brand guide in your response.\n\n`;
+}
+
+// Builds an image prompt prefix from the brand guide
+function buildBrandImageContext(guide) {
+  if (!guide) return "";
+  const parts = [];
+  if (guide.imageStyle)   parts.push(guide.imageStyle);
+  if (guide.colorPalette) parts.push(`color palette: ${guide.colorPalette}`);
+  if (guide.brandName)    parts.push(`for ${guide.brandName} brand`);
+  return parts.join(", ");
+}
+
 // ─── CLOUD SYNC (Netlify Blobs) ──────────────────────────────────────────────
 // Syncs key data to server-side storage so it survives localStorage clearing.
 // Falls back silently to localStorage-only if the network call fails.
@@ -542,11 +593,13 @@ function ImageProviderPicker({ apiKeys, value, onChange, compact = false }) {
     </div>
   );
 }
-async function generateImagePrompt(topic, platId, activeProvider, activeModel, apiKey) {
+async function generateImagePrompt(topic, platId, activeProvider, activeModel, apiKey, brandGuideOverride = null) {
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
+  const brandImgCtx = buildBrandImageContext(brandGuideOverride || loadBrandGuide());
+  const styleNote = brandImgCtx ? `Brand visual style: ${brandImgCtx}.` : "Style: moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones.";
   const text = await callAI(
     activeProvider, activeModel,
-    `You generate image prompts for Cask & Stream — a fly fishing and whiskey lifestyle brand. Style: ${spec.style}, moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones. Format: a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
+    `You generate image prompts for Cask & Stream — a fly fishing and whiskey lifestyle brand. ${styleNote} Format: ${spec.style}. Return ONLY a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
     `Write an image prompt for a ${platId} post (${spec.label}) about: ${topic}`,
     apiKey
   );
@@ -2241,7 +2294,8 @@ function clearPipelineDraft() {
   try { localStorage.removeItem(PIPELINE_STORAGE); } catch {}
 }
 
-function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange }) {
+function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null }) {
+  const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
   const saved = loadPipelineDraft();
   const [stage,     setStage]    = useState(saved?.stage     || "brief");
   const [completed, setCompleted]= useState(saved?.completed || []);
@@ -2295,7 +2349,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     try {
       const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
       const text = await callAI(activeProvider, activeModel,
-        `You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`,
+        `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`,
         `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`,
         apiKeys[activeProvider]
       );
@@ -2324,7 +2378,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     setLoading(true); setLoadMsg("Regenerating draft…"); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
-        `You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write in markdown. # title, ## sections. 800+ words. Literary, evocative voice.`,
+        `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write in markdown. # title, ## sections. 800+ words. Literary, evocative voice.`,
         `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\n\nWrite a fresh version of the full post.`,
         apiKeys[activeProvider]
       );
@@ -2344,7 +2398,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     try {
       // SEO analysis
       const seoText = await callAI(activeProvider, activeModel,
-        `You are an SEO expert for Cask & Stream. Return ONLY valid JSON (no fences): {"metaTitle":"...","metaDescription":"...","primaryKeyword":"...","secondaryKeywords":["..."],"suggestions":["..."],"score":85}. metaTitle ≤60 chars, metaDescription ≤160 chars, score 0-100.`,
+        `${brandCtx}You are an SEO expert for Cask & Stream. Return ONLY valid JSON (no fences): {"metaTitle":"...","metaDescription":"...","primaryKeyword":"...","secondaryKeywords":["..."],"suggestions":["..."],"score":85}. metaTitle ≤60 chars, metaDescription ≤160 chars, score 0-100.`,
         `Analyze and optimize:\nTitle: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0,1000)}`,
         apiKeys[activeProvider]
       );
@@ -2352,7 +2406,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
 
       setLoadMsg("Generating headline options…");
       const hlText = await callAI(activeProvider, activeModel,
-        `Generate 5 headline variations for this Cask & Stream blog post. Return ONLY a JSON array of 5 strings. No fences.`,
+        `${brandCtx}Generate 5 headline variations for this Cask & Stream blog post. Return ONLY a JSON array of 5 strings. No fences.`,
         `Original title: ${draft.title}\nTopic: ${brief.topic}`,
         apiKeys[activeProvider]
       );
@@ -2373,7 +2427,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     try {
       for (const plat of targets) {
         setLoadMsg(`Writing ${plat.name} post…`);
-        const system = `You are a social media manager for Cask & Stream. Tagline: "${wsTagline}". Voice: ${plat.tone}. Format: ${plat.format}. ${plat.urlNote}. Write ONLY the post content.`;
+        const system = `${brandCtx}You are a social media manager for Cask & Stream. Tagline: "${wsTagline}". Voice: ${plat.tone}. Format: ${plat.format}. ${plat.urlNote}. Write ONLY the post content.`;
         results[plat.id] = await callAI(activeProvider, activeModel, system,
           `Write a ${plat.name} post based on this blog post:\nTitle: ${draft.title}\n\n${draft.body.slice(0,800)}`,
           apiKeys[activeProvider]
@@ -4626,6 +4680,126 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   );
 }
 
+// ─── BRAND GUIDE PANEL ───────────────────────────────────────────────────────
+
+function BrandGuidePanel({ onSave }) {
+  const [guide, setGuide] = useState(loadBrandGuide);
+  const [saved, setSaved] = useState(false);
+
+  const set = (key, val) => setGuide(g => ({ ...g, [key]: val }));
+
+  const handleSave = () => {
+    saveBrandGuide(guide);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+    if (onSave) onSave(guide);
+  };
+
+  const iS = {
+    width:"100%", padding:"10px 14px", borderRadius:8,
+    border:"1px solid var(--border)", background:"var(--bg-elevated)",
+    color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)",
+    outline:"none", boxSizing:"border-box",
+  };
+  const taS = { ...iS, resize:"vertical", lineHeight:1.6 };
+
+  const SECTIONS = [
+    {
+      title:"Brand Identity",
+      icon:"◈",
+      fields:[
+        { key:"brandName",  label:"Brand Name",    ph:"e.g. Cask & Stream",                   rows:0 },
+        { key:"tagline",    label:"Tagline",        ph:'e.g. "Cast at Dawn. Sip at Dusk."',    rows:0 },
+        { key:"audience",   label:"Target Audience",ph:"e.g. Fly fishers aged 30-55, whiskey enthusiasts, outdoor lifestyle...", rows:2 },
+        { key:"topics",     label:"Core Topics",    ph:"e.g. fly fishing, whiskey/bourbon, outdoor lifestyle, river conservation...", rows:2 },
+      ],
+    },
+    {
+      title:"Voice & Writing Style",
+      icon:"✎",
+      color:"#5cba6c",
+      fields:[
+        { key:"voiceTone",    label:"Voice & Tone",     ph:"e.g. Warm, knowledgeable, poetic. Like a seasoned guide talking to a friend over a pour of bourbon...", rows:3 },
+        { key:"writingStyle", label:"Writing Style",    ph:"e.g. Short punchy sentences. Active voice. Evocative nature descriptions. Avoid corporate jargon...", rows:3 },
+        { key:"avoidWords",   label:"Words/Phrases to Avoid", ph:"e.g. 'leverage', 'synergy', 'best-in-class', 'utilize'...", rows:2 },
+      ],
+    },
+    {
+      title:"Visual Style",
+      icon:"▣",
+      color:"#7c3aed",
+      fields:[
+        { key:"imageStyle",   label:"Image Style",    ph:"e.g. Cinematic photography, golden hour light, moody and atmospheric, authentic outdoor scenes, no stock-photo feel...", rows:3 },
+        { key:"colorPalette", label:"Color Palette",  ph:"e.g. Amber, teal, deep forest green, copper, warm shadows. Think bourbon and rivers at dusk...", rows:2 },
+      ],
+    },
+  ];
+
+  const hasContent = Object.values(guide).some(v => v?.trim());
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24 }}>
+      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between" }}>
+        <div>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 6px" }}>Brand Guide</h3>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+            Define your brand voice, writing style, and visual identity. Blog Bunker injects this into every AI content and image generation call automatically.
+          </p>
+        </div>
+        {hasContent && (
+          <div style={{ fontSize:11, color:"#5cba6c", padding:"4px 10px", borderRadius:99, background:"#5cba6c0a", border:"1px solid #5cba6c33", whiteSpace:"nowrap", marginLeft:16 }}>
+            ● Active
+          </div>
+        )}
+      </div>
+
+      {SECTIONS.map(section => (
+        <div key={section.title} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:section.color||"var(--amber)", marginBottom:16, display:"flex", alignItems:"center", gap:8 }}>
+            <span>{section.icon}</span>{section.title}
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            {section.fields.map(f => (
+              <div key={f.key}>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
+                {f.rows > 0
+                  ? <textarea rows={f.rows} style={taS} placeholder={f.ph} value={guide[f.key]} onChange={e=>set(f.key, e.target.value)}
+                      onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                  : <input style={iS} placeholder={f.ph} value={guide[f.key]} onChange={e=>set(f.key, e.target.value)}
+                      onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                }
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {/* Preview */}
+      {hasContent && (
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>AI Context Preview</div>
+          <pre style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.7, whiteSpace:"pre-wrap", margin:0, fontFamily:"monospace", background:"var(--bg-elevated)", padding:12, borderRadius:8, border:"1px solid var(--border)" }}>
+            {buildBrandContext(guide)}
+          </pre>
+          {guide.imageStyle && (
+            <div style={{ marginTop:10 }}>
+              <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7c3aed", marginBottom:6 }}>Image Prompt Prefix</div>
+              <pre style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.6, whiteSpace:"pre-wrap", margin:0, fontFamily:"monospace", background:"var(--bg-elevated)", padding:12, borderRadius:8, border:"1px solid var(--border)" }}>
+                {buildBrandImageContext(guide)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+
+      <button onClick={handleSave}
+        style={{ padding:"11px 28px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start", display:"flex", alignItems:"center", gap:8 }}>
+        {saved ? "✓ Saved!" : "Save Brand Guide"}
+      </button>
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -5434,8 +5608,9 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const saveCalEvent = (ev) => setCalEvents(all => [...all, ev]);
   const deleteCalEvent = (idx) => setCalEvents(all => all.filter((_, i) => i !== idx));
 
-  const [gscData, setGscData] = useState(loadGSCData);
-  const [metaConfig, setMetaConfig] = useState(loadMetaConfig);
+  const [gscData,     setGscData]     = useState(loadGSCData);
+  const [metaConfig,  setMetaConfig]  = useState(loadMetaConfig);
+  const [brandGuide,  setBrandGuide]  = useState(loadBrandGuide);
   const [wixConnected, setWixConnected] = useState(() => !!loadWixConfig().connected);
 
   // Re-check wix connection state whenever settings tab is visited
@@ -5527,6 +5702,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
   const SETTINGS_SECTIONS = [
     { id:"general",  label:"General"             },
+    { id:"brand",    label:"Brand Guide"         },
     { id:"apikeys",  label:"API Keys"            },
     { id:"gsc",      label:"Search Console"      },
     { id:"meta",     label:"Facebook & Instagram"},
@@ -5669,6 +5845,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
               wsTagline={wsTagline}
               onProviderChange={handleProviderChange}
               onModelChange={handleModelChange}
+              brandGuide={brandGuide}
             />
           )}
 
@@ -5939,6 +6116,10 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
                 {settingsSection==="apikeys"&&(
                   <APIKeysSettings apiKeys={apiKeys} onSave={setApiKeys}/>
+                )}
+
+                {settingsSection==="brand"&&(
+                  <BrandGuidePanel onSave={(g) => setBrandGuide(g)} />
                 )}
 
                 {settingsSection==="gsc"&&(
