@@ -2341,18 +2341,26 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const btnA = { padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 };
   const btnS = { padding:"10px 20px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" };
 
+  const [promptPreview, setPromptPreview] = useState(null); // { system, user, onConfirm, title, confirmLabel, accentColor }
+
   // ── STAGE 1: BRIEF ──────────────────────────────────────────────────────────
 
-  const generateFromBrief = async () => {
+  const openBriefPromptPreview = () => {
     if (!brief.topic.trim()) return;
-    setLoading(true); setLoadMsg("Generating draft from your brief…"); setError("");
+    const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
+    const system = `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`;
+    const user = `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`;
+    setPromptPreview({ title:"Review Blog Post Prompt", system, user, confirmLabel:"Generate Draft", accentColor:"var(--amber)", mode:"brief" });
+  };
+
+  const generateFromBrief = async (overridePrompt = null) => {
+    if (!brief.topic.trim()) return;
+    setLoading(true); setLoadMsg("Generating draft from your brief…"); setError(""); setPromptPreview(null);
     try {
       const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
-      const text = await callAI(activeProvider, activeModel,
-        `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`,
-        `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`,
-        apiKeys[activeProvider]
-      );
+      const system = overridePrompt?.system ?? `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`;
+      const user = overridePrompt?.user ?? `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`;
+      const text = await callAI(activeProvider, activeModel, system, user, apiKeys[activeProvider]);
       // Extract title from first # line
       const lines  = text.split("\n");
       const titleLine = lines.find(l => l.startsWith("# "));
@@ -2595,7 +2603,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
           )}
 
           <div style={{ display:"flex", gap:10 }}>
-            <button onClick={generateFromBrief} disabled={!brief.topic.trim() || loading} style={{ ...btnA, background:brief.topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:brief.topic.trim()&&!loading?"#0e0f11":"var(--muted)", cursor:brief.topic.trim()&&!loading?"pointer":"not-allowed" }}>
+            <button onClick={openBriefPromptPreview} disabled={!brief.topic.trim() || loading} style={{ ...btnA, background:brief.topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:brief.topic.trim()&&!loading?"#0e0f11":"var(--muted)", cursor:brief.topic.trim()&&!loading?"pointer":"not-allowed" }}>
               {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Writing…</> : <>{provider.logo} Generate Draft</>}
             </button>
             <button onClick={() => { markDone("brief"); advanceTo("draft"); }} style={btnS}>Write Manually →</button>
@@ -2904,6 +2912,20 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
             </>
           )}
         </div>
+      )}
+
+      {promptPreview && (
+        <PromptPreviewModal
+          title={promptPreview.title}
+          systemPrompt={promptPreview.system}
+          userPrompt={promptPreview.user}
+          onSystemChange={(v) => setPromptPreview(p => ({ ...p, system: v }))}
+          onUserChange={(v) => setPromptPreview(p => ({ ...p, user: v }))}
+          confirmLabel={promptPreview.confirmLabel}
+          accentColor={promptPreview.accentColor}
+          onCancel={() => setPromptPreview(null)}
+          onConfirm={() => generateFromBrief({ system: promptPreview.system, user: promptPreview.user })}
+        />
       )}
     </div>
   );
@@ -3853,6 +3875,9 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
 
   const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
 
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [draftPrompt, setDraftPrompt] = useState("");
+
   const STYLES = [
     { id:"cinematic",   label:"Cinematic"    },
     { id:"editorial",   label:"Editorial"    },
@@ -3862,22 +3887,35 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
     { id:"moody",       label:"Dark & Moody" },
   ];
 
-  const generate = async () => {
+  const styleMap = {
+    cinematic:  "cinematic photography, anamorphic lens, golden hour, film grain",
+    editorial:  "editorial photography, clean composition, magazine quality",
+    lifestyle:  "lifestyle photography, authentic, natural light, candid",
+    minimal:    "minimalist photography, negative space, simple composition",
+    vintage:    "vintage film photography, faded colors, grain, retro aesthetic",
+    moody:      "dark moody photography, dramatic shadows, rich tones, atmospheric",
+  };
+
+  // Step 1 — draft the prompt and show it for review/editing
+  const openPromptPreview = async () => {
     if (!topic.trim() || !provider) return;
-    setLoading(true); setError(""); setImageUrl(null);
+    setLoading(true); setError("");
     try {
-      const styleMap = {
-        cinematic:  "cinematic photography, anamorphic lens, golden hour, film grain",
-        editorial:  "editorial photography, clean composition, magazine quality",
-        lifestyle:  "lifestyle photography, authentic, natural light, candid",
-        minimal:    "minimalist photography, negative space, simple composition",
-        vintage:    "vintage film photography, faded colors, grain, retro aesthetic",
-        moody:      "dark moody photography, dramatic shadows, rich tones, atmospheric",
-      };
       const aiPrompt = `Generate an image prompt for a Cask & Stream (fly fishing and whiskey lifestyle brand) ${platform} post. Style: ${styleMap[style]}. Topic: ${topic}. Amber and teal color palette. Return ONLY the prompt, no explanation.`;
       const generatedPrompt = await callAI(activeProvider, activeModel, "You generate concise, vivid image prompts. Return only the prompt string.", aiPrompt, apiKeys[activeProvider]);
-      setPrompt(generatedPrompt.trim());
-      const url = await generateImage(generatedPrompt.trim(), platform, apiKeys, imgProvider);
+      setDraftPrompt(generatedPrompt.trim());
+      setPreviewOpen(true);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  // Step 2 — actually generate the image from the (possibly edited) prompt
+  const generate = async (finalPrompt) => {
+    setPreviewOpen(false);
+    setLoading(true); setError(""); setImageUrl(null);
+    try {
+      setPrompt(finalPrompt);
+      const url = await generateImage(finalPrompt, platform, apiKeys, imgProvider);
       setImageUrl(url);
     } catch(e) { setError(e.message); }
     setLoading(false);
@@ -3928,25 +3966,23 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
         </div>
 
         <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-          <button onClick={generate} disabled={!topic.trim()||loading||!provider}
+          <button onClick={openPromptPreview} disabled={!topic.trim()||loading||!provider}
             style={{ padding:"10px 20px", borderRadius:8, border:"none", background:topic.trim()&&!loading&&provider?"#7c3aed":"var(--bg-elevated)", color:topic.trim()&&!loading&&provider?"#fff":"var(--muted)", fontSize:13, fontWeight:700, cursor:topic.trim()&&!loading&&provider?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
-            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : "▣ Generate Image"}
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Working…</> : "▣ Generate Image"}
           </button>
           {!provider && <span style={{ fontSize:11, color:"var(--amber)" }}>Select an image AI above</span>}
           {error && <span style={{ fontSize:12, color:"var(--red)" }}>{error}</span>}
         </div>
       </div>
 
-      {/* Generated prompt display */}
+      {/* Last used prompt (read-only reference, edit happens in the preview modal) */}
       {prompt && (
         <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:14 }}>
-          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Generated Prompt</div>
-          <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} rows={2}
-            style={{ ...iS, resize:"none", fontSize:12, lineHeight:1.5 }} />
-          <button onClick={async () => { setLoading(true); setError(""); setImageUrl(null); try { const url = await generateImage(prompt, platform, apiKeys, imgProvider); setImageUrl(url); } catch(e) { setError(e.message); } setLoading(false); }}
-            disabled={loading}
-            style={{ marginTop:8, padding:"5px 14px", borderRadius:7, border:"none", background:"#7c3aed", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-            ↻ Regenerate with this prompt
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Last Prompt Used</div>
+          <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{prompt}</div>
+          <button onClick={() => { setDraftPrompt(prompt); setPreviewOpen(true); }}
+            style={{ marginTop:8, padding:"5px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            View/Edit & Regenerate
           </button>
         </div>
       )}
@@ -3960,12 +3996,25 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↓ Download
             </button>
-            <button onClick={generate}
+            <button onClick={openPromptPreview}
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↻ New
             </button>
           </div>
         </div>
+      )}
+
+      {previewOpen && (
+        <PromptPreviewModal
+          title="Review Image Prompt"
+          systemPrompt={null}
+          userPrompt={draftPrompt}
+          onUserChange={setDraftPrompt}
+          confirmLabel="Generate Image"
+          accentColor="#7c3aed"
+          onCancel={() => setPreviewOpen(false)}
+          onConfirm={() => generate(draftPrompt)}
+        />
       )}
     </div>
   );
@@ -4262,14 +4311,26 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
   // ── STAGE 4: IMAGE (shared across platforms) ────────────────────────────────
 
-  const generateSocialPipelineImage = async () => {
+  const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
+  const [imageDraftPrompt, setImageDraftPrompt] = useState("");
+
+  const openImagePromptPreview = async () => {
     setLoading(true); setLoadMsg("Writing image prompt…"); setError("");
     try {
-      const aiPrompt = await generateImagePrompt(idea.topic, selectedPlatforms[0]?.id || "instagram", activeProvider, activeModel, apiKeys[activeProvider]);
-      setImageData(d => ({ ...d, prompt: aiPrompt }));
-      setLoadMsg(`Generating with ${getImageProviderLabel(imageData.imgProvider)}…`);
-      const url = await generateImage(aiPrompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
-      setImageData(d => ({ ...d, prompt: aiPrompt, url }));
+      const aiPrompt = imageData.prompt || await generateImagePrompt(idea.topic, selectedPlatforms[0]?.id || "instagram", activeProvider, activeModel, apiKeys[activeProvider]);
+      setImageDraftPrompt(aiPrompt);
+      setImagePreviewOpen(true);
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  const generateSocialPipelineImage = async (finalPrompt) => {
+    setImagePreviewOpen(false);
+    setLoading(true); setLoadMsg(`Generating with ${getImageProviderLabel(imageData.imgProvider)}…`); setError("");
+    try {
+      setImageData(d => ({ ...d, prompt: finalPrompt }));
+      const url = await generateImage(finalPrompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
+      setImageData(d => ({ ...d, prompt: finalPrompt, url }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
@@ -4560,7 +4621,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
             {!imageData.url && !loading && (
               <div style={{ height:160, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:10, marginBottom:14 }}>
                 <span style={{ fontSize:28, opacity:0.3 }}>▣</span>
-                <button onClick={generateSocialPipelineImage} disabled={!imageData.imgProvider}
+                <button onClick={openImagePromptPreview} disabled={!imageData.imgProvider}
                   style={{ padding:"8px 20px", borderRadius:8, border:"none", background:imageData.imgProvider?"#7c3aed":"var(--bg-elevated)", color:imageData.imgProvider?"#fff":"var(--muted)", fontSize:12, fontWeight:700, cursor:imageData.imgProvider?"pointer":"not-allowed", fontFamily:"var(--font-body)" }}>
                   ▣ Generate Image
                 </button>
@@ -4602,6 +4663,19 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
             <button onClick={() => setStage("hashtags")} style={btnS}>← Back to Hashtags</button>
           </div>
         </div>
+      )}
+
+      {imagePreviewOpen && (
+        <PromptPreviewModal
+          title="Review Image Prompt"
+          systemPrompt={null}
+          userPrompt={imageDraftPrompt}
+          onUserChange={setImageDraftPrompt}
+          confirmLabel="Generate Image"
+          accentColor="#7c3aed"
+          onCancel={() => setImagePreviewOpen(false)}
+          onConfirm={() => generateSocialPipelineImage(imageDraftPrompt)}
+        />
       )}
 
       {/* ── STAGE 5: PUBLISH ── */}
@@ -4800,6 +4874,60 @@ function BrandGuidePanel({ onSave }) {
   );
 }
 
+// ─── PROMPT PREVIEW MODAL ─────────────────────────────────────────────────────
+// Lets the user see and edit the exact AI prompt before it's sent — used for
+// both blog post generation and image generation across the app.
+
+function PromptPreviewModal({ title, systemPrompt, userPrompt, onSystemChange, onUserChange, onConfirm, onCancel, confirmLabel = "Generate", accentColor = "var(--amber)" }) {
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.7)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:2000, padding:20 }}
+      onClick={onCancel}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:14, padding:28, width:"100%", maxWidth:680, maxHeight:"85vh", overflow:"auto", display:"flex", flexDirection:"column", gap:18 }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:0 }}>{title}</h3>
+          <button onClick={onCancel} style={{ background:"transparent", border:"none", color:"var(--muted)", fontSize:20, cursor:"pointer", padding:4, lineHeight:1 }}>✕</button>
+        </div>
+
+        <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+          This is exactly what will be sent to the AI. Edit either field below before generating — your brand guide context (if any) is already included.
+        </p>
+
+        {onSystemChange && (
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+              System Prompt <span style={{ fontWeight:400, textTransform:"none" }}>(instructions/context)</span>
+            </label>
+            <textarea value={systemPrompt} onChange={e=>onSystemChange(e.target.value)} rows={6}
+              style={{ width:"100%", padding:"12px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"monospace", lineHeight:1.6, outline:"none", resize:"vertical", boxSizing:"border-box" }}
+              onFocus={e=>e.target.style.borderColor=accentColor} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+        )}
+
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+            {onSystemChange ? "Your Request" : "Prompt"}
+          </label>
+          <textarea value={userPrompt} onChange={e=>onUserChange(e.target.value)} rows={onSystemChange ? 5 : 4}
+            style={{ width:"100%", padding:"12px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", lineHeight:1.6, outline:"none", resize:"vertical", boxSizing:"border-box" }}
+            onFocus={e=>e.target.style.borderColor=accentColor} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        </div>
+
+        <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
+          <button onClick={onCancel}
+            style={{ padding:"10px 20px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            Cancel
+          </button>
+          <button onClick={onConfirm}
+            style={{ padding:"10px 24px", borderRadius:8, border:"none", background:accentColor, color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            ✓ {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -4838,26 +4966,35 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
   const [showPrompt, setShowPrompt] = useState(false);
   const [error,      setError]      = useState("");
   const [copied,     setCopied]     = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [draftPrompt, setDraftPrompt] = useState("");
 
   const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
   const provider = imgProvider;
   const providerLabel = getImageProviderLabel(provider);
   const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
 
-  const generate = async (customPrompt) => {
+  // Opens the preview modal with an AI-drafted prompt the user can edit before generating
+  const openPromptPreview = async () => {
+    setLoading(true); setError("");
+    try {
+      let draftedPrompt = prompt;
+      if (!draftedPrompt) {
+        const topic = `${title}. ${(body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim()}`;
+        draftedPrompt = await generateImagePrompt(topic, "facebook", activeProvider, activeModel, apiKeys[activeProvider]);
+        draftedPrompt += `, ${HEADLINE_IMAGE_SPEC.style}, wide editorial banner`;
+      }
+      setDraftPrompt(draftedPrompt);
+      setPreviewOpen(true);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const generate = async (finalPrompt) => {
+    setPreviewOpen(false);
     setLoading(true); setError(""); setImageUrl(null);
     try {
-      const usePrompt = customPrompt || prompt;
-      let finalPrompt = usePrompt;
-      if (!finalPrompt) {
-        // Generate prompt from title + body excerpt
-        const topic = `${title}. ${(body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim()}`;
-        finalPrompt = await generateImagePrompt(topic, "facebook", activeProvider, activeModel, apiKeys[activeProvider]);
-        // Append headline style
-        finalPrompt += `, ${HEADLINE_IMAGE_SPEC.style}, wide editorial banner`;
-        setPrompt(finalPrompt);
-      }
-      // Use facebook spec for 3:2 wide ratio (closest to 16:9 available)
+      setPrompt(finalPrompt);
       const url = await generateImage(finalPrompt, "facebook", apiKeys, imgProvider);
       setImageUrl(url);
     } catch(e) { setError(e.message); }
@@ -4887,32 +5024,17 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
       <div style={{ display:"flex", justifyContent:"flex-end" }}>
         <div style={{ display:"flex", gap:8 }}>
           {prompt && (
-            <button onClick={()=>setShowPrompt(s=>!s)}
+            <button onClick={() => { setDraftPrompt(prompt); setPreviewOpen(true); }}
               style={{ padding:"5px 12px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-              {showPrompt ? "Hide" : "Edit"} Prompt
+              View/Edit Prompt
             </button>
           )}
-          <button onClick={()=>generate()} disabled={loading || !title?.trim() || !provider}
+          <button onClick={openPromptPreview} disabled={loading || !title?.trim() || !provider}
             style={{ padding:"7px 18px", borderRadius:8, border:"none", background:loading||!title?.trim()||!provider?"var(--bg-elevated)":"#7c3aed", color:loading||!title?.trim()||!provider?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:loading||!title?.trim()||!provider?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : imageUrl ? "↻ Regenerate" : "▣ Generate Headline Image"}
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Working…</> : imageUrl ? "↻ Regenerate" : "▣ Generate Headline Image"}
           </button>
         </div>
       </div>
-
-      {/* Editable prompt */}
-      {showPrompt && prompt && (
-        <div>
-          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Prompt (editable)</div>
-          <div style={{ display:"flex", gap:8 }}>
-            <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} rows={3}
-              style={{ flex:1, padding:"10px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", resize:"vertical", lineHeight:1.5 }} />
-            <button onClick={()=>generate(prompt)} disabled={loading}
-              style={{ padding:"8px 14px", borderRadius:8, border:"none", background:"#7c3aed", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start", whiteSpace:"nowrap" }}>
-              Run →
-            </button>
-          </div>
-        </div>
-      )}
 
       {error && (
         <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>
@@ -4927,7 +5049,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↓ Download
             </button>
-            <button onClick={()=>generate()}
+            <button onClick={openPromptPreview}
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↻ New
             </button>
@@ -4949,8 +5071,21 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
       {loading && (
         <div style={{ height:160, borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
           <span style={{ animation:"spin 1s linear infinite", display:"inline-block", fontSize:20, opacity:0.4 }}>◌</span>
-          <span style={{ fontSize:12, color:"var(--muted)" }}>Generating headline image with {providerLabel}…</span>
+          <span style={{ fontSize:12, color:"var(--muted)" }}>{providerLabel ? `Generating headline image with ${providerLabel}…` : "Working…"}</span>
         </div>
+      )}
+
+      {previewOpen && (
+        <PromptPreviewModal
+          title="Review Image Prompt"
+          systemPrompt={null}
+          userPrompt={draftPrompt}
+          onUserChange={setDraftPrompt}
+          confirmLabel="Generate Image"
+          accentColor="#7c3aed"
+          onCancel={() => setPreviewOpen(false)}
+          onConfirm={() => generate(draftPrompt)}
+        />
       )}
     </div>
   );
