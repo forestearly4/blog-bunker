@@ -31,8 +31,15 @@ export function AuthProvider({ children }) {
   const signup = useCallback((email, pw) => { const id = getIdentity(); if (!id) return Promise.reject("not loaded"); return id.gotrue.signup(email, pw, {}); }, []);
   const logout = useCallback(() => { const id = getIdentity(); if (id) id.logout(); }, []);
   const requestPasswordRecovery = useCallback((email) => { const id = getIdentity(); if (!id) return Promise.reject("not loaded"); return id.gotrue.requestPasswordRecovery(email); }, []);
+  const loginWithGoogle = useCallback(() => {
+    const id = getIdentity();
+    if (!id) return;
+    // Netlify Identity widget has a built-in Google button when the provider
+    // is enabled server-side — just open the widget's login modal.
+    id.open("login");
+  }, []);
 
-  return <AuthContext.Provider value={{ user, loading, login, signup, logout, requestPasswordRecovery }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ user, loading, login, signup, logout, requestPasswordRecovery, loginWithGoogle }}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth() {
@@ -112,6 +119,22 @@ function Ok({ msg })  { if (!msg) return null; return <div style={{ padding:"10p
 function Link({ children, onClick }) { return <button onClick={onClick} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--amber)", fontWeight:600, fontSize:13, fontFamily:"'DM Sans',sans-serif", padding:0 }}>{children}</button>; }
 function Divider() { return <div style={{ display:"flex", alignItems:"center", gap:12, margin:"20px 0" }}><div style={{ flex:1, height:1, background:"var(--border)" }} /><span style={{ fontSize:11, color:"var(--muted)" }}>or</span><div style={{ flex:1, height:1, background:"var(--border)" }} /></div>; }
 
+function GoogleButton() {
+  const { loginWithGoogle } = useAuth();
+  return (
+    <button type="button" onClick={loginWithGoogle}
+      style={{ width:"100%", padding:"12px 16px", borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-surface)", color:"var(--text)", fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
+      <svg width="18" height="18" viewBox="0 0 18 18">
+        <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/>
+        <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/>
+        <path fill="#FBBC05" d="M3.97 10.72A5.41 5.41 0 0 1 3.69 9c0-.6.1-1.18.28-1.72V4.95H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.05l3.01-2.33z"/>
+        <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/>
+      </svg>
+      Continue with Google
+    </button>
+  );
+}
+
 function SignIn({ onSignUp, onForgot }) {
   const { login } = useAuth();
   const [email, setEmail] = useState(""); const [pass, setPass] = useState("");
@@ -143,14 +166,15 @@ function SignIn({ onSignUp, onForgot }) {
         <h2 style={{ fontFamily:"'Fraunces',serif", fontSize:20, fontWeight:700, marginBottom:4 }}>Welcome back</h2>
         <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24 }}>Sign in to your Bunker</p>
         <Err msg={err} />
+        <GoogleButton />
+        <Divider />
         <form onSubmit={submit} noValidate>
           <Field label="Email" type="email" placeholder="you@example.com" value={email} onChange={e=>{setEmail(e.target.value);setFe(f=>({...f,email:""}));}} autoFocus error={fe.email} />
           <Field label="Password" type="password" placeholder="Your password" value={pass} onChange={e=>{setPass(e.target.value);setFe(f=>({...f,pass:""}));}} error={fe.pass} />
           <div style={{ textAlign:"right", marginTop:-8, marginBottom:16 }}><Link onClick={onForgot}>Forgot password?</Link></div>
           <Btn loading={loading}>Sign In</Btn>
         </form>
-        <Divider />
-        <p style={{ textAlign:"center", fontSize:13, color:"var(--text-secondary)" }}>Don't have an account? <Link onClick={onSignUp}>Create one free</Link></p>
+        <p style={{ textAlign:"center", fontSize:13, color:"var(--text-secondary)", marginTop:20 }}>Don't have an account? <Link onClick={onSignUp}>Create one free</Link></p>
       </Card>
       <p style={{ textAlign:"center", fontSize:11, color:"var(--muted)", marginTop:20 }}>Scout plan is always free · No credit card required</p>
     </Shell>
@@ -188,6 +212,8 @@ function SignUp({ onSignIn }) {
         <h2 style={{ fontFamily:"'Fraunces',serif", fontSize:20, fontWeight:700, marginBottom:4 }}>Create your account</h2>
         <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24 }}>Free forever on Scout · Upgrade when you're ready</p>
         <Ok msg={ok} /><Err msg={err} />
+        {!ok && <GoogleButton />}
+        {!ok && <Divider />}
         {!ok && <form onSubmit={submit} noValidate>
           <Field label="Email" type="email" placeholder="you@example.com" value={email} onChange={e=>{setEmail(e.target.value);setFe(f=>({...f,email:""}));}} autoFocus error={fe.email} />
           <Field label="Password" type="password" placeholder="Min. 8 characters" value={pass} onChange={e=>{setPass(e.target.value);setFe(f=>({...f,pass:""}));}} error={fe.pass} />
