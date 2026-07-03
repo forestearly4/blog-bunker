@@ -3531,17 +3531,21 @@ function MetaConnectPanel({ onConnected }) {
 // ─── SOCIAL STUDIO ────────────────────────────────────────────────────────────
 // Full standalone social media creation studio with sub-tabs
 
-function SocialStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, onAddInspiration, handleProviderChange, handleModelChange }) {
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide }) {
   const [tab, setTab] = useState("pipeline");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
 
   const TABS = [
-    { id:"pipeline",  label:"Pipeline",        icon:"◈", highlight:true },
-    { id:"create",    label:"Quick Post",      icon:"✎" },
-    { id:"research",  label:"Research",        icon:"◎" },
-    { id:"hashtags",  label:"Hashtags",        icon:"#" },
-    { id:"image",     label:"Image Studio",    icon:"▣" },
-    { id:"calendar",  label:"Post Ideas",      icon:"✦" },
+    { id:"pipeline",  label:"Social Pipeline", icon:"◈", highlight:true },
+    { id:"create",    label:"Quick Post",       icon:"✎" },
+    { id:"email",     label:"Email",            icon:"✉" },
+    { id:"pinterest", label:"Pinterest",        icon:"📌" },
+    { id:"seo",       label:"Keyword Research", icon:"◎" },
+    { id:"research",  label:"Research",         icon:"⊕" },
+    { id:"hashtags",  label:"Hashtags",         icon:"#" },
+    { id:"image",     label:"Image Studio",     icon:"▣" },
+    { id:"ideas",     label:"Post Ideas",       icon:"✦" },
+    { id:"competitor",label:"Competitors",      icon:"⊗" },
   ];
 
   return (
@@ -3549,17 +3553,17 @@ function SocialStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, 
       {/* Header */}
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
         <div>
-          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Social Studio</h2>
-          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Create, research, and publish social content — all in one place.</p>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Marketing Studio</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Social, email, Pinterest, SEO, keyword research, and competitive intelligence — all in one place.</p>
         </div>
         <ProviderPicker activeProvider={activeProvider} activeModel={activeModel} onProviderChange={handleProviderChange} onModelChange={handleModelChange} keys={apiKeys} compact />
       </div>
 
       {/* Sub-tabs */}
-      <div style={{ display:"flex", gap:4, marginBottom:24, background:"var(--bg-surface)", borderRadius:10, padding:4, border:"1px solid var(--border)", width:"fit-content" }}>
+      <div style={{ display:"flex", gap:4, marginBottom:24, flexWrap:"wrap" }}>
         {TABS.map(t => (
           <button key={t.id} onClick={() => setTab(t.id)}
-            style={{ padding:"8px 16px", borderRadius:8, border:"none", background:tab===t.id?"var(--amber)":"transparent", color:tab===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            style={{ padding:"7px 14px", borderRadius:8, border:tab===t.id?"1px solid var(--amber)":"1px solid var(--border)", background:tab===t.id?"var(--amber-glow)":"transparent", color:tab===t.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5 }}>
             <span>{t.icon}</span>{t.label}
             {t.highlight && tab !== t.id && <span style={{ fontSize:8, fontWeight:700, padding:"1px 5px", borderRadius:99, background:"var(--amber)", color:"#0e0f11", marginLeft:2 }}>NEW</span>}
           </button>
@@ -3579,7 +3583,7 @@ function SocialStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, 
         />
       )}
 
-      {/* ── CREATE POST ── */}
+      {/* ── QUICK POST ── */}
       {tab === "create" && (
         <SocialPostTab
           activeProvider={activeProvider}
@@ -3587,6 +3591,40 @@ function SocialStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, 
           apiKeys={apiKeys}
           dark={dark}
           metaConfig={metaConfig}
+        />
+      )}
+
+      {/* ── EMAIL NEWSLETTER ── */}
+      {tab === "email" && (
+        <EmailNewsletterStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          brandGuide={brandGuide}
+        />
+      )}
+
+      {/* ── PINTEREST ── */}
+      {tab === "pinterest" && (
+        <PinterestStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          brandGuide={brandGuide}
+        />
+      )}
+
+      {/* ── KEYWORD RESEARCH ── */}
+      {tab === "seo" && (
+        <KeywordResearchStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          inspiration={inspiration}
+          onAddInspiration={onAddInspiration}
         />
       )}
 
@@ -3621,11 +3659,24 @@ function SocialStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, 
       )}
 
       {/* ── POST IDEAS ── */}
-      {tab === "calendar" && (
+      {tab === "ideas" && (
         <SocialPostIdeas
           activeProvider={activeProvider}
           activeModel={activeModel}
           apiKeys={apiKeys}
+          posts={posts}
+          inspiration={inspiration}
+          onAddInspiration={onAddInspiration}
+        />
+      )}
+
+      {/* ── COMPETITORS ── */}
+      {tab === "competitor" && (
+        <CompetitorMarketingPanel
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          competitors={competitors}
           posts={posts}
           inspiration={inspiration}
           onAddInspiration={onAddInspiration}
@@ -4928,6 +4979,531 @@ function PromptPreviewModal({ title, systemPrompt, userPrompt, onSystemChange, o
   );
 }
 
+// ─── EMAIL NEWSLETTER STUDIO ─────────────────────────────────────────────────
+
+function EmailNewsletterStudio({ activeProvider, activeModel, apiKeys, posts, brandGuide }) {
+  const [mode,     setMode]    = useState("from-post"); // "from-post" | "from-scratch"
+  const [postId,   setPostId]  = useState("");
+  const [topic,    setTopic]   = useState("");
+  const [subject,  setSubject] = useState("");
+  const [body,     setBody]    = useState("");
+  const [loading,  setLoading] = useState(false);
+  const [error,    setError]   = useState("");
+  const [copied,   setCopied]  = useState("");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const selectedPost = posts.find(p => p.id === Number(postId));
+
+  const generate = async () => {
+    setLoading(true); setError("");
+    try {
+      const context = mode === "from-post" && selectedPost
+        ? `Blog post title: "${selectedPost.title}"\nContent excerpt: ${(selectedPost.body || "").slice(0, 600)}`
+        : `Topic: ${topic}`;
+
+      const [subjectResult, bodyResult] = await Promise.all([
+        callAI(activeProvider, activeModel,
+          `${brandCtx}You write compelling email newsletter subject lines for bloggers. Return ONLY the subject line, nothing else. Max 60 characters. No quotes.`,
+          `Write an email subject line for this newsletter: ${context}`,
+          apiKeys[activeProvider]),
+        callAI(activeProvider, activeModel,
+          `${brandCtx}You write engaging email newsletters for bloggers. Write in a warm, personal voice — like writing to a friend. Structure: greeting → hook → main content → call to action → sign-off. Include a clear CTA to read the full post. Use plain text formatting only. 200-350 words.`,
+          `Write an email newsletter. ${context}${selectedPost ? `\nLink to post: [Read the full post →](https://caskandstream.com/blog/${selectedPost.title?.toLowerCase().replace(/\s+/g,"-")})` : ""}`,
+          apiKeys[activeProvider]),
+      ]);
+
+      setSubject(subjectResult.trim());
+      setBody(bodyResult.trim());
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const copySection = (key, text) => {
+    navigator.clipboard.writeText(text);
+    setCopied(key);
+    setTimeout(() => setCopied(""), 2000);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div>
+        <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Email Newsletter</h2>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Turn your blog posts into subscriber emails — your most owned marketing channel.</p>
+      </div>
+
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        <div style={{ display:"flex", gap:6, marginBottom:16 }}>
+          {[["from-post","From a Blog Post"],["from-scratch","From Scratch"]].map(([id,label]) => (
+            <button key={id} onClick={() => setMode(id)}
+              style={{ padding:"6px 16px", borderRadius:99, border:mode===id?"1px solid var(--amber)":"1px solid var(--border)", background:mode===id?"var(--amber-glow)":"transparent", color:mode===id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode === "from-post" ? (
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Select Blog Post</label>
+            <select value={postId} onChange={e=>setPostId(e.target.value)} style={{ ...iS }}>
+              <option value="">Choose a post…</option>
+              {posts.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+            </select>
+          </div>
+        ) : (
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Newsletter Topic</label>
+            <input style={iS} placeholder="e.g. Spring hatch season preview, Top bourbon pairings for river trips…" value={topic} onChange={e=>setTopic(e.target.value)}
+              onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+        )}
+
+        <button onClick={generate} disabled={loading || (mode==="from-post" && !postId) || (mode==="from-scratch" && !topic.trim())}
+          style={{ marginTop:14, padding:"10px 24px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Writing…</> : `${provider.logo} Generate Newsletter`}
+        </button>
+        {error && <div style={{ fontSize:12, color:"var(--red)", marginTop:10 }}>{error}</div>}
+      </div>
+
+      {(subject || body) && (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          {/* Subject */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)" }}>Subject Line</div>
+              <button onClick={() => copySection("subject", subject)} style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied==="subject"?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                {copied==="subject" ? "✓ Copied" : "Copy"}
+              </button>
+            </div>
+            <input value={subject} onChange={e=>setSubject(e.target.value)} style={{ ...iS, fontWeight:600 }} />
+          </div>
+
+          {/* Body */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)" }}>Email Body</div>
+              <div style={{ display:"flex", gap:6 }}>
+                <button onClick={() => copySection("body", body)} style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied==="body"?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  {copied==="body" ? "✓ Copied" : "Copy Body"}
+                </button>
+                <button onClick={() => copySection("all", `Subject: ${subject}\n\n${body}`)} style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied==="all"?"var(--green)":"var(--bg-elevated)", color:copied==="all"?"#0e0f11":"var(--text-secondary)", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  {copied==="all" ? "✓ Copied" : "Copy All"}
+                </button>
+              </div>
+            </div>
+            <textarea value={body} onChange={e=>setBody(e.target.value)} rows={14}
+              style={{ ...iS, resize:"vertical", lineHeight:1.7, fontSize:13 }} />
+          </div>
+
+          <div style={{ fontSize:11, color:"var(--text-secondary)", padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+            💡 Paste into Mailchimp, ConvertKit, Beehiiv, or any email tool. The subject line and body are formatted for direct paste.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── PINTEREST STUDIO ─────────────────────────────────────────────────────────
+
+function PinterestStudio({ activeProvider, activeModel, apiKeys, posts, brandGuide }) {
+  const [mode,    setMode]   = useState("from-post");
+  const [postId,  setPostId] = useState("");
+  const [topic,   setTopic]  = useState("");
+  const [pins,    setPins]   = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]  = useState("");
+  const [copied,  setCopied] = useState("");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const selectedPost = posts.find(p => p.id === Number(postId));
+
+  const generate = async () => {
+    setLoading(true); setError(""); setPins(null);
+    try {
+      const context = mode === "from-post" && selectedPost
+        ? `Blog post: "${selectedPost.title}". Excerpt: ${(selectedPost.body || "").slice(0, 400)}`
+        : `Topic: ${topic}`;
+
+      const text = await callAI(activeProvider, activeModel,
+        `${brandCtx}You are a Pinterest strategy expert. Create 3 Pinterest pin ideas for a blog post or topic. Pinterest is a SEARCH ENGINE — optimize for discoverability. Return ONLY valid JSON array (no fences):
+[{"title":"pin title under 100 chars","description":"pin description 200-500 chars with keywords","keywords":["keyword1","keyword2","keyword3","keyword4","keyword5"],"board":"suggested board name","imageDescription":"describe the ideal pin image in 1 sentence","type":"standard|idea|video"}]`,
+        `Create 3 Pinterest pins for: ${context}`,
+        apiKeys[activeProvider]
+      );
+      setPins(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div>
+        <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Pinterest Studio</h2>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Pinterest is a search engine — pins drive traffic for years, not hours. Create SEO-optimized pins for every post.</p>
+      </div>
+
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        <div style={{ display:"flex", gap:6, marginBottom:16 }}>
+          {[["from-post","From a Blog Post"],["from-scratch","From Topic"]].map(([id,label]) => (
+            <button key={id} onClick={() => setMode(id)}
+              style={{ padding:"6px 16px", borderRadius:99, border:mode===id?"1px solid #e60023":"1px solid var(--border)", background:mode===id?"#e6002310":"transparent", color:mode===id?"#e60023":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode === "from-post" ? (
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Select Blog Post</label>
+            <select value={postId} onChange={e=>setPostId(e.target.value)} style={iS}>
+              <option value="">Choose a post…</option>
+              {posts.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+            </select>
+          </div>
+        ) : (
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Topic</label>
+            <input style={iS} placeholder="e.g. dry fly fishing tips, bourbon cocktail recipes, fly tying for beginners…" value={topic} onChange={e=>setTopic(e.target.value)}
+              onFocus={e=>e.target.style.borderColor="#e60023"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+        )}
+
+        <button onClick={generate} disabled={loading || (mode==="from-post" && !postId) || (mode==="from-scratch" && !topic.trim())}
+          style={{ marginTop:14, padding:"10px 24px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":"#e60023", color:loading?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Creating Pins…</> : "📌 Generate 3 Pin Ideas"}
+        </button>
+        {error && <div style={{ fontSize:12, color:"var(--red)", marginTop:10 }}>{error}</div>}
+      </div>
+
+      {pins && (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          {pins.map((pin, i) => (
+            <div key={i} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:12 }}>
+                <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                  <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"#e6002315", color:"#e60023", border:"1px solid #e6002333" }}>📌 Pin {i+1}</span>
+                  <span style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:"var(--bg-elevated)", color:"var(--muted)", border:"1px solid var(--border)", textTransform:"capitalize" }}>{pin.type}</span>
+                </div>
+                <button onClick={() => { navigator.clipboard.writeText(`${pin.title}\n\n${pin.description}\n\nKeywords: ${pin.keywords?.join(", ")}`); setCopied(`pin-${i}`); setTimeout(()=>setCopied(""),2000); }}
+                  style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied===`pin-${i}`?"var(--green)":"var(--bg-elevated)", color:copied===`pin-${i}`?"#0e0f11":"var(--text-secondary)", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  {copied===`pin-${i}` ? "✓ Copied" : "Copy"}
+                </button>
+              </div>
+
+              <div style={{ fontWeight:700, fontSize:14, marginBottom:10, color:"var(--text)" }}>{pin.title}</div>
+              <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.7, marginBottom:12 }}>{pin.description}</div>
+
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:10 }}>
+                {pin.keywords?.map((kw,j) => <span key={j} style={{ fontSize:11, padding:"2px 8px", borderRadius:99, background:"var(--amber-glow)", color:"var(--amber)", border:"1px solid var(--amber)33" }}>{kw}</span>)}
+              </div>
+
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:11, color:"var(--muted)" }}>
+                <div><span style={{ color:"var(--amber)", fontWeight:600 }}>Board:</span> {pin.board}</div>
+                <div><span style={{ color:"var(--amber)", fontWeight:600 }}>Image:</span> {pin.imageDescription}</div>
+              </div>
+            </div>
+          ))}
+
+          <div style={{ fontSize:11, color:"var(--text-secondary)", padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+            💡 Pinterest tip: Post each pin to a separate board, 3-4 weeks apart. Pin the same blog post multiple times with different images and titles — Pinterest treats them as unique content.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── KEYWORD RESEARCH STUDIO ──────────────────────────────────────────────────
+
+function KeywordResearchStudio({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
+  const [topic,   setTopic]   = useState("");
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+  const [saved,   setSaved]   = useState({});
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const existingTopics = posts.map(p => p.title).join(", ");
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const research = async () => {
+    setLoading(true); setError(""); setResults(null); setSaved({});
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are an SEO keyword strategist for small niche bloggers. Focus on LONG-TAIL keywords that small sites can realistically rank for. Return ONLY valid JSON (no fences):
+{
+  "primary": {"keyword":"...","monthly_searches":"est. range","difficulty":"low|medium|high","intent":"informational|commercial|navigational"},
+  "long_tail": [{"keyword":"...","why":"why a small blog can rank for this","content_idea":"...","difficulty":"low|medium"}],
+  "questions": ["question keyword 1","question keyword 2","question keyword 3","question keyword 4","question keyword 5"],
+  "related": ["related term 1","related term 2","related term 3"],
+  "avoid": ["too competitive keyword 1","too competitive keyword 2"]
+}
+long_tail array = 6 keywords. Focus heavily on low-difficulty, high-specificity terms.`,
+        `Niche: fly fishing and whiskey lifestyle blog. Research keywords for topic: "${topic}". Already covered: ${existingTopics.slice(0,300)}`,
+        apiKeys[activeProvider],
+        2000
+      );
+      setResults(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const saveKeyword = (kw, i) => {
+    onAddInspiration({ id:Date.now()+i, title:kw.keyword || kw, source:"Keyword Research", type:"article", notes:kw.content_idea ? `Content idea: ${kw.content_idea}\nDifficulty: ${kw.difficulty}\nWhy rank: ${kw.why}` : "" });
+    setSaved(s => ({ ...s, [i]:true }));
+  };
+
+  const diffColor = { low:"#5cba6c", medium:"var(--amber)", high:"var(--red)" };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div>
+        <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Keyword Research</h2>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Find long-tail keywords small blogs can actually rank for. Save the best ones to your Inspiration Board.</p>
+      </div>
+
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        <div style={{ display:"flex", gap:10 }}>
+          <input style={iS} placeholder="e.g. dry fly fishing, bourbon barrel aging, reading trout streams…" value={topic} onChange={e=>setTopic(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&research()}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          <button onClick={research} disabled={!topic.trim()||loading}
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:topic.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:topic.trim()&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:8 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Researching…</> : `${provider.logo} Research Keywords`}
+          </button>
+        </div>
+        {error && <div style={{ fontSize:12, color:"var(--red)", marginTop:10 }}>{error}</div>}
+      </div>
+
+      {results && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Primary keyword */}
+          {results.primary && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)", marginBottom:10 }}>Primary Keyword</div>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <div style={{ fontWeight:700, fontSize:16 }}>{results.primary.keyword}</div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <span style={{ fontSize:11, padding:"2px 8px", borderRadius:99, background:diffColor[results.primary.difficulty]+"15", color:diffColor[results.primary.difficulty], border:`1px solid ${diffColor[results.primary.difficulty]}33` }}>{results.primary.difficulty} difficulty</span>
+                  <span style={{ fontSize:11, padding:"2px 8px", borderRadius:99, background:"var(--bg-elevated)", color:"var(--muted)", border:"1px solid var(--border)" }}>{results.primary.monthly_searches}/mo</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Long-tail keywords */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:14 }}>🎯 Long-Tail Keywords (Rankable for Small Blogs)</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+              {results.long_tail?.map((kw, i) => (
+                <div key={i} style={{ padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", display:"flex", gap:12, alignItems:"flex-start" }}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+                      <span style={{ fontWeight:600, fontSize:13 }}>{kw.keyword}</span>
+                      <span style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:diffColor[kw.difficulty]+"15", color:diffColor[kw.difficulty] }}>{kw.difficulty}</span>
+                    </div>
+                    <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>💡 {kw.why}</div>
+                    {kw.content_idea && <div style={{ fontSize:11, color:"var(--amber)" }}>Post idea: {kw.content_idea}</div>}
+                  </div>
+                  <button onClick={() => saveKeyword(kw, i)} disabled={saved[i]}
+                    style={{ padding:"4px 10px", borderRadius:6, border:"none", background:saved[i]?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[i]?"default":"pointer", fontFamily:"var(--font-body)", flexShrink:0, whiteSpace:"nowrap" }}>
+                    {saved[i] ? "✓ Saved" : "+ Board"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Questions */}
+          {results.questions?.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7c3aed", marginBottom:12 }}>❓ Question Keywords (FAQ Content)</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                {results.questions.map((q, i) => (
+                  <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"8px 12px", borderRadius:7, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                    <span style={{ fontSize:12 }}>{q}</span>
+                    <button onClick={() => saveKeyword({ keyword:q, why:"Question keyword — great for FAQ sections" }, 100+i)} disabled={saved[100+i]}
+                      style={{ padding:"2px 8px", borderRadius:5, border:"none", background:saved[100+i]?"var(--green)":"transparent", color:saved[100+i]?"#0e0f11":"var(--muted)", fontSize:10, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      {saved[100+i] ? "✓" : "+ Board"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Avoid */}
+          {results.avoid?.length > 0 && (
+            <div style={{ padding:"12px 16px", borderRadius:10, background:"var(--red)08", border:"1px solid var(--red)22", fontSize:12, color:"var(--text-secondary)" }}>
+              <strong style={{ color:"var(--red)" }}>⚠ Too Competitive for Small Blogs:</strong> {results.avoid.join(" · ")}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── COMPETITOR MARKETING PANEL ───────────────────────────────────────────────
+
+function CompetitorMarketingPanel({ activeProvider, activeModel, apiKeys, competitors, posts, inspiration, onAddInspiration }) {
+  const [selected,  setSelected]  = useState(competitors[0]?.url || "");
+  const [analysis,  setAnalysis]  = useState(null);
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState("");
+  const [saved,     setSaved]     = useState({});
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const selectedCompetitor = competitors.find(c => c.url === selected);
+
+  const analyze = async () => {
+    if (!selectedCompetitor) return;
+    setLoading(true); setError(""); setAnalysis(null);
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a competitive marketing analyst for bloggers. Analyze a competitor blog and identify opportunities. Return ONLY valid JSON (no fences):
+{
+  "strengths": ["what they do well 1","what they do well 2","what they do well 3"],
+  "weaknesses": ["gap or weakness 1","gap or weakness 2","gap or weakness 3"],
+  "content_gaps": [{"topic":"...","why_opportunity":"...","angle":"how to differentiate"}],
+  "keyword_opportunities": ["keyword 1","keyword 2","keyword 3","keyword 4"],
+  "social_strategy": {"what_works":"...","what_to_steal":"...","how_to_differentiate":"..."},
+  "quick_wins": ["actionable win 1","actionable win 2","actionable win 3"]
+}
+content_gaps = 4 items. Be specific and actionable.`,
+        `Analyze this competitor blog for a fly fishing and whiskey lifestyle blogger (Cask & Stream):
+Competitor: ${selectedCompetitor.name} (${selectedCompetitor.url})
+Their content focus: ${selectedCompetitor.focus || "general fly fishing blog"}
+My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
+        apiKeys[activeProvider],
+        2000
+      );
+      setAnalysis(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const saveIdea = (text, i) => {
+    onAddInspiration({ id:Date.now()+i, title:text, source:`Competitor Intel — ${selectedCompetitor?.name}`, type:"article", notes:"" });
+    setSaved(s => ({ ...s, [i]:true }));
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div>
+        <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Competitor Intelligence</h2>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Analyze competitor blogs to find content gaps, keyword opportunities, and ways to differentiate.</p>
+      </div>
+
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        {competitors.length === 0 ? (
+          <div style={{ textAlign:"center", padding:"20px 0", color:"var(--muted)", fontSize:13 }}>
+            No competitors added yet — go to Research tab → Competitors to add some.
+          </div>
+        ) : (
+          <>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Select Competitor</label>
+            <div style={{ display:"flex", gap:10 }}>
+              <select value={selected} onChange={e=>{ setSelected(e.target.value); setAnalysis(null); setSaved({}); }} style={iS}>
+                {competitors.map(c => <option key={c.url} value={c.url}>{c.name} — {c.url}</option>)}
+              </select>
+              <button onClick={analyze} disabled={!selected||loading}
+                style={{ padding:"10px 20px", borderRadius:8, border:"none", background:selected&&!loading?provider.color:"var(--bg-elevated)", color:selected&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:selected&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:8 }}>
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Analyzing…</> : `${provider.logo} Analyze`}
+              </button>
+            </div>
+          </>
+        )}
+        {error && <div style={{ fontSize:12, color:"var(--red)", marginTop:10 }}>{error}</div>}
+      </div>
+
+      {analysis && (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          {/* Quick wins */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:12 }}>⚡ Quick Wins</div>
+            {analysis.quick_wins?.map((win,i) => (
+              <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom:"1px solid var(--border)" }}>
+                <span style={{ fontSize:13 }}>{win}</span>
+                <button onClick={() => saveIdea(win, i)} disabled={saved[i]}
+                  style={{ padding:"3px 8px", borderRadius:5, border:"none", background:saved[i]?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:10, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", flexShrink:0, marginLeft:10 }}>
+                  {saved[i] ? "✓" : "+ Board"}
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Content gaps */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)", marginBottom:14 }}>🎯 Content Gaps (Topics They Miss)</div>
+            {analysis.content_gaps?.map((gap,i) => (
+              <div key={i} style={{ padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", marginBottom:8, display:"flex", gap:12, alignItems:"flex-start" }}>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontWeight:600, fontSize:13, marginBottom:3 }}>{gap.topic}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>{gap.why_opportunity}</div>
+                  <div style={{ fontSize:11, color:"var(--amber)" }}>Your angle: {gap.angle}</div>
+                </div>
+                <button onClick={() => saveIdea(`${gap.topic} — ${gap.angle}`, 20+i)} disabled={saved[20+i]}
+                  style={{ padding:"4px 10px", borderRadius:6, border:"none", background:saved[20+i]?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", flexShrink:0 }}>
+                  {saved[20+i] ? "✓" : "+ Board"}
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Strengths/Weaknesses */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            {[
+              { key:"strengths",  label:"Their Strengths",  color:"var(--text-secondary)", icon:"👍" },
+              { key:"weaknesses", label:"Their Weaknesses", color:"#5cba6c",               icon:"🎯" },
+            ].map(({ key, label, color, icon }) => (
+              <div key={key} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color, marginBottom:10 }}>{icon} {label}</div>
+                {analysis[key]?.map((item,i) => (
+                  <div key={i} style={{ fontSize:12, padding:"6px 0", borderBottom:"1px solid var(--border)", color:"var(--text-secondary)", lineHeight:1.5 }}>{item}</div>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          {/* Keyword opportunities */}
+          {analysis.keyword_opportunities?.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7c3aed", marginBottom:10 }}>🔑 Keyword Opportunities They Miss</div>
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                {analysis.keyword_opportunities.map((kw,i) => (
+                  <span key={i} onClick={() => saveIdea(kw, 50+i)}
+                    style={{ fontSize:12, padding:"4px 10px", borderRadius:99, background:"#7c3aed15", color:"#a78bfa", border:"1px solid #7c3aed33", cursor:"pointer" }}
+                    title="Click to save to Inspiration Board">
+                    {kw} {saved[50+i] ? "✓" : "+"}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Social strategy */}
+          {analysis.social_strategy && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>📱 Social Media Analysis</div>
+              {Object.entries(analysis.social_strategy).map(([key,val]) => (
+                <div key={key} style={{ padding:"8px 0", borderBottom:"1px solid var(--border)" }}>
+                  <div style={{ fontSize:10, fontWeight:700, color:"var(--amber)", textTransform:"capitalize", marginBottom:3 }}>{key.replace(/_/g," ")}</div>
+                  <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.5 }}>{val}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -5825,14 +6401,14 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const connectedSocial    = SOCIAL_PLATFORMS.filter(p => loadSocialConnections()[p.id]?.enabled).length;
 
   const TABS = [
-    { id:"pipeline",  label:"Pipeline",  icon:"◈", highlight:true },
-    { id:"posts",     label:"Posts",     icon:"▤" },
-    { id:"analytics", label:"Analytics", icon:"◔" },
-    { id:"calendar",  label:"Calendar",  icon:"▦" },
-    { id:"research",  label:"Research",  icon:"◎" },
-    { id:"ai",        label:"AI Tools",  icon:"✦" },
-    { id:"social",    label:"Social",    icon:"▣" },
-    { id:"settings",  label:"Settings",  icon:"⚙" },
+    { id:"pipeline",  label:"Pipeline",   icon:"◈", highlight:true },
+    { id:"posts",     label:"Posts",      icon:"▤" },
+    { id:"analytics", label:"Analytics",  icon:"◔" },
+    { id:"calendar",  label:"Calendar",   icon:"▦" },
+    { id:"research",  label:"Research",   icon:"◎" },
+    { id:"ai",        label:"AI Tools",   icon:"✦" },
+    { id:"social",    label:"Marketing",  icon:"▣" },
+    { id:"settings",  label:"Settings",   icon:"⚙" },
   ];
 
   const SETTINGS_SECTIONS = [
@@ -6206,7 +6782,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
           {/* ══ SOCIAL ══ */}
           {activeTab==="social"&&(
-            <SocialStudio
+            <MarketingStudio
               activeProvider={activeProvider}
               activeModel={activeModel}
               apiKeys={apiKeys}
@@ -6214,9 +6790,11 @@ export default function Dashboard({ user, workspace, onLogout }) {
               metaConfig={metaConfig}
               posts={posts}
               inspiration={inspiration}
+              competitors={competitors}
               onAddInspiration={saveInspiration}
               handleProviderChange={handleProviderChange}
               handleModelChange={handleModelChange}
+              brandGuide={brandGuide}
             />
           )}
 
