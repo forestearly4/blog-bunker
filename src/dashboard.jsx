@@ -3526,21 +3526,23 @@ function MetaConnectPanel({ onConnected }) {
 // ─── SOCIAL STUDIO ────────────────────────────────────────────────────────────
 // Full standalone social media creation studio with sub-tabs
 
-function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide }) {
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost }) {
   const [tab, setTab] = useState("pipeline");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const scheduledCount = socialPosts.filter(p => p.status === "scheduled").length;
 
   const TABS = [
-    { id:"pipeline",  label:"Social Pipeline", icon:"◈", highlight:true },
-    { id:"create",    label:"Quick Post",       icon:"✎" },
-    { id:"email",     label:"Email",            icon:"✉" },
-    { id:"pinterest", label:"Pinterest",        icon:"📌" },
-    { id:"seo",       label:"Keyword Research", icon:"◎" },
-    { id:"research",  label:"Research",         icon:"⊕" },
-    { id:"hashtags",  label:"Hashtags",         icon:"#" },
-    { id:"image",     label:"Image Studio",     icon:"▣" },
-    { id:"ideas",     label:"Post Ideas",       icon:"✦" },
-    { id:"competitor",label:"Competitors",      icon:"⊗" },
+    { id:"pipeline",   label:"Social Pipeline",  icon:"◈", highlight:true },
+    { id:"scheduled",  label:"Social Posts",      icon:"▤", badge: socialPosts.length || null },
+    { id:"create",     label:"Quick Post",        icon:"✎" },
+    { id:"email",      label:"Email",             icon:"✉" },
+    { id:"pinterest",  label:"Pinterest",         icon:"📌" },
+    { id:"seo",        label:"Keyword Research",  icon:"◎" },
+    { id:"research",   label:"Research",          icon:"⊕" },
+    { id:"hashtags",   label:"Hashtags",          icon:"#" },
+    { id:"image",      label:"Image Studio",      icon:"▣" },
+    { id:"ideas",      label:"Post Ideas",        icon:"✦" },
+    { id:"competitor", label:"Competitors",       icon:"⊗" },
   ];
 
   return (
@@ -3561,9 +3563,20 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
             style={{ padding:"7px 14px", borderRadius:8, border:tab===t.id?"1px solid var(--amber)":"1px solid var(--border)", background:tab===t.id?"var(--amber-glow)":"transparent", color:tab===t.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5 }}>
             <span>{t.icon}</span>{t.label}
             {t.highlight && tab !== t.id && <span style={{ fontSize:8, fontWeight:700, padding:"1px 5px", borderRadius:99, background:"var(--amber)", color:"#0e0f11", marginLeft:2 }}>NEW</span>}
+            {t.badge > 0 && <span style={{ fontSize:10, fontWeight:700, padding:"1px 6px", borderRadius:99, background:tab===t.id?"var(--amber)":"var(--bg-elevated)", color:tab===t.id?"#0e0f11":"var(--text-secondary)", border:"1px solid var(--border)", marginLeft:2 }}>{t.badge}</span>}
           </button>
         ))}
       </div>
+
+      {/* ── SCHEDULED POSTS ── */}
+      {tab === "scheduled" && (
+        <SocialPostsManager
+          socialPosts={socialPosts}
+          metaConfig={metaConfig}
+          onSave={onSaveSocialPost}
+          onDelete={onDeleteSocialPost}
+        />
+      )}
 
       {/* ── SOCIAL PIPELINE ── */}
       {tab === "pipeline" && (
@@ -3575,6 +3588,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           metaConfig={metaConfig}
           inspiration={inspiration}
           onAddInspiration={onAddInspiration}
+          onSaveSocialPost={onSaveSocialPost}
         />
       )}
 
@@ -4179,6 +4193,34 @@ function loadSocialPipelineDraft() { try { return JSON.parse(localStorage.getIte
 function saveSocialPipelineDraft(d) { try { localStorage.setItem(SOCIAL_PIPELINE_STORAGE, JSON.stringify(d)); } catch {} }
 function clearSocialPipelineDraft() { try { localStorage.removeItem(SOCIAL_PIPELINE_STORAGE); } catch {} }
 
+// ─── SOCIAL POSTS STORE ───────────────────────────────────────────────────────
+const SOCIAL_POSTS_STORAGE = "bb_social_posts";
+
+function loadSocialPosts() {
+  try { return JSON.parse(localStorage.getItem(SOCIAL_POSTS_STORAGE) || "[]"); }
+  catch { return []; }
+}
+
+function saveSocialPostsToStorage(posts) {
+  try { localStorage.setItem(SOCIAL_POSTS_STORAGE, JSON.stringify(posts)); } catch {}
+}
+
+function createSocialPost({ platforms, captions, hashtags, imageUrl, imagePrompt, scheduledAt, status = "draft" }) {
+  return {
+    id:          Date.now(),
+    platforms,
+    captions,       // { instagram: "...", facebook: "..." }
+    hashtags,
+    imageUrl,
+    imagePrompt,
+    status,         // "draft" | "scheduled" | "published"
+    scheduledAt,    // ISO string or null
+    createdAt:   new Date().toISOString(),
+    publishedAt: null,
+    results:     {},  // { instagram: { success, id }, facebook: { success, id } }
+  };
+}
+
 const SOCIAL_STAGES = [
   { id:"idea",     num:1, label:"Idea",     icon:"✦", desc:"Pick or write a concept" },
   { id:"caption",  num:2, label:"Caption",  icon:"✎", desc:"Write the post"          },
@@ -4216,7 +4258,7 @@ function SocialPipelineProgress({ stage, setStage, completed }) {
   );
 }
 
-function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration }) {
+function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost }) {
   let saved = loadSocialPipelineDraft();
 
   // Migrate old single-platform draft schema (idea.platform: string) to new multi-platform (idea.platforms: array)
@@ -4392,6 +4434,38 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
   // ── STAGE 5: PUBLISH (one pass per selected platform) ───────────────────────
 
+  const [scheduleMode, setScheduleMode] = useState("now"); // "now" | "schedule" | "draft"
+  const [scheduleDate, setScheduleDate] = useState(() => {
+    const d = new Date(); d.setHours(d.getHours() + 1, 0, 0, 0);
+    return d.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM" for datetime-local input
+  });
+
+  const buildSocialPostRecord = (status, scheduledAt = null) => createSocialPost({
+    platforms: idea.platforms,
+    captions,
+    hashtags: hashtags.selected,
+    imageUrl: imageData.url,
+    imagePrompt: imageData.prompt,
+    scheduledAt,
+    status,
+  });
+
+  const handleSaveAsDraft = () => {
+    const post = buildSocialPostRecord("draft");
+    if (onSaveSocialPost) onSaveSocialPost(post);
+    setSuccess("✓ Saved as draft — find it in Social Posts tab.");
+    markDone("publish");
+    clearSocialPipelineDraft();
+  };
+
+  const handleSchedule = () => {
+    const post = buildSocialPostRecord("scheduled", scheduleDate);
+    if (onSaveSocialPost) onSaveSocialPost(post);
+    setSuccess(`✓ Scheduled for ${new Date(scheduleDate).toLocaleString([], {dateStyle:"medium",timeStyle:"short"})}`);
+    markDone("publish");
+    clearSocialPipelineDraft();
+  };
+
   const handlePublish = async () => {
     setLoading(true); setError(""); setSuccess(""); setPublishResults({});
     const results = {};
@@ -4416,8 +4490,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
           results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
 
         } else {
-          // No direct connection — copy to clipboard as fallback (only most recent platform wins clipboard, but we note it)
-          results[plat.id] = { success: "manual", message: `Not connected — copy & paste manually${imageData.url ? " (download image too)" : ""}` };
+          results[plat.id] = { success: "manual", message: `Not connected — copy & paste manually` };
         }
       } catch(e) {
         results[plat.id] = { success: false, message: e.message };
@@ -4425,21 +4498,22 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       setPublishResults({ ...results });
     }
 
-    // Copy the first manual-fallback platform's content to clipboard for convenience
     const manualPlat = selectedPlatforms.find(p => results[p.id]?.success === "manual");
-    if (manualPlat) {
-      navigator.clipboard.writeText(`${captions[manualPlat.id]?.text || ""}\n\n${hashtags.selected}`);
-    }
+    if (manualPlat) navigator.clipboard.writeText(`${captions[manualPlat.id]?.text || ""}\n\n${hashtags.selected}`);
 
     const allOk = selectedPlatforms.every(p => results[p.id]?.success === true || results[p.id]?.success === "manual");
     if (allOk) {
+      // Save a "published" record
+      const post = buildSocialPostRecord("published");
+      post.publishedAt = new Date().toISOString();
+      post.results = results;
+      if (onSaveSocialPost) onSaveSocialPost(post);
       setSuccess(`Done! ${selectedPlatforms.length > 1 ? `Processed ${selectedPlatforms.length} platforms.` : ""}`);
       markDone("publish");
       clearSocialPipelineDraft();
     } else {
       setError("Some platforms failed — see results below. You can retry.");
     }
-
     setLoading(false); setLoadMsg("");
   };
 
@@ -4784,13 +4858,58 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                     ? "● Connected platforms publish directly. Others copy to clipboard for manual posting."
                     : "⚠ No platforms connected for direct publishing — captions will copy to clipboard. Connect in Settings → Facebook & Instagram."}
                 </div>
-              </div>
 
-              <div style={{ display:"flex", gap:10 }}>
-                <button onClick={handlePublish} disabled={loading} style={{ ...btnA, background:loading?"var(--bg-elevated)":"#5cba6c", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
-                  {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `↑ Publish to ${selectedPlatforms.length} Platform${selectedPlatforms.length>1?"s":""}`}
-                </button>
-                <button onClick={() => setStage("image")} style={btnS}>← Back to Image</button>
+                {/* Action mode selector */}
+                <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:18 }}>
+                  <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>When to post?</div>
+                  <div style={{ display:"flex", gap:6, marginBottom:14 }}>
+                    {[["now","↑ Publish Now","#5cba6c"],["schedule","⏰ Schedule","var(--amber)"],["draft","📋 Save as Draft","var(--text-secondary)"]].map(([id,label,color]) => (
+                      <button key={id} onClick={() => setScheduleMode(id)}
+                        style={{ padding:"7px 16px", borderRadius:8, border:scheduleMode===id?`1px solid ${color}`:"1px solid var(--border)", background:scheduleMode===id?color+"18":"transparent", color:scheduleMode===id?color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {scheduleMode === "schedule" && (
+                    <div style={{ marginBottom:14 }}>
+                      <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Schedule Date & Time</label>
+                      <input type="datetime-local" value={scheduleDate} onChange={e=>setScheduleDate(e.target.value)}
+                        style={{ padding:"8px 12px", borderRadius:8, border:"1px solid var(--amber)44", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none" }} />
+                      <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"6px 0 0", lineHeight:1.5 }}>
+                        Blog Bunker will remind you when it's time to post. Auto-publishing from the web is coming soon.
+                      </p>
+                    </div>
+                  )}
+
+                  {scheduleMode === "draft" && (
+                    <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 14px", lineHeight:1.5 }}>
+                      Save everything — captions, hashtags, image — to Social Posts. Come back and publish anytime.
+                    </p>
+                  )}
+
+                  <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                    {scheduleMode === "now" && (
+                      <button onClick={handlePublish} disabled={loading}
+                        style={{ ...btnA, background:loading?"var(--bg-elevated)":"#5cba6c", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
+                        {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `↑ Publish to ${selectedPlatforms.length} Platform${selectedPlatforms.length>1?"s":""}`}
+                      </button>
+                    )}
+                    {scheduleMode === "schedule" && (
+                      <button onClick={handleSchedule} disabled={!scheduleDate}
+                        style={{ ...btnA, background:!scheduleDate?"var(--bg-elevated)":"var(--amber)", color:!scheduleDate?"var(--muted)":"#0e0f11" }}>
+                        ⏰ Schedule Post
+                      </button>
+                    )}
+                    {scheduleMode === "draft" && (
+                      <button onClick={handleSaveAsDraft}
+                        style={{ ...btnA, background:"var(--bg-elevated)", color:"var(--text-secondary)", border:"1px solid var(--border)" }}>
+                        📋 Save as Draft
+                      </button>
+                    )}
+                    <button onClick={() => setStage("image")} style={btnS}>← Back to Image</button>
+                  </div>
+                </div>
               </div>
             </>
           )}
@@ -5495,6 +5614,188 @@ My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── SOCIAL POSTS MANAGER ─────────────────────────────────────────────────────
+
+function SocialPostsManager({ socialPosts, metaConfig, onSave, onDelete }) {
+  const [filter,   setFilter]   = useState("all");
+  const [expanded, setExpanded] = useState(null);
+  const [posting,  setPosting]  = useState({});
+  const [postResults, setPostResults] = useState({});
+
+  const PLATFORMS = [
+    { id:"instagram", label:"Instagram", color:"#e1306c", icon:"📸" },
+    { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
+    { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
+    { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
+  ];
+
+  const filtered = filter === "all" ? socialPosts : socialPosts.filter(p => p.status === filter);
+  const counts = { all: socialPosts.length, draft: socialPosts.filter(p=>p.status==="draft").length, scheduled: socialPosts.filter(p=>p.status==="scheduled").length, published: socialPosts.filter(p=>p.status==="published").length };
+
+  const statusColor = { draft:"var(--muted)", scheduled:"var(--amber)", published:"#5cba6c" };
+  const statusIcon  = { draft:"📋", scheduled:"⏰", published:"✓" };
+
+  const publishNow = async (post) => {
+    setPosting(p => ({ ...p, [post.id]: true }));
+    const results = {};
+    const selectedPlats = PLATFORMS.filter(p => post.platforms?.includes(p.id));
+
+    for (const plat of selectedPlats) {
+      const captionText = post.captions?.[plat.id] || "";
+      const fullMessage = `${captionText}\n\n${post.hashtags || ""}`;
+      try {
+        if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
+          const page = metaConfig.pages[0];
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: post.imageUrl, platforms: ["facebook"] });
+          results[plat.id] = res.facebook?.success ? "✓ Posted" : `Error: ${res.facebook?.error}`;
+        } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
+          const page = metaConfig.pages.find(p => p.instagram_id);
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: post.imageUrl, platforms: ["instagram"] });
+          results[plat.id] = res.instagram?.success ? "✓ Posted" : `Error: ${res.instagram?.error}`;
+        } else {
+          navigator.clipboard.writeText(fullMessage);
+          results[plat.id] = "Copied to clipboard";
+        }
+      } catch(e) { results[plat.id] = `Error: ${e.message}`; }
+    }
+
+    setPostResults(r => ({ ...r, [post.id]: results }));
+    const allOk = Object.values(results).every(r => r.startsWith("✓") || r === "Copied to clipboard");
+    if (allOk) onSave({ ...post, status:"published", publishedAt: new Date().toISOString(), results });
+    setPosting(p => ({ ...p, [post.id]: false }));
+  };
+
+  if (socialPosts.length === 0) {
+    return (
+      <div style={{ textAlign:"center", padding:"60px 20px", color:"var(--muted)" }}>
+        <div style={{ fontSize:40, marginBottom:16 }}>📋</div>
+        <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8, color:"var(--text)" }}>No Social Posts Yet</h3>
+        <p style={{ fontSize:13, lineHeight:1.6 }}>Use the Social Pipeline to create posts, then save them as drafts or schedule them for later.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Social Posts</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Manage your saved, scheduled, and published social posts.</p>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div style={{ display:"flex", gap:6 }}>
+        {Object.entries(counts).map(([key, count]) => (
+          <button key={key} onClick={() => setFilter(key)}
+            style={{ padding:"5px 14px", borderRadius:99, border:filter===key?"1px solid var(--amber)":"1px solid var(--border)", background:filter===key?"var(--amber-glow)":"transparent", color:filter===key?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
+            {key} ({count})
+          </button>
+        ))}
+      </div>
+
+      {/* Post list */}
+      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+        {filtered.map(post => {
+          const isExpanded = expanded === post.id;
+          const platIcons = (post.platforms || []).map(id => PLATFORMS.find(p=>p.id===id)?.icon || "📱").join(" ");
+          const scheduledDate = post.scheduledAt ? new Date(post.scheduledAt) : null;
+          const isOverdue = scheduledDate && scheduledDate < new Date() && post.status === "scheduled";
+
+          return (
+            <div key={post.id} style={{ background:"var(--bg-surface)", border:`1px solid ${isOverdue?"var(--amber)44":"var(--border)"}`, borderRadius:12, overflow:"hidden" }}>
+              {/* Post header */}
+              <div style={{ padding:"14px 18px", display:"flex", alignItems:"center", gap:12, cursor:"pointer" }}
+                onClick={() => setExpanded(isExpanded ? null : post.id)}>
+                <div style={{ fontSize:18 }}>{platIcons}</div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontWeight:600, fontSize:13, marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    {Object.values(post.captions || {})[0]?.slice(0,80) || "Untitled post"}…
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)", display:"flex", gap:8 }}>
+                    <span style={{ color:statusColor[post.status], fontWeight:600 }}>{statusIcon[post.status]} {post.status}</span>
+                    {scheduledDate && <span>{isOverdue ? "⚠ Overdue: " : "🕐 "}{scheduledDate.toLocaleString([], {dateStyle:"medium",timeStyle:"short"})}</span>}
+                    <span>{new Date(post.createdAt).toLocaleDateString()}</span>
+                  </div>
+                </div>
+                <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                  {post.status !== "published" && (
+                    <button onClick={e=>{ e.stopPropagation(); publishNow(post); }} disabled={posting[post.id]}
+                      style={{ padding:"5px 12px", borderRadius:7, border:"none", background:posting[post.id]?"var(--bg-elevated)":"#5cba6c", color:posting[post.id]?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:posting[post.id]?"not-allowed":"pointer", fontFamily:"var(--font-body)" }}>
+                      {posting[post.id] ? "◌" : "↑ Post Now"}
+                    </button>
+                  )}
+                  <button onClick={e=>{ e.stopPropagation(); onDelete(post.id); }}
+                    style={{ padding:"5px 10px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    🗑
+                  </button>
+                  <span style={{ fontSize:14, color:"var(--muted)", display:"flex", alignItems:"center" }}>{isExpanded ? "▲" : "▼"}</span>
+                </div>
+              </div>
+
+              {/* Expanded detail */}
+              {isExpanded && (
+                <div style={{ borderTop:"1px solid var(--border)", padding:"16px 18px", display:"flex", flexDirection:"column", gap:14 }}>
+                  {/* Per-platform captions */}
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                    {(post.platforms || []).map(platId => {
+                      const plat = PLATFORMS.find(p=>p.id===platId);
+                      return (
+                        <div key={platId} style={{ background:"var(--bg-elevated)", borderRadius:8, padding:12 }}>
+                          <div style={{ fontSize:10, fontWeight:700, color:plat?.color||"var(--amber)", marginBottom:6 }}>{plat?.icon} {plat?.label}</div>
+                          <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6, whiteSpace:"pre-wrap" }}>
+                            {post.captions?.[platId] || "—"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Hashtags */}
+                  {post.hashtags && (
+                    <div style={{ fontSize:12, color:"var(--amber)", lineHeight:1.6 }}>{post.hashtags}</div>
+                  )}
+
+                  {/* Image */}
+                  {post.imageUrl && (
+                    <img src={post.imageUrl} alt="" style={{ maxWidth:300, borderRadius:8, border:"1px solid var(--border)" }} />
+                  )}
+
+                  {/* Publish results */}
+                  {postResults[post.id] && (
+                    <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                      {Object.entries(postResults[post.id]).map(([platId, result]) => (
+                        <div key={platId} style={{ fontSize:11, color:result.startsWith("✓")?"#5cba6c":"var(--red)" }}>
+                          {PLATFORMS.find(p=>p.id===platId)?.icon} {result}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Change status */}
+                  <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                    <span style={{ fontSize:11, color:"var(--muted)" }}>Status:</span>
+                    <select value={post.status} onChange={e => onSave({ ...post, status: e.target.value })}
+                      style={{ padding:"4px 10px", borderRadius:6, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", cursor:"pointer" }}>
+                      <option value="draft">Draft</option>
+                      <option value="scheduled">Scheduled</option>
+                      <option value="published">Published</option>
+                    </select>
+                    {post.status === "scheduled" && (
+                      <input type="datetime-local" value={post.scheduledAt?.slice(0,16) || ""} onChange={e => onSave({ ...post, scheduledAt: e.target.value })}
+                        style={{ padding:"4px 10px", borderRadius:6, border:"1px solid var(--amber)44", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)" }} />
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -6315,8 +6616,26 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const deleteCalEvent = (idx) => setCalEvents(all => all.filter((_, i) => i !== idx));
 
   const [gscData,     setGscData]     = useState(loadGSCData);
-  const [metaConfig,  setMetaConfig]  = useState(loadMetaConfig);
-  const [brandGuide,  setBrandGuide]  = useState(loadBrandGuide);
+  const [metaConfig,   setMetaConfig]   = useState(loadMetaConfig);
+  const [brandGuide,   setBrandGuide]   = useState(loadBrandGuide);
+  const [socialPosts,  setSocialPosts]  = useState(loadSocialPosts);
+
+  const saveSocialPost = (post) => {
+    setSocialPosts(all => {
+      const idx = all.findIndex(p => p.id === post.id);
+      const next = idx >= 0 ? all.map(p => p.id===post.id ? post : p) : [post, ...all];
+      saveSocialPostsToStorage(next);
+      return next;
+    });
+  };
+
+  const deleteSocialPost = (id) => {
+    setSocialPosts(all => {
+      const next = all.filter(p => p.id !== id);
+      saveSocialPostsToStorage(next);
+      return next;
+    });
+  };
   const [wixConnected, setWixConnected] = useState(() => !!loadWixConfig().connected);
 
   // Re-check wix connection state whenever settings tab is visited
@@ -6790,6 +7109,9 @@ export default function Dashboard({ user, workspace, onLogout }) {
               handleProviderChange={handleProviderChange}
               handleModelChange={handleModelChange}
               brandGuide={brandGuide}
+              socialPosts={socialPosts}
+              onSaveSocialPost={saveSocialPost}
+              onDeleteSocialPost={deleteSocialPost}
             />
           )}
 
