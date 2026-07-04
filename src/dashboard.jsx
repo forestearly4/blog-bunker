@@ -732,6 +732,45 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
 
 // ─── SOCIAL POST GENERATOR ────────────────────────────────────────────────────
 
+function FacebookPostButton({ page, caption }) {
+  const [posting, setPosting] = useState(false);
+  const [result,  setResult]  = useState("");
+  const post = async () => {
+    setPosting(true); setResult("");
+    try {
+      const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: caption, platforms: ["facebook"] });
+      setResult(res.facebook?.success ? "✓ Posted!" : `Error: ${res.facebook?.error}`);
+    } catch(e) { setResult(`Error: ${e.message}`); }
+    setPosting(false);
+  };
+  return (
+    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+      <button onClick={post} disabled={posting || !caption}
+        style={{ padding:"7px 16px", borderRadius:7, border:"none", background:posting||!caption?"var(--bg-elevated)":"#1877f2", color:posting||!caption?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:posting||!caption?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+        {posting ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Posting…</> : "↑ Post to Facebook"}
+      </button>
+      {result && <span style={{ fontSize:11, color:result.startsWith("✓")?"var(--green)":"var(--red)" }}>{result}</span>}
+    </div>
+  );
+}
+
+function InstagramPostButton({ page, caption }) {
+  const [posting, setPosting] = useState(false);
+  const [result,  setResult]  = useState("");
+  const post = async () => {
+    setResult("Instagram requires an image — generate one first in the ▣ Image section below.");
+  };
+  return (
+    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+      <button onClick={post} disabled={posting || !caption}
+        style={{ padding:"7px 16px", borderRadius:7, border:"none", background:posting||!caption?"var(--bg-elevated)":"#e1306c", color:posting||!caption?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:posting||!caption?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+        {posting ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Posting…</> : "↑ Post to Instagram"}
+      </button>
+      {result && <span style={{ fontSize:11, color:"var(--amber)" }}>{result}</span>}
+    </div>
+  );
+}
+
 function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig = {} }) {
   const [input,       setInput]       = useState("");
   const [inputMode,   setInputMode]   = useState("topic");
@@ -895,56 +934,12 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig 
 
               {/* Action buttons */}
               <div style={{ display:"flex", gap:8, marginTop:16, flexWrap:"wrap" }}>
-                {/* Facebook direct post */}
-                {(plat.id === "facebook") && metaConfig?.connected && metaConfig?.pages?.length > 0 && (() => {
-                  const [posting, setPosting] = useState(false);
-                  const [postResult, setPostResult] = useState("");
-                  const page = metaConfig.pages[0]; // Use first page
-                  const post = async () => {
-                    setPosting(true); setPostResult("");
-                    try {
-                      const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: posts[plat.id] || "", platforms: ["facebook"] });
-                      setPostResult(res.facebook?.success ? "✓ Posted to Facebook!" : `Error: ${res.facebook?.error}`);
-                    } catch(e) { setPostResult(`Error: ${e.message}`); }
-                    setPosting(false);
-                  };
-                  return (
-                    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-                      <button onClick={post} disabled={posting || !posts[plat.id]}
-                        style={{ padding:"7px 16px", borderRadius:7, border:"none", background:posting||!posts[plat.id]?"var(--bg-elevated)":"#1877f2", color:posting||!posts[plat.id]?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:posting||!posts[plat.id]?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-                        {posting ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Posting…</> : "↑ Post to Facebook"}
-                      </button>
-                      {postResult && <span style={{ fontSize:11, color:postResult.startsWith("✓")?"var(--green)":"var(--red)" }}>{postResult}</span>}
-                    </div>
-                  );
-                })()}
-
-                {/* Instagram direct post */}
-                {(plat.id === "instagram") && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id) && (() => {
-                  const [posting, setPosting] = useState(false);
-                  const [postResult, setPostResult] = useState("");
-                  const page = metaConfig.pages.find(p => p.instagram_id);
-                  const post = async (imageUrl) => {
-                    if (!imageUrl) { setPostResult("Generate an image first — Instagram requires a photo."); return; }
-                    setPosting(true); setPostResult("");
-                    try {
-                      const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: posts[plat.id] || "", imageUrl, platforms: ["instagram"] });
-                      setPostResult(res.instagram?.success ? "✓ Posted to Instagram!" : `Error: ${res.instagram?.error}`);
-                    } catch(e) { setPostResult(`Error: ${e.message}`); }
-                    setPosting(false);
-                  };
-                  return (
-                    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-                      <button onClick={()=> post(null)} disabled={posting || !posts[plat.id]}
-                        style={{ padding:"7px 16px", borderRadius:7, border:"none", background:posting||!posts[plat.id]?"var(--bg-elevated)":"#e1306c", color:posting||!posts[plat.id]?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:posting||!posts[plat.id]?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-                        {posting ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Posting…</> : "↑ Post to Instagram"}
-                      </button>
-                      {postResult && <span style={{ fontSize:11, color:postResult.startsWith("✓")?"var(--green)":"var(--red)" }}>{postResult}</span>}
-                    </div>
-                  );
-                })()}
-
-                {/* Fallback copy button */}
+                {plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0 && (
+                  <FacebookPostButton page={metaConfig.pages[0]} caption={posts[plat.id] || ""} />
+                )}
+                {plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id) && (
+                  <InstagramPostButton page={metaConfig.pages.find(p=>p.instagram_id)} caption={posts[plat.id] || ""} />
+                )}
                 {(!metaConfig?.connected || (plat.id !== "facebook" && plat.id !== "instagram")) && (
                   <button onClick={()=>handleCopy(plat.id, posts[plat.id])}
                     style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${plat.color}44`, background:"transparent", color:plat.color, fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
