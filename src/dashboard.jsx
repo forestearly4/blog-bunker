@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
@@ -3563,6 +3563,28 @@ function MetaConnectPanel({ onConnected }) {
 // ─── SOCIAL STUDIO ────────────────────────────────────────────────────────────
 // Full standalone social media creation studio with sub-tabs
 
+class MarketingErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("Marketing tab crash:", error, info?.componentStack?.slice(0,500)); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding:24, borderRadius:12, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13, lineHeight:1.7 }}>
+          <div style={{ fontWeight:700, marginBottom:8 }}>Marketing tab error — check browser console for details</div>
+          <div style={{ fontFamily:"monospace", fontSize:11, color:"var(--text-secondary)", background:"var(--bg-elevated)", padding:12, borderRadius:8, whiteSpace:"pre-wrap" }}>
+            {this.state.error?.message}
+          </div>
+          <button onClick={() => this.setState({ error: null })} style={{ marginTop:12, padding:"6px 16px", borderRadius:7, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer" }}>
+            Try Again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost }) {
   const [tab, setTab] = useState("pipeline");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
@@ -5679,7 +5701,7 @@ My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
 
 // ─── SOCIAL POSTS MANAGER ─────────────────────────────────────────────────────
 
-function SocialPostsManager({ socialPosts, metaConfig, onSave, onDelete }) {
+function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) {
   const [filter,   setFilter]   = useState("all");
   const [expanded, setExpanded] = useState(null);
   const [posting,  setPosting]  = useState({});
@@ -7655,23 +7677,25 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
           {/* ══ SOCIAL ══ */}
           {activeTab==="social"&&(
-            <MarketingStudio
-              activeProvider={activeProvider}
-              activeModel={activeModel}
-              apiKeys={apiKeys}
-              dark={dark}
-              metaConfig={metaConfig}
-              posts={posts}
-              inspiration={inspiration}
-              competitors={competitors}
-              onAddInspiration={saveInspiration}
-              handleProviderChange={handleProviderChange}
-              handleModelChange={handleModelChange}
-              brandGuide={brandGuide}
-              socialPosts={socialPosts}
-              onSaveSocialPost={saveSocialPost}
-              onDeleteSocialPost={deleteSocialPost}
-            />
+            <MarketingErrorBoundary>
+              <MarketingStudio
+                activeProvider={activeProvider}
+                activeModel={activeModel}
+                apiKeys={apiKeys}
+                dark={dark}
+                metaConfig={metaConfig}
+                posts={posts}
+                inspiration={inspiration}
+                competitors={competitors}
+                onAddInspiration={saveInspiration}
+                handleProviderChange={handleProviderChange}
+                handleModelChange={handleModelChange}
+                brandGuide={brandGuide}
+                socialPosts={socialPosts}
+                onSaveSocialPost={saveSocialPost}
+                onDeleteSocialPost={deleteSocialPost}
+              />
+            </MarketingErrorBoundary>
           )}
 
           {/* ══ SETTINGS ══ */}
