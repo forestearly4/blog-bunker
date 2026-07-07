@@ -4763,33 +4763,47 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
             </div>
 
             {!imageData.url && !loading && (
-              <div style={{ height:160, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:10, marginBottom:14 }}>
-                <span style={{ fontSize:28, opacity:0.3 }}>▣</span>
-                <button onClick={openImagePromptPreview} disabled={!imageData.imgProvider}
-                  style={{ padding:"8px 20px", borderRadius:8, border:"none", background:imageData.imgProvider?"#7c3aed":"var(--bg-elevated)", color:imageData.imgProvider?"#fff":"var(--muted)", fontSize:12, fontWeight:700, cursor:imageData.imgProvider?"pointer":"not-allowed", fontFamily:"var(--font-body)" }}>
-                  ▣ Generate Image
-                </button>
+              <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
+                {/* Generate option */}
+                <div style={{ height:130, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:10 }}>
+                  <span style={{ fontSize:24, opacity:0.3 }}>▣</span>
+                  <button onClick={openImagePromptPreview} disabled={!imageData.imgProvider}
+                    style={{ padding:"8px 20px", borderRadius:8, border:"none", background:imageData.imgProvider?"#7c3aed":"var(--bg-elevated)", color:imageData.imgProvider?"#fff":"var(--muted)", fontSize:12, fontWeight:700, cursor:imageData.imgProvider?"pointer":"not-allowed", fontFamily:"var(--font-body)" }}>
+                    ▣ Generate Image
+                  </button>
+                </div>
+
+                {/* Library picker */}
+                <LibraryImagePicker onSelect={(url) => setImageData(d=>({...d, url, prompt:"from library"}))} />
               </div>
             )}
 
             {imageData.url && (
-              <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)", marginBottom:14 }}>
-                <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
-                <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
-                  <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-post-${Date.now()}.webp`; a.click(); }}
-                    style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                    ↓ Download
-                  </button>
-                  <button onClick={regenerateImageWithPrompt}
-                    style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                    ↻ New
-                  </button>
-                  <SaveToLibraryButton imageUrl={imageData.url} tags={[...idea.platforms, "generated"]} name={idea.topic?.slice(0,30) || "social-post"} />
+              <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
+                <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)" }}>
+                  <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
+                  <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
+                    <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-post-${Date.now()}.webp`; a.click(); }}
+                      style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      ↓ Download
+                    </button>
+                    <button onClick={regenerateImageWithPrompt}
+                      style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      ↻ New
+                    </button>
+                    <button onClick={() => setImageData(d=>({...d,url:null,prompt:""}))}
+                      style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      ✕ Remove
+                    </button>
+                    <SaveToLibraryButton imageUrl={imageData.url} tags={[...idea.platforms, "generated"]} name={idea.topic?.slice(0,30) || "social-post"} />
+                  </div>
                 </div>
+                {/* Allow swapping even with image selected */}
+                <LibraryImagePicker onSelect={(url) => setImageData(d=>({...d, url, prompt:"from library"}))} compact />
               </div>
             )}
 
-            {imageData.prompt && (
+            {imageData.prompt && imageData.prompt !== "from library" && (
               <div>
                 <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Prompt (editable)</label>
                 <div style={{ display:"flex", gap:8 }}>
@@ -6140,6 +6154,82 @@ function MediaLibrary() {
   );
 }
 
+// ─── LIBRARY IMAGE PICKER ─────────────────────────────────────────────────────
+// Inline picker for selecting an image from the Media Library.
+// Used in Social Pipeline image stage, HeadlineImagePanel, etc.
+
+function LibraryImagePicker({ onSelect, compact = false }) {
+  const [open,    setOpen]   = useState(false);
+  const [filter,  setFilter] = useState("all");
+  const [search,  setSearch] = useState("");
+  const items = loadMediaLibrary();
+
+  const filtered = items.filter(item => {
+    const typeMatch  = filter === "all" || item.tags?.includes(filter);
+    const searchMatch = !search || item.name?.toLowerCase().includes(search.toLowerCase());
+    return typeMatch && searchMatch;
+  });
+
+  const tags = ["all", ...new Set(items.flatMap(i => i.tags || []))].slice(0, 8);
+
+  if (items.length === 0) return null;
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)}
+        style={{ padding: compact ? "5px 14px" : "8px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+        🖼 {compact ? "Swap from Library" : `Choose from Library (${items.length})`}
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:16 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+        <div style={{ fontSize:12, fontWeight:700, color:"var(--amber)" }}>🖼 Media Library — {items.length} images</div>
+        <button onClick={() => setOpen(false)} style={{ background:"transparent", border:"none", color:"var(--muted)", fontSize:16, cursor:"pointer", padding:2, lineHeight:1 }}>✕</button>
+      </div>
+
+      {/* Search */}
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…"
+        style={{ width:"100%", padding:"7px 12px", borderRadius:7, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box", marginBottom:10 }} />
+
+      {/* Tag filters */}
+      <div style={{ display:"flex", gap:5, flexWrap:"wrap", marginBottom:12 }}>
+        {tags.map(tag => (
+          <button key={tag} onClick={() => setFilter(tag)}
+            style={{ padding:"3px 10px", borderRadius:99, border:filter===tag?"1px solid var(--amber)":"1px solid var(--border)", background:filter===tag?"var(--amber-glow)":"transparent", color:filter===tag?"var(--amber)":"var(--text-secondary)", fontSize:10, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
+            {tag}
+          </button>
+        ))}
+      </div>
+
+      {/* Grid */}
+      {filtered.length === 0 ? (
+        <div style={{ textAlign:"center", padding:"20px", color:"var(--muted)", fontSize:12 }}>No images match.</div>
+      ) : (
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(90px,1fr))", gap:8, maxHeight:260, overflow:"auto" }}>
+          {filtered.map(item => (
+            <div key={item.id} onClick={() => { onSelect(item.dataUrl); setOpen(false); }}
+              style={{ position:"relative", borderRadius:8, overflow:"hidden", border:"1px solid var(--border)", cursor:"pointer", aspectRatio:"1" }}
+              onMouseEnter={e=>{ e.currentTarget.style.borderColor="var(--amber)"; e.currentTarget.querySelector(".overlay").style.opacity="1"; }}
+              onMouseLeave={e=>{ e.currentTarget.style.borderColor="var(--border)"; e.currentTarget.querySelector(".overlay").style.opacity="0"; }}>
+              <img src={item.dataUrl} alt={item.name} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+              <div className="overlay" style={{ position:"absolute", inset:0, background:"rgba(196,124,43,0.8)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"#0e0f11", opacity:0, transition:"opacity 0.15s" }}>
+                Use This
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ fontSize:10, color:"var(--muted)", marginTop:10, lineHeight:1.5 }}>
+        Click any image to use it. Add more in Marketing → Media Library.
+      </div>
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -6272,11 +6362,14 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
           </div>
         </div>
       ) : !loading && (
-        <div style={{ height:160, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:8 }}>
-          <span style={{ fontSize:32, opacity:0.25 }}>🖼</span>
-          <span style={{ fontSize:12, color:"var(--muted)" }}>
-            {!provider ? "Add Stability AI, OpenAI, or Gemini key in Settings" : !title?.trim() ? "Enter a title first" : "Click Generate to create your headline image"}
-          </span>
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          <div style={{ height:130, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:8 }}>
+            <span style={{ fontSize:28, opacity:0.25 }}>🖼</span>
+            <span style={{ fontSize:12, color:"var(--muted)" }}>
+              {!provider ? "Add Stability AI, OpenAI, or Gemini key in Settings" : !title?.trim() ? "Enter a title first" : "Click Generate to create your headline image"}
+            </span>
+          </div>
+          {title?.trim() && <LibraryImagePicker onSelect={(url) => { setImageUrl(url); setPrompt("from library"); }} />}
         </div>
       )}
 
