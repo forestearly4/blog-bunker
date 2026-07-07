@@ -6797,11 +6797,25 @@ function AddInspirationModal({ onSave, onClose }) {
         </div>
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Type</label>
-          <div style={{ display:"flex", gap:6 }}>
-            {["article","thread","visual","video","podcast"].map(t => (
-              <button key={t} onClick={()=>setForm(f=>({...f,type:t}))}
-                style={{ padding:"6px 12px", borderRadius:99, border:form.type===t?"1px solid var(--amber)":"1px solid var(--border)", background:form.type===t?"var(--amber-glow)":"transparent", color:form.type===t?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textTransform:"capitalize" }}>
-                {t}
+          <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+            {[
+              { id:"article",   label:"Article",   icon:"📄" },
+              { id:"instagram", label:"Instagram", icon:"📸" },
+              { id:"facebook",  label:"Facebook",  icon:"👍" },
+              { id:"tiktok",    label:"TikTok",    icon:"🎵" },
+              { id:"twitter",   label:"X",         icon:"🐦" },
+              { id:"pinterest", label:"Pinterest", icon:"📌" },
+              { id:"youtube",   label:"YouTube",   icon:"▶" },
+              { id:"podcast",   label:"Podcast",   icon:"🎙" },
+              { id:"email",     label:"Email",     icon:"✉" },
+              { id:"visual",    label:"Visual",    icon:"🖼" },
+              { id:"thread",    label:"Thread",    icon:"💬" },
+              { id:"keyword",   label:"Keyword",   icon:"◎" },
+              { id:"video",     label:"Video",     icon:"🎬" },
+            ].map(t => (
+              <button key={t.id} onClick={()=>setForm(f=>({...f,type:t.id}))}
+                style={{ padding:"5px 10px", borderRadius:99, border:form.type===t.id?"1px solid var(--amber)":"1px solid var(--border)", background:form.type===t.id?"var(--amber-glow)":"transparent", color:form.type===t.id?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:4 }}>
+                <span>{t.icon}</span>{t.label}
               </button>
             ))}
           </div>
@@ -7350,37 +7364,118 @@ export default function Dashboard({ user, workspace, onLogout }) {
               {researchTab==="inspiration"&&(
                 <div>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-                    <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:0}}>Inspiration Board</h2>
+                    <div>
+                      <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:"0 0 4px"}}>Inspiration Board</h2>
+                      <p style={{fontSize:12,color:"var(--text-secondary)",margin:0}}>{inspiration.length} idea{inspiration.length!==1?"s":""} saved</p>
+                    </div>
                     <button onClick={()=>setAddInspirationOpen(true)} style={btnP}>+ Save New</button>
                   </div>
-                  <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                    {inspiration.map(item=>{
-                      const tc={article:{icon:"📄",color:"var(--amber)"},thread:{icon:"💬",color:fixedGreen},visual:{icon:"📸",color:"#7c8abf"},video:{icon:"▶",color:"var(--red)"},podcast:{icon:"🎙",color:"#a78bfa"}};
-                      const t=tc[item.type]||tc.article;
-                      return (
-                        <div key={item.id} style={{...card,padding:18,display:"flex",gap:16,alignItems:"flex-start"}}>
-                          <div style={{width:40,height:40,borderRadius:10,background:t.color+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{t.icon}</div>
-                          <div style={{flex:1}}>
-                            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                              <span style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",color:t.color}}>{item.type}</span>
-                              <span style={{fontSize:11,color:"var(--text-secondary)"}}>from {item.source}</span>
-                            </div>
-                            <div style={{fontSize:14,fontWeight:600,marginBottom:4}}>{item.title}</div>
-                            {item.notes&&<div style={{fontSize:12,color:"var(--text-secondary)",fontStyle:"italic"}}>💡 {item.notes}</div>}
-                          </div>
-                          <div style={{display:"flex",gap:6,flexShrink:0}}>
-                            <button onClick={()=>inspirationToDraft(item)} style={{...btnS,fontSize:11,padding:"5px 10px"}}>→ Draft</button>
-                            <button onClick={()=>deleteInspiration(item.id)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14,padding:"5px"}} title="Remove">✕</button>
-                          </div>
+
+                  {/* Filter bar */}
+                  {inspiration.length > 0 && (() => {
+                    const ALL_TYPES = [
+                      { id:"all",       label:"All",       icon:"◈" },
+                      { id:"article",   label:"Article",   icon:"📄" },
+                      { id:"instagram", label:"Instagram", icon:"📸" },
+                      { id:"facebook",  label:"Facebook",  icon:"👍" },
+                      { id:"tiktok",    label:"TikTok",    icon:"🎵" },
+                      { id:"twitter",   label:"X",         icon:"🐦" },
+                      { id:"pinterest", label:"Pinterest", icon:"📌" },
+                      { id:"youtube",   label:"YouTube",   icon:"▶" },
+                      { id:"podcast",   label:"Podcast",   icon:"🎙" },
+                      { id:"email",     label:"Email",     icon:"✉" },
+                      { id:"visual",    label:"Visual",    icon:"🖼" },
+                      { id:"thread",    label:"Thread",    icon:"💬" },
+                      { id:"keyword",   label:"Keyword",   icon:"◎" },
+                      { id:"video",     label:"Video",     icon:"🎬" },
+                    ];
+                    // Only show filters that have at least one item
+                    const presentTypes = new Set(inspiration.map(i => i.type || "article"));
+                    const visibleFilters = ALL_TYPES.filter(t => t.id === "all" || presentTypes.has(t.id));
+                    const [inspFilter, setInspFilter] = useState("all");
+                    const [inspSearch, setInspSearch] = useState("");
+
+                    const filtered = inspiration.filter(item => {
+                      const typeMatch = inspFilter === "all" || (item.type || "article") === inspFilter;
+                      const searchMatch = !inspSearch || item.title?.toLowerCase().includes(inspSearch.toLowerCase()) || item.source?.toLowerCase().includes(inspSearch.toLowerCase()) || item.notes?.toLowerCase().includes(inspSearch.toLowerCase());
+                      return typeMatch && searchMatch;
+                    });
+
+                    const typeConfig = {
+                      article:{icon:"📄",color:"var(--amber)"},
+                      instagram:{icon:"📸",color:"#e1306c"},
+                      facebook:{icon:"👍",color:"#1877f2"},
+                      tiktok:{icon:"🎵",color:"#010101"},
+                      twitter:{icon:"🐦",color:"#1da1f2"},
+                      pinterest:{icon:"📌",color:"#e60023"},
+                      youtube:{icon:"▶",color:"var(--red)"},
+                      podcast:{icon:"🎙",color:"#a78bfa"},
+                      email:{icon:"✉",color:"#5cba6c"},
+                      visual:{icon:"🖼",color:"#7c8abf"},
+                      thread:{icon:"💬",color:"#5cba6c"},
+                      keyword:{icon:"◎",color:"#7c3aed"},
+                      video:{icon:"🎬",color:"var(--red)"},
+                    };
+
+                    return (
+                      <>
+                        {/* Search */}
+                        <input value={inspSearch} onChange={e=>setInspSearch(e.target.value)}
+                          placeholder="Search ideas…"
+                          style={{ width:"100%", padding:"9px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box", marginBottom:10 }}
+                          onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+
+                        {/* Type filter pills */}
+                        <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:16}}>
+                          {visibleFilters.map(f => {
+                            const count = f.id === "all" ? inspiration.length : inspiration.filter(i=>(i.type||"article")===f.id).length;
+                            return (
+                              <button key={f.id} onClick={()=>setInspFilter(f.id)}
+                                style={{padding:"5px 12px",borderRadius:99,border:inspFilter===f.id?"1px solid var(--amber)":"1px solid var(--border)",background:inspFilter===f.id?"var(--amber-glow)":"transparent",color:inspFilter===f.id?"var(--amber)":"var(--text-secondary)",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:4}}>
+                                <span>{f.icon}</span>{f.label}
+                                <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:99,background:"var(--bg-elevated)",color:"var(--muted)",marginLeft:2}}>{count}</span>
+                              </button>
+                            );
+                          })}
                         </div>
-                      );
-                    })}
-                    {inspiration.length === 0 && (
-                      <div style={{...card,padding:32,textAlign:"center",color:"var(--muted)",fontSize:13}}>
-                        No inspiration saved yet. Click + Save New or use AI Ideas to generate content ideas.
-                      </div>
-                    )}
-                  </div>
+
+                        {/* Cards */}
+                        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                          {filtered.map(item => {
+                            const tc = typeConfig[item.type] || typeConfig.article;
+                            return (
+                              <div key={item.id} style={{...card,padding:18,display:"flex",gap:16,alignItems:"flex-start"}}>
+                                <div style={{width:40,height:40,borderRadius:10,background:tc.color+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{tc.icon}</div>
+                                <div style={{flex:1}}>
+                                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                                    <span style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",color:tc.color}}>{item.type||"article"}</span>
+                                    <span style={{fontSize:11,color:"var(--text-secondary)"}}>from {item.source}</span>
+                                  </div>
+                                  <div style={{fontSize:14,fontWeight:600,marginBottom:4}}>{item.title}</div>
+                                  {item.notes&&<div style={{fontSize:12,color:"var(--text-secondary)",fontStyle:"italic"}}>💡 {item.notes}</div>}
+                                </div>
+                                <div style={{display:"flex",gap:6,flexShrink:0}}>
+                                  <button onClick={()=>inspirationToDraft(item)} style={{...btnS,fontSize:11,padding:"5px 10px"}}>→ Draft</button>
+                                  <button onClick={()=>deleteInspiration(item.id)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14,padding:"5px"}} title="Remove">✕</button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                          {filtered.length === 0 && (
+                            <div style={{...card,padding:32,textAlign:"center",color:"var(--muted)",fontSize:13}}>
+                              {inspSearch || inspFilter !== "all" ? "No ideas match your filter — try clearing it." : "No inspiration saved yet. Click + Save New or use AI Ideas to generate content ideas."}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    );
+                  })()}
+
+                  {inspiration.length === 0 && (
+                    <div style={{...card,padding:32,textAlign:"center",color:"var(--muted)",fontSize:13}}>
+                      No inspiration saved yet. Click + Save New or use AI Ideas to generate content ideas.
+                    </div>
+                  )}
                 </div>
               )}
               {researchTab==="ideas"&&(
