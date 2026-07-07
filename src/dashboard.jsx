@@ -2820,6 +2820,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
               <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:24 }}>{success}</p>
               <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
                 <button onClick={resetPipeline} style={btnA}>Start New Post</button>
+                <button onClick={()=>{ resetPipeline(); /* navigate to posts — handled by parent */; document.querySelector('[data-tab="posts"]')?.click(); }} style={btnS}>View in Posts →</button>
                 <button onClick={()=>setStage("draft")} style={btnS}>Back to Draft</button>
               </div>
             </div>
@@ -2877,17 +2878,35 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
                     </label>
                   ))}
 
-                  {/* Copy for Wix — pastes clean HTML into Wix blog editor */}
                   <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                     <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
                       📋 Copy to Wix Blog
                     </div>
                     <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 10px", lineHeight:1.6 }}>
-                      Copy your post as formatted HTML, then paste it into the Wix Blog editor. Opens Wix Blog in a new tab automatically.
+                      Copy your post as formatted HTML, then paste it into the Wix Blog editor. The post is automatically saved to your Posts tab.
                     </p>
                     <div style={{ display:"flex", gap:8 }}>
                       <button onClick={() => {
-                        // Convert markdown body to clean HTML for Wix editor
+                        // Auto-save to Posts tab first
+                        const finalPost = {
+                          id: Date.now(),
+                          title: enhance.metaTitle || draft.title,
+                          body: draft.body,
+                          category: draft.category,
+                          status: schedule.status || "draft",
+                          date: schedule.publishDate || new Date().toISOString().split("T")[0],
+                          views: 0,
+                          metaTitle: enhance.metaTitle,
+                          metaDescription: enhance.metaDescription,
+                          primaryKeyword: enhance.primaryKeyword,
+                        };
+                        onSavePost(finalPost);
+                        if (schedule.addToCalendar) {
+                          const day = new Date(finalPost.date).getDate();
+                          onAddCalEvent({ title: finalPost.title, type: finalPost.status, day });
+                        }
+                        markDone("publish");
+                        // Copy HTML to clipboard
                         const html = (draft.body || "")
                           .split("\n\n").filter(Boolean)
                           .map(block => {
@@ -2902,6 +2921,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
                             return `<p>${formatted}</p>`;
                           }).join("\n");
                         navigator.clipboard.writeText(`<h1>${enhance.metaTitle || draft.title}</h1>\n${html}`);
+                        setSuccess(`✓ Copied! Post saved to Posts tab as "${finalPost.status}".`);
                       }}
                         style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                         📋 Copy as HTML
