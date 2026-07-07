@@ -5726,7 +5726,7 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
     const selectedPlats = PLATFORMS.filter(p => post.platforms?.includes(p.id));
 
     for (const plat of selectedPlats) {
-      const captionText = post.captions?.[plat.id] || "";
+      const captionRaw = post.captions?.[plat.id]; const captionText = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
       const fullMessage = `${captionText}\n\n${post.hashtags || ""}`;
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
@@ -5795,7 +5795,7 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
                 <div style={{ fontSize:18 }}>{platIcons}</div>
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ fontWeight:600, fontSize:13, marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                    {Object.values(post.captions || {})[0]?.slice(0,80) || "Untitled post"}…
+                    {(() => { const c = Object.values(post.captions || {})[0]; const t = typeof c === "string" ? c : c?.text || ""; return t.slice(0,80) || "Untitled post"; })()}…
                   </div>
                   <div style={{ fontSize:11, color:"var(--text-secondary)", display:"flex", gap:8 }}>
                     <span style={{ color:statusColor[post.status], fontWeight:600 }}>{statusIcon[post.status]} {post.status}</span>
@@ -5829,7 +5829,7 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
                         <div key={platId} style={{ background:"var(--bg-elevated)", borderRadius:8, padding:12 }}>
                           <div style={{ fontSize:10, fontWeight:700, color:plat?.color||"var(--amber)", marginBottom:6 }}>{plat?.icon} {plat?.label}</div>
                           <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6, whiteSpace:"pre-wrap" }}>
-                            {post.captions?.[platId] || "—"}
+                            {(() => { const c = post.captions?.[platId]; return typeof c === "string" ? c : (c?.text || "—"); })()}
                           </div>
                         </div>
                       );
