@@ -11,6 +11,9 @@
   node_bundler = "esbuild"
   external_node_modules = ["@netlify/blobs"]
 
+[functions.social-scheduler]
+  schedule = "*/15 * * * *"
+
 # Claude AI proxy
 [[redirects]]
   from   = "/api/claude"
