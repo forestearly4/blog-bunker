@@ -1,6 +1,147 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
+import { useEditor, EditorContent } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import Link from "@tiptap/extension-link";
+import Placeholder from "@tiptap/extension-placeholder";
+import Underline from "@tiptap/extension-underline";
 
-// ─── SEED DATA ────────────────────────────────────────────────────────────────
+// ─── BRAND GUIDE ──────────────────────────────────────────────────────────────
+// Stores voice/tone/image style settings that get injected into every AI call.
+
+const BRAND_GUIDE_STORAGE = "bb_brand_guide";
+
+const DEFAULT_BRAND_GUIDE = {
+  brandName:      "",
+  tagline:        "",
+  audience:       "",
+  voiceTone:      "",
+  writingStyle:   "",
+  avoidWords:     "",
+  imageStyle:     "",
+  colorPalette:   "",
+  topics:         "",
+  competitors:    "",
+};
+
+function loadBrandGuide() {
+  try { return { ...DEFAULT_BRAND_GUIDE, ...JSON.parse(localStorage.getItem(BRAND_GUIDE_STORAGE) || "{}") }; }
+  catch { return { ...DEFAULT_BRAND_GUIDE }; }
+}
+
+function saveBrandGuide(data) {
+  try { localStorage.setItem(BRAND_GUIDE_STORAGE, JSON.stringify(data)); } catch {}
+}
+
+// Builds a system prompt prefix from the brand guide — injected into every AI call
+function buildBrandContext(guide) {
+  if (!guide) return "";
+  const parts = [];
+  if (guide.brandName)    parts.push(`Brand: ${guide.brandName}${guide.tagline ? ` — "${guide.tagline}"` : ""}`);
+  if (guide.audience)     parts.push(`Target audience: ${guide.audience}`);
+  if (guide.voiceTone)    parts.push(`Voice & tone: ${guide.voiceTone}`);
+  if (guide.writingStyle) parts.push(`Writing style: ${guide.writingStyle}`);
+  if (guide.avoidWords)   parts.push(`Never use these words/phrases: ${guide.avoidWords}`);
+  if (guide.topics)       parts.push(`Core topics: ${guide.topics}`);
+  if (!parts.length) return "";
+  return `BRAND GUIDE:\n${parts.join("\n")}\n\nAlways follow this brand guide in your response.\n\n`;
+}
+
+// Builds an image prompt prefix from the brand guide
+function buildBrandImageContext(guide) {
+  if (!guide) return "";
+  const parts = [];
+  if (guide.imageStyle)   parts.push(guide.imageStyle);
+  if (guide.colorPalette) parts.push(`color palette: ${guide.colorPalette}`);
+  if (guide.brandName)    parts.push(`for ${guide.brandName} brand`);
+  return parts.join(", ");
+}
+
+// ─── CLOUD SYNC (Netlify Blobs) ──────────────────────────────────────────────
+// Syncs key data to server-side storage so it survives localStorage clearing.
+// Falls back silently to localStorage-only if the network call fails.
+
+async function cloudGet(key, userId) {
+  try {
+    const res = await fetch(`/api/data?key=${encodeURIComponent(key)}&userId=${encodeURIComponent(userId)}`);
+    const data = await res.json();
+    return data.value;
+  } catch { return null; }
+}
+
+async function cloudSet(key, userId, value) {
+  try {
+    await fetch("/api/data", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, userId, value }),
+    });
+    return true;
+  } catch { return false; }
+}
+
+// Debounced cloud save — avoids hammering the API on every keystroke
+const cloudSaveTimers = {};
+function cloudSaveDebounced(key, userId, value, delay = 1500) {
+  clearTimeout(cloudSaveTimers[key]);
+  cloudSaveTimers[key] = setTimeout(() => cloudSet(key, userId, value), delay);
+}
+
+// ─── ROBUST JSON PARSER ───────────────────────────────────────────────────────
+// AI responses sometimes get truncated mid-string (token limits, overload).
+// This attempts to repair common truncation issues before giving up.
+
+function parseAIJson(text) {
+  let cleaned = text.replace(/```json|```/g, "").trim();
+
+  try { return JSON.parse(cleaned); } catch {}
+
+  // Repair 1 — close unterminated string, trim to last complete element
+  try {
+    let repaired = cleaned;
+    const quoteCount = (repaired.match(/(?<!\\)"/g) || []).length;
+    if (quoteCount % 2 !== 0) repaired += '"';
+
+    let depth = 0, lastValidEnd = -1, inString = false, escape = false;
+    for (let i = 0; i < repaired.length; i++) {
+      const ch = repaired[i];
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{" || ch === "[") depth++;
+      if (ch === "}" || ch === "]") { depth--; if (depth === 0) lastValidEnd = i; }
+    }
+    if (lastValidEnd > -1 && lastValidEnd < repaired.length - 1) {
+      repaired = repaired.slice(0, lastValidEnd + 1);
+    }
+    return JSON.parse(repaired);
+  } catch {}
+
+  // Repair 2 — array truncated mid-object, trim to last complete item
+  try {
+    if (cleaned.trim().startsWith("[")) {
+      const lastComplete = cleaned.lastIndexOf("},");
+      if (lastComplete > -1) return JSON.parse(cleaned.slice(0, lastComplete + 1) + "]");
+      const lastBrace = cleaned.lastIndexOf("}");
+      if (lastBrace > -1) return JSON.parse(cleaned.slice(0, lastBrace + 1) + "]");
+    }
+  } catch {}
+
+  // Repair 3 — extract individual {...} objects via regex, parse each independently
+  // Recovers as many valid objects as possible even if overall structure is broken
+  try {
+    const objectMatches = cleaned.match(/\{[^{}]*\}/g);
+    if (objectMatches && objectMatches.length > 0) {
+      const recovered = [];
+      for (const m of objectMatches) {
+        try { recovered.push(JSON.parse(m)); } catch {}
+      }
+      if (recovered.length > 0) return recovered;
+    }
+  } catch {}
+
+  throw new Error("AI response was cut off and couldn't be repaired — try again.");
+}
 
 const DEFAULT_POSTS = [
   { id:1, title:"Cast at Dawn, Sip at Dusk: A Philosophy",           status:"published", date:"2026-03-28", views:1843, category:"Culture"      },
@@ -133,7 +274,7 @@ function saveModels(models) {
 
 // ─── MULTI-PROVIDER AI CALLER ─────────────────────────────────────────────────
 
-async function callAI(providerId, model, system, userMsg, apiKey) {
+async function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 1500) {
   if (providerId === "anthropic") {
     // Route through Netlify proxy if no client key, otherwise call directly
     const useProxy = !apiKey;
@@ -143,7 +284,7 @@ async function callAI(providerId, model, system, userMsg, apiKey) {
       : { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
     const res = await fetch(endpoint, {
       method: "POST", headers,
-      body: JSON.stringify({ model, max_tokens: 1500, system, messages: [{ role:"user", content: userMsg }] }),
+      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role:"user", content: userMsg }] }),
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error.message || "Anthropic error");
@@ -155,7 +296,7 @@ async function callAI(providerId, model, system, userMsg, apiKey) {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages: [{ role:"system", content: system }, { role:"user", content: userMsg }], max_tokens: 1500 }),
+      body: JSON.stringify({ model, messages: [{ role:"system", content: system }, { role:"user", content: userMsg }], max_tokens: maxTokens }),
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error.message || "OpenAI error");
@@ -169,7 +310,7 @@ async function callAI(providerId, model, system, userMsg, apiKey) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: `${system}\n\n${userMsg}` }] }],
-        generationConfig: { maxOutputTokens: 1500 },
+        generationConfig: { maxOutputTokens: maxTokens },
       }),
     });
     const data = await res.json();
@@ -280,12 +421,28 @@ function getImageProviderLabel(provider) {
   return { stability:"Stability AI", dalle:"GPT Image (OpenAI)", "gemini-image":"Gemini Image" }[provider] || "No image provider";
 }
 
-async function generateImage(prompt, platId, apiKeys) {
-  const provider = getImageProvider(apiKeys);
+// Returns list of all image providers that have a key configured
+function getAvailableImageProviders(apiKeys) {
+  const all = [
+    { id:"stability",     label:"Stability AI",        keyName:"stability", logo:"◆" },
+    { id:"dalle",         label:"GPT Image (OpenAI)",  keyName:"openai",    logo:"●" },
+    { id:"gemini-image",  label:"Gemini Image",        keyName:"gemini",    logo:"✦" },
+  ];
+  return all.map(p => ({ ...p, available: !!apiKeys[p.keyName] }));
+}
+
+async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
+  const provider = forceProvider || getImageProvider(apiKeys);
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
 
   if (!provider) {
     throw new Error("No image provider connected. Add a Stability AI, OpenAI, or Gemini key in Settings → API Keys.");
+  }
+  if (forceProvider) {
+    const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
+    if (!apiKeys[keyMap[forceProvider]]) {
+      throw new Error(`${getImageProviderLabel(forceProvider)} key not set. Add it in Settings → API Keys.`);
+    }
   }
 
   if (provider === "stability") {
@@ -329,37 +486,137 @@ async function generateImage(prompt, platId, apiKeys) {
   }
 
   if (provider === "gemini-image") {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent?key=${apiKeys["gemini"]}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
-          generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
-        }),
+    // Gemini image generation — retry up to 3 times on overload errors
+    const GEMINI_IMAGE_MODELS = [
+      "gemini-3.1-flash-image-preview",
+      "gemini-2.5-flash-image",
+    ];
+    let lastErr = "";
+    for (const model of GEMINI_IMAGE_MODELS) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKeys["gemini"]}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
+                generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+              }),
+            }
+          );
+          const data = await res.json();
+          if (data.error) {
+            const msg = data.error.message || "";
+            // On overload or rate limit, wait and retry
+            if (msg.includes("overloaded") || msg.includes("RESOURCE_EXHAUSTED") || res.status === 503 || res.status === 429) {
+              lastErr = `Gemini overloaded (attempt ${attempt}) — retrying…`;
+              await new Promise(r => setTimeout(r, 2000 * attempt));
+              continue;
+            }
+            lastErr = `Gemini Image error (${model}): ${msg}`;
+            break; // Try next model
+          }
+          const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+          if (!part?.inlineData) {
+            lastErr = `Gemini Image (${model}): no image data returned`;
+            break;
+          }
+          const byteStr = atob(part.inlineData.data);
+          const bytes = new Uint8Array(byteStr.length);
+          for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+          const blob = new Blob([bytes], { type: part.inlineData.mimeType || "image/png" });
+          return URL.createObjectURL(blob);
+        } catch(e) {
+          lastErr = e.message;
+        }
       }
-    );
-    const data = await res.json();
-    if (data.error) throw new Error(`Gemini Image error: ${data.error.message}`);
-    const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-    if (!part?.inlineData) throw new Error("Gemini Image returned no image data.");
-    const byteStr = atob(part.inlineData.data);
-    const bytes = new Uint8Array(byteStr.length);
-    for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
-    const blob = new Blob([bytes], { type: part.inlineData.mimeType || "image/png" });
-    return URL.createObjectURL(blob);
+    }
+    throw new Error(`Gemini Image failed: ${lastErr}`);
   }
 
   throw new Error("Unknown image provider");
 }
 
-// Generate an image prompt via text AI
-async function generateImagePrompt(topic, platId, activeProvider, activeModel, apiKey) {
+function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", style: extraStyle = {} }) {
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const handle = async () => {
+    setSaving(true);
+    try { await saveToMediaLibrary(imageUrl, `${name}-${Date.now()}`, tags); setSaved(true); setTimeout(() => setSaved(false), 2500); }
+    catch(e) { console.error(e); }
+    setSaving(false);
+  };
+  return (
+    <button onClick={handle} disabled={saving}
+      style={{ padding:"6px 14px", borderRadius:6, border:"none", background:saved?"rgba(92,186,108,0.85)":saving?"rgba(0,0,0,0.5)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:saving?"not-allowed":"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)", ...extraStyle }}>
+      {saved ? "✓ Saved" : saving ? "◌" : "🖼 Save"}
+    </button>
+  );
+}
+
+// ─── IMAGE PROVIDER PREFERENCE ───────────────────────────────────────────────
+
+const IMAGE_PROVIDER_STORAGE = "bb_image_provider";
+function loadImageProviderPref() { return localStorage.getItem(IMAGE_PROVIDER_STORAGE) || null; }
+function saveImageProviderPref(id) {
+  if (id) localStorage.setItem(IMAGE_PROVIDER_STORAGE, id);
+  else localStorage.removeItem(IMAGE_PROVIDER_STORAGE);
+}
+
+// Returns the provider to actually use: explicit pref if valid, else auto-priority
+function resolveImageProvider(apiKeys) {
+  const pref = loadImageProviderPref();
+  const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
+  if (pref && apiKeys[keyMap[pref]]) return pref;
+  return getImageProvider(apiKeys);
+}
+
+function ImageProviderPicker({ apiKeys, value, onChange, compact = false }) {
+  const providers = getAvailableImageProviders(apiKeys);
+  const anyAvailable = providers.some(p => p.available);
+
+  if (!anyAvailable) {
+    return (
+      <div style={{ fontSize:11, color:"var(--amber)", padding:"6px 10px", borderRadius:6, background:"var(--amber-glow)", border:"1px solid var(--amber)33" }}>
+        ⚠ Add Stability AI, OpenAI, or Gemini key in Settings → API Keys
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+      {!compact && <span style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>Image AI:</span>}
+      {providers.map(p => (
+        <button key={p.id} onClick={() => p.available && onChange(p.id)} disabled={!p.available}
+          title={p.available ? p.label : `${p.label} — add key in Settings`}
+          style={{
+            padding: compact ? "4px 10px" : "5px 12px",
+            borderRadius:99,
+            border: value===p.id ? "1px solid #7c3aed" : "1px solid var(--border)",
+            background: value===p.id ? "#7c3aed18" : "transparent",
+            color: value===p.id ? "#a78bfa" : p.available ? "var(--text-secondary)" : "var(--muted)",
+            fontSize: compact ? 11 : 12,
+            fontWeight:600,
+            cursor: p.available ? "pointer" : "not-allowed",
+            fontFamily:"var(--font-body)",
+            display:"flex", alignItems:"center", gap:5,
+            opacity: p.available ? 1 : 0.4,
+          }}>
+          <span>{p.logo}</span>{p.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+async function generateImagePrompt(topic, platId, activeProvider, activeModel, apiKey, brandGuideOverride = null) {
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
+  const brandImgCtx = buildBrandImageContext(brandGuideOverride || loadBrandGuide());
+  const styleNote = brandImgCtx ? `Brand visual style: ${brandImgCtx}.` : "Style: moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones.";
   const text = await callAI(
     activeProvider, activeModel,
-    `You generate image prompts for Cask & Stream — a fly fishing and whiskey lifestyle brand. Style: ${spec.style}, moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones. Format: a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
+    `You generate image prompts for Cask & Stream — a fly fishing and whiskey lifestyle brand. ${styleNote} Format: ${spec.style}. Return ONLY a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
     `Write an image prompt for a ${platId} post (${spec.label}) about: ${topic}`,
     apiKey
   );
@@ -376,15 +633,18 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
   const [error,      setError]      = useState("");
   const [showPrompt, setShowPrompt] = useState(false);
 
-  const provider    = getImageProvider(apiKeys);
+  const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
+  const provider    = imgProvider;
   const providerLabel = getImageProviderLabel(provider);
   const spec        = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
   const isLoading   = genLoading || promptLoad;
 
+  const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
+
   const runGenerate = async (prompt) => {
     setGenLoading(true); setError(""); setImageUrl(null);
     try {
-      const url = await generateImage(prompt, platId, apiKeys);
+      const url = await generateImage(prompt, platId, apiKeys, imgProvider);
       setImageUrl(url);
     } catch(e) { setError(e.message); }
     setGenLoading(false);
@@ -414,20 +674,14 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
 
   return (
     <div style={{ marginTop:20, paddingTop:20, borderTop:"1px solid var(--border)" }}>
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12, flexWrap:"wrap", gap:8 }}>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ fontSize:13, fontWeight:700 }}>▣ Image</span>
           <span style={{ fontSize:10, color:"var(--muted)", padding:"1px 7px", borderRadius:99, border:"1px solid var(--border)" }}>{spec.label}</span>
-          {provider ? (
-            <span style={{ fontSize:10, color:"#5cba6c", padding:"1px 7px", borderRadius:99, background:"#5cba6c0a", border:"1px solid #5cba6c44" }}>
-              via {providerLabel}
-            </span>
-          ) : (
-            <span style={{ fontSize:10, color:"var(--amber)", padding:"1px 7px", borderRadius:99, background:"var(--amber-glow)", border:"1px solid var(--amber)44" }}>
-              Add Stability AI, OpenAI, or Gemini key
-            </span>
-          )}
         </div>
+        <ImageProviderPicker apiKeys={apiKeys} value={imgProvider} onChange={handleImgProviderChange} compact />
+      </div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", marginBottom:12 }}>
         <div style={{ display:"flex", gap:6 }}>
           {imgPrompt && !imageUrl && (
             <button onClick={()=>setShowPrompt(s=>!s)}
@@ -495,7 +749,46 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
 
 // ─── SOCIAL POST GENERATOR ────────────────────────────────────────────────────
 
-function SocialPostTab({ activeProvider, activeModel, apiKeys, dark }) {
+function FacebookPostButton({ page, caption }) {
+  const [posting, setPosting] = useState(false);
+  const [result,  setResult]  = useState("");
+  const post = async () => {
+    setPosting(true); setResult("");
+    try {
+      const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: caption, platforms: ["facebook"] });
+      setResult(res.facebook?.success ? "✓ Posted!" : `Error: ${res.facebook?.error}`);
+    } catch(e) { setResult(`Error: ${e.message}`); }
+    setPosting(false);
+  };
+  return (
+    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+      <button onClick={post} disabled={posting || !caption}
+        style={{ padding:"7px 16px", borderRadius:7, border:"none", background:posting||!caption?"var(--bg-elevated)":"#1877f2", color:posting||!caption?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:posting||!caption?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+        {posting ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Posting…</> : "↑ Post to Facebook"}
+      </button>
+      {result && <span style={{ fontSize:11, color:result.startsWith("✓")?"var(--green)":"var(--red)" }}>{result}</span>}
+    </div>
+  );
+}
+
+function InstagramPostButton({ page, caption }) {
+  const [posting, setPosting] = useState(false);
+  const [result,  setResult]  = useState("");
+  const post = async () => {
+    setResult("Instagram requires an image — generate one first in the ▣ Image section below.");
+  };
+  return (
+    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+      <button onClick={post} disabled={posting || !caption}
+        style={{ padding:"7px 16px", borderRadius:7, border:"none", background:posting||!caption?"var(--bg-elevated)":"#e1306c", color:posting||!caption?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:posting||!caption?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+        {posting ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Posting…</> : "↑ Post to Instagram"}
+      </button>
+      {result && <span style={{ fontSize:11, color:"var(--amber)" }}>{result}</span>}
+    </div>
+  );
+}
+
+function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig = {} }) {
   const [input,       setInput]       = useState("");
   const [inputMode,   setInputMode]   = useState("topic");
   const [loading,     setLoading]     = useState(false);
@@ -657,13 +950,19 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark }) {
               )}
 
               {/* Action buttons */}
-              <div style={{ display:"flex", gap:8, marginTop:16 }}>
-                <button style={{ padding:"7px 16px", borderRadius:7, border:"none", background:plat.color, color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                  Schedule Post
-                </button>
-                <button style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                  Save as Draft
-                </button>
+              <div style={{ display:"flex", gap:8, marginTop:16, flexWrap:"wrap" }}>
+                {plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0 && (
+                  <FacebookPostButton page={metaConfig.pages[0]} caption={posts[plat.id] || ""} />
+                )}
+                {plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id) && (
+                  <InstagramPostButton page={metaConfig.pages.find(p=>p.instagram_id)} caption={posts[plat.id] || ""} />
+                )}
+                {(!metaConfig?.connected || (plat.id !== "facebook" && plat.id !== "instagram")) && (
+                  <button onClick={()=>handleCopy(plat.id, posts[plat.id])}
+                    style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${plat.color}44`, background:"transparent", color:plat.color, fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    {copied[plat.id] ? "✓ Copied" : `Copy ${plat.name} Post`}
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -797,15 +1096,32 @@ const ThreatBadge = ({level}) => {
 
 // ─── PROVIDER PICKER ──────────────────────────────────────────────────────────
 
-function ProviderPicker({ activeProvider, activeModel, onProviderChange, onModelChange, keys }) {
-  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
-  const hasKey = !!keys[activeProvider];
-  const isAnthropic = activeProvider === "anthropic";
+function ProviderPicker({ activeProvider, activeModel, onProviderChange, onModelChange, keys, compact = false }) {
+  const provider  = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const hasKey    = !!keys[activeProvider];
+  const isAnthro  = activeProvider === "anthropic";
+
+  if (compact) {
+    // Compact inline switcher — just the provider pills, no model
+    return (
+      <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:12}}>
+        {AI_PROVIDERS.filter(p => p.id !== "stability").map(p => {
+          const hasK = !!keys[p.id] || p.id === "anthropic";
+          return (
+            <button key={p.id} onClick={() => onProviderChange(p.id)} title={hasK ? p.name : `${p.name} — add key in Settings`}
+              style={{padding:"4px 10px",borderRadius:99,border:activeProvider===p.id?`1px solid ${p.color}`:"1px solid var(--border)",background:activeProvider===p.id?p.color+"18":"transparent",color:activeProvider===p.id?p.color:"var(--text-secondary)",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:4,opacity:hasK?1:0.45}}>
+              <span>{p.logo}</span>{p.name}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
 
   return (
     <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:20,flexWrap:"wrap"}}>
-      <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>AI Provider</div>
-      <div style={{display:"flex",gap:6}}>
+      <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>AI</div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
         {AI_PROVIDERS.filter(p => p.id !== "stability").map(p => {
           const hasK = !!keys[p.id] || p.id === "anthropic";
           return (
@@ -824,11 +1140,94 @@ function ProviderPicker({ activeProvider, activeModel, onProviderChange, onModel
           {provider.models.map(m => <option key={m} value={m}>{m}</option>)}
         </select>
       </div>
-      {!hasKey && !isAnthropic && (
+      {!hasKey && !isAnthro && (
         <div style={{width:"100%",fontSize:11,color:"var(--amber)",padding:"6px 12px",borderRadius:6,background:"var(--amber-glow)",border:"1px solid var(--amber)33"}}>
           ⚠ No API key for {provider.name}. Add one in Settings → API Keys.
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── GLOBAL AI QUICK-SWITCHER ─────────────────────────────────────────────────
+// Floating bar for quickly comparing AI outputs across providers
+
+function AIQuickSwitcher({ activeProvider, activeModel, onProviderChange, onModelChange, apiKeys }) {
+  const [open,        setOpen]       = useState(false);
+  const [imageProvider, setImageProvider] = useState(() => getImageProvider(apiKeys) || "stability");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const imgProviderLabel = getImageProviderLabel(getImageProvider(apiKeys));
+
+  return (
+    <div style={{ position:"fixed", bottom:24, right:24, zIndex:999, display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
+      {open && (
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:14, padding:20, width:320, boxShadow:"0 8px 40px rgba(0,0,0,0.4)", display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Text AI */}
+          <div>
+            <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+              ✦ Text AI — {provider.name}
+            </div>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:10 }}>
+              {AI_PROVIDERS.filter(p => p.id !== "stability").map(p => {
+                const hasK = !!apiKeys[p.id] || p.id === "anthropic";
+                return (
+                  <button key={p.id} onClick={() => onProviderChange(p.id)}
+                    style={{ padding:"6px 12px", borderRadius:99, border:activeProvider===p.id?`1px solid ${p.color}`:"1px solid var(--border)", background:activeProvider===p.id?p.color+"22":"transparent", color:activeProvider===p.id?p.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:hasK?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5, opacity:hasK?1:0.45 }}>
+                    <span>{p.logo}</span>{p.name}
+                    {!hasK && <span style={{fontSize:9}}>no key</span>}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>Model</div>
+              <select value={activeModel} onChange={e => onModelChange(e.target.value)}
+                style={{ flex:1, padding:"5px 10px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", cursor:"pointer" }}>
+                {provider.models.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {/* Image AI */}
+          <div>
+            <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>
+              ▣ Image AI — {imgProviderLabel}
+            </div>
+            <div style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.6 }}>
+              {getImageProvider(apiKeys)
+                ? `Using ${imgProviderLabel} (priority order: Stability AI → GPT Image → Gemini)`
+                : "No image provider — add Stability AI, OpenAI, or Gemini key in Settings → API Keys"}
+            </div>
+            <div style={{ display:"flex", gap:6, marginTop:8, flexWrap:"wrap" }}>
+              {[
+                { id:"stability", label:"Stability AI", key:"stability" },
+                { id:"dalle",     label:"GPT Image",    key:"openai"    },
+                { id:"gemini-image", label:"Gemini",    key:"gemini"    },
+              ].map(ip => {
+                const hasK = !!apiKeys[ip.key];
+                const isActive = getImageProvider(apiKeys) === ip.id;
+                return (
+                  <div key={ip.id}
+                    style={{ padding:"4px 10px", borderRadius:99, border:isActive?`1px solid #7c3aed44`:"1px solid var(--border)", background:isActive?"#7c3aed18":"transparent", color:isActive?"#a78bfa":"var(--text-secondary)", fontSize:11, opacity:hasK?1:0.4 }}>
+                    {ip.label}{isActive?" ✓":""}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ fontSize:10, color:"var(--muted)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", lineHeight:1.6 }}>
+            💡 Tip: Generate the same post with different AIs to compare outputs. Switch here and hit Regenerate in the pipeline.
+          </div>
+        </div>
+      )}
+
+      {/* Toggle button */}
+      <button onClick={() => setOpen(o => !o)}
+        style={{ width:48, height:48, borderRadius:99, background:open?"var(--amber)":"var(--bg-surface)", color:open?"#0e0f11":"var(--amber)", fontSize:20, cursor:"pointer", boxShadow:"0 4px 20px rgba(0,0,0,0.4)", border:`1px solid ${open?"transparent":"var(--amber)44"}`, display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.2s" }}
+        title="Switch AI provider">
+        {open ? "✕" : "✦"}
+      </button>
     </div>
   );
 }
@@ -922,7 +1321,7 @@ function HeadlineGenerator({ activeProvider, activeModel, apiKeys }) {
         `Topic: ${topic}`,
         apiKeys[activeProvider]
       );
-      setHeadlines(JSON.parse(text.replace(/```json|```/g,"").trim()));
+      setHeadlines(parseAIJson(text));
     } catch(e) { setError(e.message || "Could not generate headlines. Try again."); }
     setLoading(false);
   };
@@ -970,7 +1369,7 @@ function SEOOptimizer({ activeProvider, activeModel, apiKeys }) {
         `Analyze:\n\n${draft.slice(0,1500)}`,
         apiKeys[activeProvider]
       );
-      setResult(JSON.parse(text.replace(/```json|```/g,"").trim()));
+      setResult(parseAIJson(text));
     } catch(e) { setError(e.message || "Could not parse SEO analysis. Try again."); }
     setLoading(false);
   };
@@ -1149,7 +1548,14 @@ function APIKeysSettings({ apiKeys, onSave }) {
 const WIX_STORAGE = "bb_wix_config";
 
 function loadWixConfig() {
-  try { return JSON.parse(localStorage.getItem(WIX_STORAGE) || "{}"); } catch { return {}; }
+  try {
+    const cfg = JSON.parse(localStorage.getItem(WIX_STORAGE) || "{}");
+    // Ensure correct site member ID is always set
+    if (!cfg.memberId) {
+      cfg.memberId = "1e9d13fa-cf47-4524-8cf1-78b3193785ec";
+    }
+    return cfg;
+  } catch { return { memberId: "1e9d13fa-cf47-4524-8cf1-78b3193785ec" }; }
 }
 function saveWixConfig(cfg) {
   try { localStorage.setItem(WIX_STORAGE, JSON.stringify(cfg)); } catch {}
@@ -1186,12 +1592,10 @@ async function wixFetch(endpoint, method = "GET", data = null, cfg = {}) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      endpoint,
-      method,
-      data,
-      // Send user keys as fallback — env vars take priority in the function
-      apiKey: cfg.apiKey || "",
-      siteId: cfg.siteId || "",
+      endpoint, method, data,
+      apiKey:    cfg.apiKey    || "",
+      siteId:    cfg.siteId    || "",
+      accountId: cfg.accountId || cfg.siteId || "", // account ID for owner resolution
     }),
   });
 
@@ -1211,7 +1615,35 @@ async function wixFetch(endpoint, method = "GET", data = null, cfg = {}) {
   return json;
 }
 
-function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
+// ─── WIX OAUTH HELPERS ───────────────────────────────────────────────────────
+
+async function getWixOAuthToken(appId, appSecret, instanceId) {
+  const res = await fetch("/api/wix-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ appId, appSecret, instanceId }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || "Token request failed");
+  return data.access_token;
+}
+
+async function wixFetchOAuth(endpoint, method = "GET", data = null, oauthToken, siteId) {
+  const res = await fetch("/api/wix", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endpoint, method, data, oauthToken, siteId }),
+  });
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); } catch { throw new Error(`Proxy error (${res.status})`); }
+  if (!res.ok || json.error) throw new Error(json.error || `API error ${res.status}`);
+  return json;
+}
+
+// ─── WIX SYNC PANEL ──────────────────────────────────────────────────────────
+
+function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
   const [cfg,       setCfg]      = useState(loadWixConfig);
   const [status,    setStatus]   = useState(cfg.connected ? "connected" : "idle");
   const [syncing,   setSyncing]  = useState(false);
@@ -1219,64 +1651,116 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
   const [log,       setLog]      = useState([]);
   const [lastSync,  setLastSync] = useState(cfg.lastSync || null);
   const [pullCount, setPullCount]= useState(cfg.pullCount || 0);
+  // API key fields
   const [apiKey,    setApiKey]   = useState(cfg.apiKey || "");
   const [siteId,    setSiteId]   = useState(cfg.siteId || "");
-  const [memberId,  setMemberId] = useState(cfg.memberId || "");
   const [showKey,   setShowKey]  = useState(false);
+  // OAuth fields
+  const [authMode,  setAuthMode] = useState(cfg.oauthToken ? "oauth" : "apikey");
+  const [appId,     setAppId]    = useState(cfg.appId || "c6500272-f2ac-4fad-aeef-6cd500382297");
+  const [appSecret, setAppSecret]= useState(cfg.appSecret || "");
+  const [instanceId,setInstanceId]=useState(cfg.instanceId || "");
+  const [oauthToken,setOauthToken]=useState(cfg.oauthToken || "");
+
+  const isConnected = status === "connected" || !!cfg.connected;
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
 
   const addLog = (msg, type="info") => setLog(l => [...l, { msg, type, ts: new Date().toLocaleTimeString() }]);
 
   const testConnection = async () => {
     setTesting(true);
     addLog("Testing Wix connection…");
-    
-    // Try multiple endpoint variations to find what works
-    const endpoints = [
-      "/v3/posts?paging.limit=1",
-      "/blog/v3/posts?paging.limit=1", 
-      "/blog/v3/posts",
-      "/v3/posts",
-    ];
-
+    const endpoints = ["/v3/posts?paging.limit=1", "/blog/v3/posts?paging.limit=1", "/blog/v3/posts", "/v3/posts"];
     let lastError = "";
+
     for (const ep of endpoints) {
       try {
         addLog(`Trying ${ep}…`);
-        const data = await wixFetch(ep, "GET", null, { apiKey, siteId });
-        if (data.posts !== undefined || data.items !== undefined || Array.isArray(data)) {
-          const newCfg = { connected: true, lastSync: null, pullCount: 0, apiKey, siteId, memberId, workingEndpoint: ep };
-          saveWixConfig(newCfg);
-          setCfg(newCfg);
-          setStatus("connected");
-          addLog(`✓ Connected! Working endpoint: ${ep}`, "success");
-          if (!memberId) addLog("⚠ Pull your posts now to auto-detect your Wix Member ID for publishing.", "info");
-          else addLog(`✓ Member ID set: ${memberId.slice(0,8)}…`, "success");
-          setTesting(false);
-          return;
+        let data;
+        if (authMode === "oauth" && oauthToken) {
+          data = await wixFetchOAuth(ep, "GET", null, oauthToken, siteId);
         } else {
-          addLog(`Got response but unexpected format: ${JSON.stringify(data).slice(0,100)}`, "info");
+          data = await wixFetch(ep, "GET", null, { apiKey, siteId });
+        }
+        if (data.posts !== undefined || data.items !== undefined || Array.isArray(data)) {
+          const newCfg = { connected: true, lastSync: null, pullCount: 0, apiKey, siteId, workingEndpoint: ep, appId, appSecret, instanceId, oauthToken };
+          saveWixConfig(newCfg); setCfg(newCfg); setStatus("connected");
+          addLog(`✓ Connected! Endpoint: ${ep}`, "success");
+          if (onConnect) onConnect();
+          setTesting(false); return;
+        } else {
+          addLog(`Response: ${JSON.stringify(data).slice(0,100)}`, "info");
         }
       } catch(e) {
         lastError = e.message;
-        addLog(`✗ ${ep}: ${e.message.slice(0, 120)}`, "error");
+        addLog(`✗ ${ep}: ${e.message.slice(0,80)}`, "error");
       }
     }
-    addLog(`All endpoints failed. Last error: ${lastError}`, "error");
-    addLog("Check: 1) API key has 'Wix Blog' permission 2) Site ID is correct 3) Key is not expired", "error");
-    setStatus("error");
-    setTesting(false);
+    addLog(`All endpoints failed: ${lastError}`, "error");
+    setStatus("error"); setTesting(false);
   };
+
+  const connectOAuth = () => {
+    if (!appId) { addLog("App ID / Client ID is required", "error"); return; }
+    const redirectUri = "https://blogbunker.netlify.app/api/wix-callback";
+    const authUrl = `https://www.wix.com/oauth/authorize?client_id=${appId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=offline_access`;
+    addLog("Opening Wix authorization page…");
+    const popup = window.open(authUrl, "wix_auth", "width=650,height=750,scrollbars=yes");
+    if (!popup) {
+      addLog("Popup blocked — allow popups for blogbunker.netlify.app and try again.", "error");
+    } else {
+      addLog("Complete the authorization in the popup, then come back here.", "info");
+    }
+  };
+
+  // Handle OAuth token — either via postMessage from popup or URL hash fallback
+  useEffect(() => {
+    // postMessage handler (popup sends token to parent)
+    const handleMessage = (event) => {
+      if (event.origin !== "https://blogbunker.netlify.app") return;
+      if (event.data?.type !== "wix_oauth_success") return;
+      const { access_token, refresh_token } = event.data;
+      if (!access_token) return;
+      addLog("✓ OAuth token received from Wix!", "success");
+      const newCfg = { ...loadWixConfig(), oauthToken: access_token, oauthRefresh: refresh_token || "", connected: true };
+      saveWixConfig(newCfg); setCfg(newCfg); setOauthToken(access_token); setStatus("connected");
+      if (onConnect) onConnect();
+      addLog("✓ Connected! Publishing to Wix should now work.", "success");
+    };
+    window.addEventListener("message", handleMessage);
+
+    // Hash fallback (if popup was blocked, callback redirects parent)
+    const hash = window.location.hash;
+    if (hash.includes("wix_token=")) {
+      const params = new URLSearchParams(hash.slice(1));
+      const token  = params.get("wix_token");
+      if (token) {
+        addLog("✓ OAuth token received!", "success");
+        const newCfg = { ...loadWixConfig(), oauthToken: token, oauthRefresh: params.get("wix_refresh") || "", connected: true };
+        saveWixConfig(newCfg); setCfg(newCfg); setOauthToken(token); setStatus("connected");
+        if (onConnect) onConnect();
+        window.history.replaceState(null, "", window.location.pathname);
+      }
+    }
+
+    return () => window.removeEventListener("message", handleMessage);
+  }, []);
 
   const pullPosts = async () => {
     setSyncing(true);
     addLog("Pulling posts from Wix Blog…");
-    const baseEndpoint = cfg.workingEndpoint?.replace(/\?.*/, "") || "/v3/posts";
+    const baseEndpoint = (cfg.workingEndpoint || "/v3/posts").replace(/\?.*/, "");
     try {
       let allPosts = [], cursor = null, page = 1;
       do {
         addLog(`Fetching page ${page}…`);
         const endpoint = `${baseEndpoint}?paging.limit=50${cursor ? `&paging.cursor=${cursor}` : ""}`;
-        const data = await wixFetch(endpoint, "GET", null, { apiKey, siteId });
+        let data;
+        if (cfg.oauthToken) {
+          data = await wixFetchOAuth(endpoint, "GET", null, cfg.oauthToken, siteId);
+        } else {
+          data = await wixFetch(endpoint, "GET", null, { apiKey, siteId });
+        }
         const posts = data.posts || data.items || [];
         allPosts = [...allPosts, ...posts];
         cursor = data.pagingMetadata?.cursors?.next || data.next?.cursor || null;
@@ -1285,65 +1769,21 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       } while (cursor && page < 10);
 
       addLog(`Found ${allPosts.length} posts on Wix`);
-      // Extract author ID from first post - try multiple fields
-      const firstPost = allPosts[0] || {};
-      const extractedMemberId = firstPost.memberId || firstPost.mostRecentContributorId || firstPost.authorId || "";
-      if (extractedMemberId && extractedMemberId !== cfg.memberId) {
-        addLog(`✓ Author ID detected: ${extractedMemberId.slice(0,8)}…`, "info");
-        const newCfgWithMember = { ...cfg, memberId: extractedMemberId };
-        saveWixConfig(newCfgWithMember);
-        setCfg(newCfgWithMember);
-      }
-      if (extractedMemberId && !cfg.memberId) {
-        addLog(`✓ Found your Wix Member ID: ${extractedMemberId}`);
-        const newCfgWithMember = { ...cfg, memberId: extractedMemberId };
-        saveWixConfig(newCfgWithMember);
-        setCfg(newCfgWithMember);
-      }
       const mapped = allPosts.map(mapWixPost);
       const now = new Date().toISOString();
-      const newCfg = { connected: true, lastSync: now, pullCount: mapped.length, apiKey, siteId, memberId };
-      saveWixConfig(newCfg);
-      setCfg(newCfg);
-      setLastSync(now);
-      setPullCount(mapped.length);
+      const newCfg = { ...cfg, connected: true, lastSync: now, pullCount: mapped.length, apiKey, siteId };
+      saveWixConfig(newCfg); setCfg(newCfg); setLastSync(now); setPullCount(mapped.length);
       onSync(mapped);
-      addLog(`✓ Synced ${mapped.length} posts into Blog Bunker`, "success");
-    } catch(e) {
-      addLog(`Sync failed: ${e.message}`, "error");
-    }
+      addLog(`✓ Synced ${mapped.length} posts`, "success");
+    } catch(e) { addLog(`Sync failed: ${e.message}`, "error"); }
     setSyncing(false);
   };
 
   const disconnect = () => {
     saveWixConfig({});
-    setCfg({});
-    setApiKey(""); setSiteId(""); setMemberId("");
+    setCfg({}); setApiKey(""); setSiteId(""); setAppId(""); setAppSecret(""); setInstanceId(""); setOauthToken("");
     setStatus("idle"); setLog([]); setLastSync(null); setPullCount(0);
     onDisconnect();
-  };
-
-  const fetchMemberId = async () => {
-    setTesting(true);
-    addLog("Looking up your Wix site member ID…");
-    try {
-      // Try contacts/members API to find the site owner's member ID
-      const res = await wixFetch("/members/v1/members?fieldsets=FULL&paging.limit=10", "GET", null, { apiKey, siteId });
-      addLog(`Members response: ${JSON.stringify(res).slice(0, 400)}`, "info");
-      const members = res.members || res.items || [];
-      if (members.length > 0) {
-        addLog(`Found ${members.length} members. First: ${JSON.stringify(members[0]).slice(0,200)}`, "info");
-      }
-    } catch(e) {
-      // Try alternative endpoint
-      try {
-        const res2 = await wixFetch("/site-members/v1/members?paging.limit=5", "GET", null, { apiKey, siteId });
-        addLog(`Alt members: ${JSON.stringify(res2).slice(0,400)}`, "info");
-      } catch(e2) {
-        addLog(`Members lookup failed: ${e2.message}`, "error");
-      }
-    }
-    setTesting(false);
   };
 
   return (
@@ -1351,14 +1791,8 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       <div>
         <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Wix Blog Integration</h3>
         <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
-          Two-way sync with your Wix Blog. Pull existing posts into Blog Bunker, write new ones here and publish directly to caskandstream.com.
+          Connect your Wix site to pull posts and publish directly from Blog Bunker.
         </p>
-      </div>
-
-      {/* Env var status */}
-      <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)44", fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
-        ✦ <strong style={{color:"var(--amber)"}}>Netlify env vars detected:</strong> <code style={{color:"var(--amber)"}}>wix_api_key</code> and <code style={{color:"var(--amber)"}}>wix_site_id</code> are set in your Netlify environment — credentials are handled server-side automatically.
-        The fields below are only needed if you want to override them.
       </div>
 
       {/* Connection status */}
@@ -1369,65 +1803,97 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
             <div style={{ fontWeight:600, fontSize:14 }}>{isConnected ? "Wix Blog Connected" : "Not Connected"}</div>
             {lastSync && <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>Last sync: {new Date(lastSync).toLocaleString()}</div>}
             {isConnected && pullCount > 0 && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>{pullCount} posts pulled</div>}
-            {isConnected && cfg.memberId && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>✓ Member ID detected — ready to publish</div>}
-            {isConnected && !cfg.memberId && <div style={{ fontSize:11, color:"var(--amber)", marginTop:2 }}>⚠ Pull posts to auto-detect Member ID for publishing</div>}
+            {isConnected && cfg.oauthToken && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>✓ OAuth — full read/write access</div>}
           </div>
         </div>
-        {isConnected && (
-          <button onClick={disconnect} style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Disconnect</button>
-        )}
+        {isConnected && <button onClick={disconnect} style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Disconnect</button>}
       </div>
 
-      {/* Override fields (collapsible) */}
-      <details>
-        <summary style={{ fontSize:12, color:"var(--muted)", cursor:"pointer", userSelect:"none" }}>Override credentials manually (optional)</summary>
-        <div style={{ display:"flex", flexDirection:"column", gap:12, marginTop:12 }}>
+      {/* Auth mode selector */}
+      {!isConnected && (
+        <div style={{ display:"flex", gap:4, background:"var(--bg-elevated)", borderRadius:8, padding:3, width:"fit-content" }}>
+          {[{id:"apikey",label:"API Key (read only)"},{id:"oauth",label:"OAuth (read + write ✓)"}].map(m=>(
+            <button key={m.id} onClick={()=>setAuthMode(m.id)}
+              style={{ padding:"7px 16px", borderRadius:6, border:"none", background:authMode===m.id?"var(--amber)":"transparent", color:authMode===m.id?"#0e0f11":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+              {m.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* OAuth fields */}
+      {!isConnected && authMode === "oauth" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--amber-glow)", border:"1px solid var(--amber)33", fontSize:12, color:"var(--text-secondary)", lineHeight:1.8 }}>
+            <strong style={{color:"var(--amber)"}}>One-time setup:</strong><br/>
+            1. Go to <a href="https://dev.wix.com/apps" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>dev.wix.com/apps</a> → your Blog Bunker app<br/>
+            2. Make sure <strong style={{color:"var(--text)"}}>Wix Blog</strong> permission is added with read + write<br/>
+            3. Add redirect URI: <code style={{background:"var(--bg-elevated)",padding:"1px 6px",borderRadius:4}}>https://blogbunker.netlify.app/api/wix-callback</code><br/>
+            4. Paste your App ID below and click Connect
+          </div>
           <div>
-            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Wix API Key Override</label>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>App ID</label>
+            <input style={{...iS, fontFamily:"monospace"}} placeholder="c6500272-f2ac-4fad-aeef-6cd500382297" value={appId} onChange={e=>setAppId(e.target.value)}
+              onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Site ID</label>
+            <input style={{...iS, fontFamily:"monospace"}} placeholder="964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3" value={siteId} onChange={e=>setSiteId(e.target.value)}
+              onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+          <button onClick={connectOAuth} disabled={!appId}
+            style={{ padding:"12px 24px", borderRadius:8, border:"none", background:appId?"var(--amber)":"var(--bg-elevated)", color:appId?"#0e0f11":"var(--muted)", fontSize:14, fontWeight:700, cursor:appId?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:10, alignSelf:"flex-start" }}>
+            <span style={{fontSize:18}}>⊕</span> Connect with Wix
+          </button>
+          <p style={{ fontSize:11, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+            A Wix login popup will open. Sign in with your Wix account and approve Blog Bunker. You'll be redirected back automatically.
+          </p>
+          {log.length > 0 && (
+            <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+              {log[log.length-1]?.msg}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* API key fields */}
+      {!isConnected && authMode === "apikey" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
+            ⚠ API key mode only supports <strong style={{color:"var(--text)"}}>reading</strong> posts. To publish directly to Wix, use the <strong style={{color:"var(--amber)"}}>OAuth</strong> mode instead.
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Wix API Key</label>
             <div style={{ position:"relative" }}>
               <input type={showKey?"text":"password"} style={{...iS, paddingRight:52, fontFamily:"monospace"}} placeholder="IST.eyJ…" value={apiKey} onChange={e=>setApiKey(e.target.value)} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
               <button onClick={()=>setShowKey(s=>!s)} style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", color:"var(--muted)", fontSize:11 }}>{showKey?"Hide":"Show"}</button>
             </div>
           </div>
           <div>
-            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Wix Site ID Override</label>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Wix Site ID</label>
             <input style={{...iS, fontFamily:"monospace"}} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value={siteId} onChange={e=>setSiteId(e.target.value)} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
           </div>
-          <div>
-            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-              Wix Member ID <span style={{ fontWeight:400, color:"var(--muted)", textTransform:"none", letterSpacing:0 }}>— required to create/publish posts</span>
-            </label>
-            <input style={{...iS, fontFamily:"monospace"}} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value={memberId} onChange={e=>setMemberId(e.target.value)} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
-            <p style={{ fontSize:11, color:"var(--text-secondary)", marginTop:5, lineHeight:1.5 }}>
-              Wix Dashboard → Contacts → Members → click your name → copy the ID from the URL bar
-            </p>
-          </div>
+          <button onClick={testConnection} disabled={!apiKey||!siteId||testing}
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:apiKey&&siteId&&!testing?"var(--amber)":"var(--bg-elevated)", color:apiKey&&siteId&&!testing?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:apiKey&&siteId&&!testing?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
+            {testing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Testing…</> : "Test Connection"}
+          </button>
         </div>
-      </details>
+      )}
 
-      {/* Actions */}
-      <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
-        <button onClick={testConnection} disabled={testing}
-          style={{ padding:"10px 20px", borderRadius:8, border:"none", background:!testing?"var(--amber)":"var(--bg-elevated)", color:!testing?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:!testing?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
-          {testing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Testing…</> : "Test Connection"}
-        </button>
-        {isConnected && (
+      {/* Connected actions */}
+      {isConnected && (
+        <div style={{ display:"flex", gap:10 }}>
           <button onClick={pullPosts} disabled={syncing}
             style={{ padding:"10px 20px", borderRadius:8, border:"none", background:syncing?"var(--bg-elevated)":"#5cba6c", color:syncing?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:syncing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
             {syncing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Syncing…</> : "↓ Pull Posts from Wix"}
           </button>
-        )}
-        {isConnected && (
-          <button onClick={fetchMemberId} disabled={testing}
-            style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:testing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif" }}>
-            🔍 Lookup Member ID
-          </button>
-        )}
-      </div>
+        </div>
+      )}
 
+      {/* Notes */}
       {isConnected && currentPostCount > 0 && (
         <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
-          ▤ Blog Bunker currently has <strong style={{color:"var(--text)"}}>{currentPostCount} posts</strong>. Pulling from Wix adds any posts not already present.
+          ▤ {currentPostCount} posts in Blog Bunker. Pull from Wix to sync any new posts.
         </div>
       )}
 
@@ -1438,10 +1904,10 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
             Sync Log <button onClick={()=>setLog([])} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--muted)", fontSize:11 }}>Clear</button>
           </div>
           <div style={{ maxHeight:220, overflow:"auto", padding:"10px 14px", display:"flex", flexDirection:"column", gap:4 }}>
-            {log.map((l, i) => (
+            {log.map((l,i)=>(
               <div key={i} style={{ fontSize:11, display:"flex", gap:10, alignItems:"flex-start" }}>
                 <span style={{ color:"var(--muted)", flexShrink:0, fontFamily:"monospace", fontSize:10 }}>{l.ts}</span>
-                <span style={{ color: l.type==="success"?"#5cba6c":l.type==="error"?"var(--red)":"var(--text-secondary)", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>{l.msg}</span>
+                <span style={{ color:l.type==="success"?"#5cba6c":l.type==="error"?"var(--red)":"var(--text-secondary)", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>{l.msg}</span>
               </div>
             ))}
           </div>
@@ -1449,7 +1915,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount }) {
       )}
 
       <div style={{ padding:"12px 16px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
-        🔒 Your Wix credentials are stored as Netlify environment variables — they never touch the browser.
+        🔒 OAuth is the recommended connection method — it gives Blog Bunker full read/write access to your Wix Blog without the memberId limitation that affects API keys.
       </div>
     </div>
   );
@@ -1520,7 +1986,7 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
         `Focus area: ${focusMap[focus]}\n\nAlready published/drafted (avoid these angles):\n${existingTitles}\n\nGenerate 10 fresh content ideas.`,
         apiKeys[activeProvider]
       );
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      const parsed = parseAIJson(text);
       setIdeas(parsed);
     } catch(e) {
       setError(e.message || "Generation failed.");
@@ -1644,7 +2110,7 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
         `Competitor: ${comp.name} (${comp.url})\nKnown focus: ${comp.strengths}\nThreat level: ${comp.threat}\n\nGenerate 5 posts they likely published recently and the counter-opportunity for Cask & Stream.`,
         apiKeys[activeProvider]
       );
-      const posts = JSON.parse(text.replace(/```json|```/g, "").trim());
+      const posts = parseAIJson(text);
       const updated = {
         ...tracking,
         [comp.name]: {
@@ -1840,7 +2306,8 @@ function clearPipelineDraft() {
   try { localStorage.removeItem(PIPELINE_STORAGE); } catch {}
 }
 
-function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange }) {
+function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null }) {
+  const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
   const saved = loadPipelineDraft();
   const [stage,     setStage]    = useState(saved?.stage     || "brief");
   const [completed, setCompleted]= useState(saved?.completed || []);
@@ -1886,18 +2353,26 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const btnA = { padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 };
   const btnS = { padding:"10px 20px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" };
 
+  const [promptPreview, setPromptPreview] = useState(null); // { system, user, onConfirm, title, confirmLabel, accentColor }
+
   // ── STAGE 1: BRIEF ──────────────────────────────────────────────────────────
 
-  const generateFromBrief = async () => {
+  const openBriefPromptPreview = () => {
     if (!brief.topic.trim()) return;
-    setLoading(true); setLoadMsg("Generating draft from your brief…"); setError("");
+    const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
+    const system = `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`;
+    const user = `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`;
+    setPromptPreview({ title:"Review Blog Post Prompt", system, user, confirmLabel:"Generate Draft", accentColor:"var(--amber)", mode:"brief" });
+  };
+
+  const generateFromBrief = async (overridePrompt = null) => {
+    if (!brief.topic.trim()) return;
+    setLoading(true); setLoadMsg("Generating draft from your brief…"); setError(""); setPromptPreview(null);
     try {
       const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
-      const text = await callAI(activeProvider, activeModel,
-        `You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`,
-        `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`,
-        apiKeys[activeProvider]
-      );
+      const system = overridePrompt?.system ?? `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`;
+      const user = overridePrompt?.user ?? `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`;
+      const text = await callAI(activeProvider, activeModel, system, user, apiKeys[activeProvider]);
       // Extract title from first # line
       const lines  = text.split("\n");
       const titleLine = lines.find(l => l.startsWith("# "));
@@ -1923,7 +2398,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     setLoading(true); setLoadMsg("Regenerating draft…"); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
-        `You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write in markdown. # title, ## sections. 800+ words. Literary, evocative voice.`,
+        `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write in markdown. # title, ## sections. 800+ words. Literary, evocative voice.`,
         `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\n\nWrite a fresh version of the full post.`,
         apiKeys[activeProvider]
       );
@@ -1943,19 +2418,19 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     try {
       // SEO analysis
       const seoText = await callAI(activeProvider, activeModel,
-        `You are an SEO expert for Cask & Stream. Return ONLY valid JSON (no fences): {"metaTitle":"...","metaDescription":"...","primaryKeyword":"...","secondaryKeywords":["..."],"suggestions":["..."],"score":85}. metaTitle ≤60 chars, metaDescription ≤160 chars, score 0-100.`,
+        `${brandCtx}You are an SEO expert for Cask & Stream. Return ONLY valid JSON (no fences): {"metaTitle":"...","metaDescription":"...","primaryKeyword":"...","secondaryKeywords":["..."],"suggestions":["..."],"score":85}. metaTitle ≤60 chars, metaDescription ≤160 chars, score 0-100.`,
         `Analyze and optimize:\nTitle: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0,1000)}`,
         apiKeys[activeProvider]
       );
-      const seo = JSON.parse(seoText.replace(/```json|```/g,"").trim());
+      const seo = parseAIJson(seoText);
 
       setLoadMsg("Generating headline options…");
       const hlText = await callAI(activeProvider, activeModel,
-        `Generate 5 headline variations for this Cask & Stream blog post. Return ONLY a JSON array of 5 strings. No fences.`,
+        `${brandCtx}Generate 5 headline variations for this Cask & Stream blog post. Return ONLY a JSON array of 5 strings. No fences.`,
         `Original title: ${draft.title}\nTopic: ${brief.topic}`,
         apiKeys[activeProvider]
       );
-      const headlines = JSON.parse(hlText.replace(/```json|```/g,"").trim());
+      const headlines = parseAIJson(hlText);
 
       setEnhance({ ...seo, headlines, improved: seo.metaTitle });
       markDone("enhance");
@@ -1972,7 +2447,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     try {
       for (const plat of targets) {
         setLoadMsg(`Writing ${plat.name} post…`);
-        const system = `You are a social media manager for Cask & Stream. Tagline: "${wsTagline}". Voice: ${plat.tone}. Format: ${plat.format}. ${plat.urlNote}. Write ONLY the post content.`;
+        const system = `${brandCtx}You are a social media manager for Cask & Stream. Tagline: "${wsTagline}". Voice: ${plat.tone}. Format: ${plat.format}. ${plat.urlNote}. Write ONLY the post content.`;
         results[plat.id] = await callAI(activeProvider, activeModel, system,
           `Write a ${plat.name} post based on this blog post:\nTitle: ${draft.title}\n\n${draft.body.slice(0,800)}`,
           apiKeys[activeProvider]
@@ -2023,18 +2498,12 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
         onAddCalEvent({ title: finalPost.title, type: schedule.status === "published" ? "scheduled" : "draft", day });
       }
 
-      // Push to Wix
+      // Push to Wix via Velo HTTP function
       if (schedule.publishToWix && wixConnected) {
-        setLoadMsg("Creating draft on Wix…");
+        setLoadMsg("Publishing to Wix via Velo…");
         const wixCfg = loadWixConfig();
-        const body = buildWixPostBody(finalPost);
-        // Create as draft first, then publish
-        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, wixCfg);
-        const wixId = res?.draftPost?.id;
-        if (wixId && schedule.status === "published") {
-          setLoadMsg("Publishing to Wix…");
-          await wixFetch(`/blog/v3/draft-posts/${wixId}/publish`, "POST", {}, wixCfg);
-        }
+        const result = await wixVeloPush(finalPost, schedule.status === "published", wixCfg);
+        if (result.postId) { finalPost.wixId = result.postId; finalPost.fromWix = true; }
       }
 
       markDone("publish");
@@ -2130,8 +2599,11 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
           {inspiration.length > 0 && (
             <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
               <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>Use from Inspiration Board</div>
-              <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:160, overflow:"auto" }}>
-                {inspiration.slice(0,6).map(item => (
+              <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:280, overflow:"auto" }}>
+                {inspiration.length === 0 && (
+                  <div style={{ fontSize:12, color:"var(--muted)", padding:"8px 0" }}>No inspiration saved yet — use the Research tab to add ideas.</div>
+                )}
+                {inspiration.map(item => (
                   <button key={item.id} onClick={() => setBrief(b => ({ ...b, topic:item.title, angle:item.notes||"", inspiration:item }))}
                     style={{ padding:"8px 12px", borderRadius:8, border:brief.inspiration?.id===item.id?"1px solid var(--amber)":"1px solid var(--border)", background:brief.inspiration?.id===item.id?"var(--amber-glow)":"var(--bg-elevated)", color:"var(--text)", fontSize:12, cursor:"pointer", textAlign:"left", fontFamily:"'DM Sans',sans-serif" }}>
                     <span style={{ fontWeight:600 }}>{item.title}</span>
@@ -2143,7 +2615,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
           )}
 
           <div style={{ display:"flex", gap:10 }}>
-            <button onClick={generateFromBrief} disabled={!brief.topic.trim() || loading} style={{ ...btnA, background:brief.topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:brief.topic.trim()&&!loading?"#0e0f11":"var(--muted)", cursor:brief.topic.trim()&&!loading?"pointer":"not-allowed" }}>
+            <button onClick={openBriefPromptPreview} disabled={!brief.topic.trim() || loading} style={{ ...btnA, background:brief.topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:brief.topic.trim()&&!loading?"#0e0f11":"var(--muted)", cursor:brief.topic.trim()&&!loading?"pointer":"not-allowed" }}>
               {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Writing…</> : <>{provider.logo} Generate Draft</>}
             </button>
             <button onClick={() => { markDone("brief"); advanceTo("draft"); }} style={btnS}>Write Manually →</button>
@@ -2185,9 +2657,9 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
             </div>
             <div>
               <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-                Body <span style={{ fontWeight:400, letterSpacing:0, textTransform:"none", fontSize:10 }}>· Markdown: # H1 · ## H2 · **bold** · - list</span>
+                Body
               </label>
-              <textarea rows={18} value={draft.body} onChange={e=>setDraft(d=>({...d,body:e.target.value}))} style={{ ...iS, resize:"vertical", lineHeight:1.8, fontFamily:"'DM Sans',monospace", fontSize:13 }} />
+              <RichTextEditor value={draft.body} onChange={(md)=>setDraft(d=>({...d,body:md}))} minHeight={380} />
             </div>
           </div>
           <div style={{ display:"flex", gap:10 }}>
@@ -2196,6 +2668,16 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
             </button>
             <button onClick={() => setStage("brief")} style={btnS}>← Back to Brief</button>
           </div>
+
+          {draft.title && (
+            <HeadlineImagePanel
+              title={draft.title}
+              body={draft.body}
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+            />
+          )}
         </div>
       )}
 
@@ -2338,6 +2820,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
               <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:24 }}>{success}</p>
               <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
                 <button onClick={resetPipeline} style={btnA}>Start New Post</button>
+                <button onClick={()=>{ resetPipeline(); /* navigate to posts — handled by parent */; document.querySelector('[data-tab="posts"]')?.click(); }} style={btnS}>View in Posts →</button>
                 <button onClick={()=>setStage("draft")} style={btnS}>Back to Draft</button>
               </div>
             </div>
@@ -2385,17 +2868,70 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
                 <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
                   {[
                     { key:"addToCalendar", label:"Add to Blog Bunker calendar", always:true },
-                    { key:"publishToWix", label:"Publish to Wix Blog (caskandstream.com)", disabled:!wixConnected, note:!wixConnected?"— connect Wix first in Settings":wixConnected?"● Connected":null },
                   ].map(opt=>(
-                    <label key={opt.key} style={{ display:"flex", alignItems:"center", gap:10, cursor:opt.disabled?"not-allowed":"pointer", opacity:opt.disabled?0.5:1 }}>
-                      <div onClick={()=>!opt.disabled&&setSchedule(s=>({...s,[opt.key]:!s[opt.key]}))}
-                        style={{ width:20, height:20, borderRadius:5, border:`2px solid ${schedule[opt.key]&&!opt.disabled?"var(--amber)":"var(--border)"}`, background:schedule[opt.key]&&!opt.disabled?"var(--amber)":"transparent", display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.2s", flexShrink:0, cursor:opt.disabled?"not-allowed":"pointer" }}>
-                        {schedule[opt.key]&&!opt.disabled&&<span style={{ fontSize:12, color:"#0e0f11", fontWeight:700 }}>✓</span>}
+                    <label key={opt.key} style={{ display:"flex", alignItems:"center", gap:10, cursor:"pointer" }}>
+                      <div onClick={()=>setSchedule(s=>({...s,[opt.key]:!s[opt.key]}))}
+                        style={{ width:20, height:20, borderRadius:5, border:`2px solid ${schedule[opt.key]?"var(--amber)":"var(--border)"}`, background:schedule[opt.key]?"var(--amber)":"transparent", display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.2s", flexShrink:0 }}>
+                        {schedule[opt.key]&&<span style={{ fontSize:12, color:"#0e0f11", fontWeight:700 }}>✓</span>}
                       </div>
                       <span style={{ fontSize:13 }}>{opt.label}</span>
-                      {opt.note && <span style={{ fontSize:11, color:wixConnected?"#5cba6c":"var(--muted)" }}>{opt.note}</span>}
                     </label>
                   ))}
+
+                  <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                    <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+                      📋 Copy to Wix Blog
+                    </div>
+                    <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 10px", lineHeight:1.6 }}>
+                      Copy your post as formatted HTML, then paste it into the Wix Blog editor. The post is automatically saved to your Posts tab.
+                    </p>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <button onClick={() => {
+                        // Auto-save to Posts tab first
+                        const finalPost = {
+                          id: Date.now(),
+                          title: enhance.metaTitle || draft.title,
+                          body: draft.body,
+                          category: draft.category,
+                          status: schedule.status || "draft",
+                          date: schedule.publishDate || new Date().toISOString().split("T")[0],
+                          views: 0,
+                          metaTitle: enhance.metaTitle,
+                          metaDescription: enhance.metaDescription,
+                          primaryKeyword: enhance.primaryKeyword,
+                        };
+                        onSavePost(finalPost);
+                        if (schedule.addToCalendar) {
+                          const day = new Date(finalPost.date).getDate();
+                          onAddCalEvent({ title: finalPost.title, type: finalPost.status, day });
+                        }
+                        markDone("publish");
+                        // Copy HTML to clipboard
+                        const html = (draft.body || "")
+                          .split("\n\n").filter(Boolean)
+                          .map(block => {
+                            if (block.startsWith("# "))  return `<h1>${block.slice(2)}</h1>`;
+                            if (block.startsWith("## ")) return `<h2>${block.slice(3)}</h2>`;
+                            if (block.startsWith("### "))return `<h3>${block.slice(4)}</h3>`;
+                            if (block.startsWith("- ") || block.startsWith("* ")) {
+                              const items = block.split("\n").map(l => `<li>${l.slice(2)}</li>`).join("");
+                              return `<ul>${items}</ul>`;
+                            }
+                            const formatted = block.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\*(.*?)\*/g, "<em>$1</em>");
+                            return `<p>${formatted}</p>`;
+                          }).join("\n");
+                        navigator.clipboard.writeText(`<h1>${enhance.metaTitle || draft.title}</h1>\n${html}`);
+                        setSuccess(`✓ Copied! Post saved to Posts tab as "${finalPost.status}".`);
+                      }}
+                        style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                        📋 Copy as HTML
+                      </button>
+                      <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
+                        style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                        ↗ Open Wix Blog
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -2408,6 +2944,20 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
             </>
           )}
         </div>
+      )}
+
+      {promptPreview && (
+        <PromptPreviewModal
+          title={promptPreview.title}
+          systemPrompt={promptPreview.system}
+          userPrompt={promptPreview.user}
+          onSystemChange={(v) => setPromptPreview(p => ({ ...p, system: v }))}
+          onUserChange={(v) => setPromptPreview(p => ({ ...p, user: v }))}
+          confirmLabel={promptPreview.confirmLabel}
+          accentColor={promptPreview.accentColor}
+          onCancel={() => setPromptPreview(null)}
+          onConfirm={() => generateFromBrief({ system: promptPreview.system, user: promptPreview.user })}
+        />
       )}
     </div>
   );
@@ -2732,6 +3282,3174 @@ function GSCAnalyticsView({ data, onRefresh }) {
   );
 }
 
+// ─── POSTS TAB ────────────────────────────────────────────────────────────────
+
+function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, savePost, openEditPost, card }) {
+  const [selectedIds, setSelectedIds] = useState([]);
+  const allSelected = filteredPosts.length > 0 && filteredPosts.every(p => selectedIds.includes(p.id));
+
+  const toggleSelect  = (id)  => setSelectedIds(s => s.includes(id) ? s.filter(x=>x!==id) : [...s, id]);
+  const toggleAll     = ()    => setSelectedIds(allSelected ? [] : filteredPosts.map(p=>p.id));
+  const bulkDelete    = ()    => {
+    if (window.confirm(`Delete ${selectedIds.length} post${selectedIds.length>1?"s":""}?`)) {
+      setPosts(all => all.filter(p => !selectedIds.includes(p.id)));
+      setSelectedIds([]);
+    }
+  };
+  const bulkSetStatus = (status) => {
+    setPosts(all => all.map(p => selectedIds.includes(p.id) ? {...p, status} : p));
+    setSelectedIds([]);
+  };
+
+  const chk = (checked, amber) => ({
+    width:16, height:16, borderRadius:4,
+    border:`2px solid ${checked ? "var(--amber)" : "var(--border)"}`,
+    background: checked ? "var(--amber)" : "transparent",
+    cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0,
+  });
+
+  return (
+    <div>
+      <div style={{display:"flex",gap:8,marginBottom:20,alignItems:"center",flexWrap:"wrap"}}>
+        {["all","published","draft","scheduled"].map(f=>(
+          <button key={f} onClick={()=>{ setPostFilter(f); setSelectedIds([]); }}
+            style={{padding:"6px 14px",borderRadius:99,border:postFilter===f?"1px solid var(--amber)":"1px solid var(--border)",background:postFilter===f?"var(--amber-glow)":"transparent",color:postFilter===f?"var(--amber)":"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",textTransform:"capitalize"}}>
+            {f==="all"?`All (${posts.length})`:`${f} (${posts.filter(p=>p.status===f).length})`}
+          </button>
+        ))}
+
+        {selectedIds.length > 0 && (
+          <div style={{display:"flex",gap:6,marginLeft:"auto",alignItems:"center"}}>
+            <span style={{fontSize:11,color:"var(--text-secondary)"}}>{selectedIds.length} selected</span>
+            <select onChange={e=>{ if(e.target.value){ bulkSetStatus(e.target.value); e.target.value=""; } }} defaultValue=""
+              style={{padding:"5px 10px",borderRadius:7,border:"1px solid var(--border)",background:"var(--bg-elevated)",color:"var(--text)",fontSize:12,cursor:"pointer",fontFamily:"var(--font-body)"}}>
+              <option value="" disabled>Change status…</option>
+              <option value="published">→ Published</option>
+              <option value="draft">→ Draft</option>
+              <option value="scheduled">→ Scheduled</option>
+            </select>
+            <button onClick={bulkDelete}
+              style={{padding:"5px 12px",borderRadius:7,border:"1px solid var(--red)44",background:"var(--red)0a",color:"var(--red)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)"}}>
+              🗑 Delete {selectedIds.length}
+            </button>
+            <button onClick={()=>setSelectedIds([])}
+              style={{padding:"5px 10px",borderRadius:7,border:"1px solid var(--border)",background:"transparent",color:"var(--text-secondary)",fontSize:12,cursor:"pointer",fontFamily:"var(--font-body)"}}>
+              ✕ Clear
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div style={{...card, padding:0, overflow:"hidden"}}>
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <thead>
+            <tr style={{borderBottom:"1px solid var(--border)"}}>
+              <th style={{padding:"12px 16px",width:36}}>
+                <div onClick={toggleAll} style={chk(allSelected)}>
+                  {allSelected&&<span style={{fontSize:10,color:"#0e0f11",fontWeight:900}}>✓</span>}
+                </div>
+              </th>
+              {["Title","Category","Status","Date","Views"].map(h=>(
+                <th key={h} style={{textAlign:"left",padding:"12px 16px",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filteredPosts.map(p => {
+              const sel = selectedIds.includes(p.id);
+              return (
+                <tr key={p.id} style={{borderBottom:"1px solid var(--border)",background:sel?"var(--amber-glow)":"transparent"}}
+                  onMouseEnter={e=>{ if(!sel) e.currentTarget.style.background="var(--bg-hover)"; }}
+                  onMouseLeave={e=>{ e.currentTarget.style.background=sel?"var(--amber-glow)":"transparent"; }}>
+                  <td style={{padding:"12px 16px"}} onClick={e=>{ e.stopPropagation(); toggleSelect(p.id); }}>
+                    <div style={chk(sel)}>
+                      {sel&&<span style={{fontSize:10,color:"#0e0f11",fontWeight:900}}>✓</span>}
+                    </div>
+                  </td>
+                  <td style={{padding:"14px 16px",fontWeight:600,fontSize:13,cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.title}</td>
+                  <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)",cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.category}</td>
+                  <td style={{padding:"10px 16px"}} onClick={e=>e.stopPropagation()}>
+                    <select value={p.status} onChange={e=>savePost({...p,status:e.target.value})}
+                      style={{padding:"4px 8px",borderRadius:6,border:"1px solid var(--border)",background:"var(--bg-elevated)",color:"var(--text)",fontSize:11,cursor:"pointer",fontFamily:"var(--font-body)"}}>
+                      <option value="draft">Draft</option>
+                      <option value="published">Published</option>
+                      <option value="scheduled">Scheduled</option>
+                    </select>
+                  </td>
+                  <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)",cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.date}</td>
+                  <td style={{padding:"14px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.views>0?p.views.toLocaleString():"—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── META (FACEBOOK + INSTAGRAM) INTEGRATION ─────────────────────────────────
+
+const META_STORAGE = "bb_meta_config";
+function loadMetaConfig() { try { return JSON.parse(localStorage.getItem(META_STORAGE) || "{}"); } catch { return {}; } }
+function saveMetaConfig(d) { try { localStorage.setItem(META_STORAGE, JSON.stringify(d)); } catch {} }
+
+// Converts a blob: URL (from generated images) into a publicly fetchable URL.
+// Required for Instagram, which needs a real https:// URL it can fetch server-side.
+async function ensurePublicImageUrl(imageUrl) {
+  if (!imageUrl) return null;
+  if (!imageUrl.startsWith("blob:")) return imageUrl; // already public (e.g. http url)
+
+  // Fetch the blob and convert to base64 data URL, compressing if needed
+  const blobRes = await fetch(imageUrl);
+  if (!blobRes.ok) throw new Error(`Could not read generated image (${blobRes.status})`);
+  const blob = await blobRes.blob();
+
+  let dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Failed to encode image"));
+    reader.readAsDataURL(blob);
+  });
+
+  // If too large for the function's request limit, recompress via canvas
+  const MAX_LEN = 4_000_000; // ~4MB base64 — safe margin under Netlify's 6MB cap
+  if (dataUrl.length > MAX_LEN) {
+    dataUrl = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        // Scale down proportionally until under target size
+        let scale = Math.sqrt(MAX_LEN / dataUrl.length) * 0.9;
+        canvas.width  = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.85));
+      };
+      img.onerror = () => reject(new Error("Failed to load image for compression"));
+      img.src = dataUrl;
+    });
+  }
+
+  // Upload to Netlify Blobs, get back a public URL
+  let res;
+  try {
+    res = await fetch("/api/upload-image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataUrl }),
+    });
+  } catch (e) {
+    throw new Error(`Could not reach /api/upload-image — network error: ${e.message}`);
+  }
+
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error(`Image upload failed (${res.status}): server returned non-JSON — ${text.slice(0,150) || "(empty response — likely a gateway/size error)"}`); }
+
+  if (!res.ok || data.error) throw new Error(`Image upload failed: ${data.error || res.status}`);
+  if (!data.url) throw new Error("Image upload succeeded but no URL was returned");
+  return data.url;
+}
+
+async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, link, platforms }) {
+  let finalImageUrl = imageUrl;
+  // Instagram requires a publicly fetchable URL — convert blob: URLs
+  if (platforms.includes("instagram") && imageUrl?.startsWith("blob:")) {
+    finalImageUrl = await ensurePublicImageUrl(imageUrl);
+  }
+  const res = await fetch("/api/meta-post", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pageId, pageToken, instagramId, message, imageUrl: finalImageUrl, link, platforms }),
+  });
+  return await res.json();
+}
+
+function MetaConnectPanel({ onConnected }) {
+  const [cfg,      setCfg]     = useState(loadMetaConfig);
+  const [appId,    setAppId]   = useState(cfg.appId || "");
+  const [loading,  setLoading] = useState(false);
+  const [log,      setLog]     = useState("");
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
+
+  // Listen for OAuth callback postMessage
+  useEffect(() => {
+    const handleMsg = (e) => {
+      if (e.origin !== "https://blogbunker.netlify.app") return;
+      if (e.data?.type !== "meta_oauth_success") return;
+      const { user_token, pages } = e.data;
+      const newCfg = { ...cfg, appId, userToken: user_token, pages, connected: true, connectedAt: new Date().toISOString() };
+      saveMetaConfig(newCfg); setCfg(newCfg);
+      setLog(`✓ Connected! Found ${pages.length} page${pages.length!==1?"s":""}${pages.some(p=>p.instagram_id)?" + Instagram":""}. Select which page to post to in Social settings.`);
+      if (onConnected) onConnected(newCfg);
+    };
+    window.addEventListener("message", handleMsg);
+    return () => window.removeEventListener("message", handleMsg);
+  }, [appId, cfg]);
+
+  const connect = () => {
+    if (!appId) { setLog("Paste your Meta App ID first."); return; }
+    const redirectUri = "https://blogbunker.netlify.app/api/meta-callback";
+    // Use only scopes valid for Pages + Instagram content management use cases
+    const scope = "pages_show_list,pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish,business_management";
+    const authUrl = `https://www.facebook.com/dialog/oauth?client_id=${appId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&response_type=code`;
+    setLog("Opening Facebook authorization…");
+    const popup = window.open(authUrl, "meta_auth", "width=650,height=700,scrollbars=yes");
+    if (!popup) setLog("Popup blocked — allow popups for blogbunker.netlify.app and try again.");
+  };
+
+  const disconnect = () => {
+    saveMetaConfig({}); setCfg({}); setLog("");
+    if (onConnected) onConnected({});
+  };
+
+  if (cfg.connected && cfg.pages) {
+    return (
+      <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+        <div style={{ padding:14, borderRadius:10, border:"1px solid #5cba6c44", background:"#5cba6c0a", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <div>
+            <div style={{ fontWeight:700, fontSize:14 }}>✓ Facebook & Instagram Connected</div>
+            <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:3 }}>
+              {cfg.pages.length} page{cfg.pages.length!==1?"s":""} · {cfg.pages.filter(p=>p.instagram_id).length} Instagram linked
+            </div>
+          </div>
+          <button onClick={disconnect} style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>Disconnect</button>
+        </div>
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Your Pages</div>
+          {cfg.pages.map(p => (
+            <div key={p.id} style={{ padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", marginBottom:6, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <div style={{ fontWeight:600, fontSize:13 }}>{p.name}</div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)" }}>
+                  Facebook Page {p.instagram_id ? "· Instagram linked ✓" : "· No Instagram"}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--amber-glow)", border:"1px solid var(--amber)33", fontSize:12, color:"var(--text-secondary)", lineHeight:1.8 }}>
+        <strong style={{color:"var(--amber)"}}>Setup (one time):</strong><br/>
+        1. Go to <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>developers.facebook.com/apps</a> → Create App → Business type<br/>
+        2. Add <strong style={{color:"var(--text)"}}>Facebook Login</strong> product → set redirect URI to:<br/>
+        <code style={{background:"var(--bg-elevated)",padding:"2px 6px",borderRadius:4,fontSize:11}}>https://blogbunker.netlify.app/api/meta-callback</code><br/>
+        3. Add <strong style={{color:"var(--text)"}}>Instagram Graph API</strong> product for Instagram posting<br/>
+        4. In Netlify env vars add <code style={{background:"var(--bg-elevated)",padding:"1px 4px",borderRadius:3,fontSize:11}}>META_APP_ID</code> and <code style={{background:"var(--bg-elevated)",padding:"1px 4px",borderRadius:3,fontSize:11}}>META_APP_SECRET</code><br/>
+        5. Paste your App ID below and click Connect
+      </div>
+      <div>
+        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Meta App ID</label>
+        <input style={iS} placeholder="1234567890123456" value={appId} onChange={e=>setAppId(e.target.value)}
+          onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+      </div>
+      <button onClick={connect} disabled={!appId || loading}
+        style={{ padding:"11px 24px", borderRadius:8, border:"none", background:appId&&!loading?"#1877f2":"var(--bg-elevated)", color:appId&&!loading?"#fff":"var(--muted)", fontSize:13, fontWeight:700, cursor:appId&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:10, alignSelf:"flex-start" }}>
+        <span style={{fontSize:16}}>f</span> Connect with Facebook
+      </button>
+      {log && <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>{log}</div>}
+    </div>
+  );
+}
+
+// ─── SOCIAL STUDIO ────────────────────────────────────────────────────────────
+// Full standalone social media creation studio with sub-tabs
+
+class MarketingErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("Marketing tab crash:", error, info?.componentStack?.slice(0,500)); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding:24, borderRadius:12, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13, lineHeight:1.7 }}>
+          <div style={{ fontWeight:700, marginBottom:8 }}>Marketing tab error — check browser console for details</div>
+          <div style={{ fontFamily:"monospace", fontSize:11, color:"var(--text-secondary)", background:"var(--bg-elevated)", padding:12, borderRadius:8, whiteSpace:"pre-wrap" }}>
+            {this.state.error?.message}
+          </div>
+          <button onClick={() => this.setState({ error: null })} style={{ marginTop:12, padding:"6px 16px", borderRadius:7, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer" }}>
+            Try Again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost }) {
+  const [tab, setTab] = useState("pipeline");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const scheduledCount = socialPosts.filter(p => p.status === "scheduled").length;
+
+  const TABS = [
+    { id:"pipeline",   label:"Social Pipeline",  icon:"◈", highlight:true },
+    { id:"scheduled",  label:"Social Posts",      icon:"▤", badge: socialPosts.length || null },
+    { id:"media",      label:"Media Library",     icon:"🖼" },
+    { id:"create",     label:"Quick Post",        icon:"✎" },
+    { id:"email",      label:"Email",             icon:"✉" },
+    { id:"pinterest",  label:"Pinterest",         icon:"📌" },
+    { id:"seo",        label:"Keyword Research",  icon:"◎" },
+    { id:"research",   label:"Research",          icon:"⊕" },
+    { id:"hashtags",   label:"Hashtags",          icon:"#" },
+    { id:"image",      label:"Image Studio",      icon:"▣" },
+    { id:"ideas",      label:"Post Ideas",        icon:"✦" },
+    { id:"competitor", label:"Competitors",       icon:"⊗" },
+  ];
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Marketing Studio</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Social, email, Pinterest, SEO, keyword research, and competitive intelligence — all in one place.</p>
+        </div>
+        <ProviderPicker activeProvider={activeProvider} activeModel={activeModel} onProviderChange={handleProviderChange} onModelChange={handleModelChange} keys={apiKeys} compact />
+      </div>
+
+      {/* Sub-tabs */}
+      <div style={{ display:"flex", gap:4, marginBottom:24, flexWrap:"wrap" }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            style={{ padding:"7px 14px", borderRadius:8, border:tab===t.id?"1px solid var(--amber)":"1px solid var(--border)", background:tab===t.id?"var(--amber-glow)":"transparent", color:tab===t.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5 }}>
+            <span>{t.icon}</span>{t.label}
+            {t.highlight && tab !== t.id && <span style={{ fontSize:8, fontWeight:700, padding:"1px 5px", borderRadius:99, background:"var(--amber)", color:"#0e0f11", marginLeft:2 }}>NEW</span>}
+            {t.badge > 0 && <span style={{ fontSize:10, fontWeight:700, padding:"1px 6px", borderRadius:99, background:tab===t.id?"var(--amber)":"var(--bg-elevated)", color:tab===t.id?"#0e0f11":"var(--text-secondary)", border:"1px solid var(--border)", marginLeft:2 }}>{t.badge}</span>}
+          </button>
+        ))}
+      </div>
+
+      {/* ── MEDIA LIBRARY ── */}
+      {tab === "media" && (
+        <MediaLibrary />
+      )}
+
+      {/* ── SCHEDULED POSTS ── */}
+      {tab === "scheduled" && (
+        <SocialPostsManager
+          socialPosts={socialPosts}
+          metaConfig={metaConfig}
+          onSave={onSaveSocialPost}
+          onDelete={onDeleteSocialPost}
+        />
+      )}
+
+      {/* ── SOCIAL PIPELINE ── */}
+      {tab === "pipeline" && (
+        <SocialPipeline
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          dark={dark}
+          metaConfig={metaConfig}
+          inspiration={inspiration}
+          onAddInspiration={onAddInspiration}
+          onSaveSocialPost={onSaveSocialPost}
+        />
+      )}
+
+      {/* ── QUICK POST ── */}
+      {tab === "create" && (
+        <SocialPostTab
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          dark={dark}
+          metaConfig={metaConfig}
+        />
+      )}
+
+      {/* ── EMAIL NEWSLETTER ── */}
+      {tab === "email" && (
+        <EmailNewsletterStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          brandGuide={brandGuide}
+        />
+      )}
+
+      {/* ── PINTEREST ── */}
+      {tab === "pinterest" && (
+        <PinterestStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          brandGuide={brandGuide}
+        />
+      )}
+
+      {/* ── KEYWORD RESEARCH ── */}
+      {tab === "seo" && (
+        <KeywordResearchStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          inspiration={inspiration}
+          onAddInspiration={onAddInspiration}
+        />
+      )}
+
+      {/* ── RESEARCH ── */}
+      {tab === "research" && (
+        <SocialResearch
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          inspiration={inspiration}
+          onAddInspiration={onAddInspiration}
+        />
+      )}
+
+      {/* ── HASHTAGS ── */}
+      {tab === "hashtags" && (
+        <HashtagOptimizer
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+        />
+      )}
+
+      {/* ── IMAGE STUDIO ── */}
+      {tab === "image" && (
+        <SocialImageStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+        />
+      )}
+
+      {/* ── POST IDEAS ── */}
+      {tab === "ideas" && (
+        <SocialPostIdeas
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          inspiration={inspiration}
+          onAddInspiration={onAddInspiration}
+        />
+      )}
+
+      {/* ── COMPETITORS ── */}
+      {tab === "competitor" && (
+        <CompetitorMarketingPanel
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          competitors={competitors}
+          posts={posts}
+          inspiration={inspiration}
+          onAddInspiration={onAddInspiration}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── SOCIAL RESEARCH ──────────────────────────────────────────────────────────
+
+function SocialResearch({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
+  const [topic,   setTopic]   = useState("");
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const research = async () => {
+    if (!topic.trim()) return;
+    setLoading(true); setError(""); setResults(null);
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a social media strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Research the given topic and return ONLY valid JSON (no fences):
+{
+  "trending": [{"topic":"...","why":"...","platforms":["instagram","tiktok"]}],
+  "angles": [{"angle":"...","hook":"...","platform":"..."}],
+  "competitors": [{"account":"...","what_works":"..."}],
+  "bestTimes": {"instagram":"...","facebook":"...","tiktok":"..."},
+  "contentIdeas": ["...", "..."]
+}`,
+        `Research social media opportunities for: ${topic}\nExisting posts: ${posts.slice(0,5).map(p=>p.title).join(", ")}`,
+        apiKeys[activeProvider]
+      );
+      setResults(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Research Topic or Niche</div>
+        <div style={{ display:"flex", gap:10 }}>
+          <input style={{ ...iS }} placeholder="e.g. dry fly fishing on freestone streams, bourbon cocktails for outdoors…" value={topic} onChange={e=>setTopic(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&research()}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          <button onClick={research} disabled={!topic.trim()||loading}
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:topic.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:topic.trim()&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:8 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Researching…</> : `${provider.logo} Research`}
+          </button>
+        </div>
+      </div>
+
+      {error && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>}
+
+      {results && (
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+          {/* Trending */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)", marginBottom:14 }}>🔥 Trending Topics</div>
+            {results.trending?.map((t,i) => (
+              <div key={i} style={{ padding:"10px 0", borderBottom:"1px solid var(--border)", display:"flex", flexDirection:"column", gap:4 }}>
+                <div style={{ fontWeight:600, fontSize:13 }}>{t.topic}</div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)" }}>{t.why}</div>
+                <div style={{ display:"flex", gap:4, marginTop:2 }}>
+                  {t.platforms?.map(p => <span key={p} style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:"var(--bg-elevated)", color:"var(--muted)", border:"1px solid var(--border)" }}>{p}</span>)}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Angles */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:14 }}>💡 Content Angles</div>
+            {results.angles?.map((a,i) => (
+              <div key={i} style={{ padding:"10px 0", borderBottom:"1px solid var(--border)" }}>
+                <div style={{ fontWeight:600, fontSize:13, marginBottom:3 }}>{a.angle}</div>
+                <div style={{ fontSize:11, color:"var(--amber)", marginBottom:3 }}>Hook: {a.hook}</div>
+                <div style={{ fontSize:10, color:"var(--muted)" }}>Best for: {a.platform}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Best times */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7c3aed", marginBottom:14 }}>⏰ Best Posting Times</div>
+            {results.bestTimes && Object.entries(results.bestTimes).map(([plat, time]) => (
+              <div key={plat} style={{ display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom:"1px solid var(--border)" }}>
+                <span style={{ fontSize:12, textTransform:"capitalize", fontWeight:500 }}>{plat}</span>
+                <span style={{ fontSize:12, color:"var(--text-secondary)" }}>{time}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Content ideas */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📋 Quick Ideas</div>
+            {results.contentIdeas?.map((idea,i) => (
+              <div key={i} style={{ display:"flex", gap:10, padding:"8px 0", borderBottom:"1px solid var(--border)", alignItems:"flex-start" }}>
+                <span style={{ color:"var(--amber)", fontSize:11, flexShrink:0, marginTop:1 }}>→</span>
+                <span style={{ fontSize:12 }}>{idea}</span>
+                <button onClick={() => onAddInspiration({ id:Date.now()+i, title:idea, source:"Social Research", type:"article", notes:`Topic: ${topic}` })}
+                  style={{ marginLeft:"auto", padding:"2px 8px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:10, cursor:"pointer", fontFamily:"var(--font-body)", flexShrink:0 }}>
+                  + Board
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── HASHTAG OPTIMIZER ────────────────────────────────────────────────────────
+
+function HashtagOptimizer({ activeProvider, activeModel, apiKeys }) {
+  const [topic,    setTopic]    = useState("");
+  const [platform, setPlatform] = useState("instagram");
+  const [results,  setResults]  = useState(null);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState("");
+  const [copied,   setCopied]   = useState("");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const generate = async () => {
+    if (!topic.trim()) return;
+    setLoading(true); setError(""); setResults(null);
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a hashtag strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Generate optimized hashtags. Return ONLY valid JSON (no fences):
+{
+  "primary": ["#tag1","#tag2"],
+  "niche": ["#tag1","#tag2"],
+  "trending": ["#tag1","#tag2"],
+  "branded": ["#CaskAndStream","#CastAtDawn"],
+  "sets": {
+    "max_reach": "full hashtag string for copy-paste",
+    "niche_focus": "niche hashtag string",
+    "branded_only": "branded only string"
+  }
+}
+primary = 5 high-volume (100k-1M posts), niche = 8 medium-volume (10k-100k), trending = 5 current trends, branded = 3-4 brand-specific`,
+        `Topic: ${topic}\nPlatform: ${platform}`,
+        apiKeys[activeProvider]
+      );
+      setResults(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const copySet = (key, val) => {
+    navigator.clipboard.writeText(val);
+    setCopied(key);
+    setTimeout(() => setCopied(""), 2000);
+  };
+
+  const PLATS = [{ id:"instagram", label:"Instagram" },{ id:"tiktok", label:"TikTok" },{ id:"facebook", label:"Facebook" },{ id:"twitter", label:"X/Twitter" }];
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        <div style={{ display:"flex", gap:10, marginBottom:14 }}>
+          {PLATS.map(p => (
+            <button key={p.id} onClick={() => setPlatform(p.id)}
+              style={{ padding:"6px 14px", borderRadius:99, border:platform===p.id?"1px solid var(--amber)":"1px solid var(--border)", background:platform===p.id?"var(--amber-glow)":"transparent", color:platform===p.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ display:"flex", gap:10 }}>
+          <input style={iS} placeholder="e.g. dry fly fishing, bourbon tasting, fly tying…" value={topic} onChange={e=>setTopic(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&generate()}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          <button onClick={generate} disabled={!topic.trim()||loading}
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:topic.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:topic.trim()&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:8 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : "# Generate Hashtags"}
+          </button>
+        </div>
+      </div>
+
+      {error && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11" }}>{error}</div>}
+
+      {results && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Tag groups */}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12 }}>
+            {[
+              { key:"primary",  label:"High Volume",  color:"var(--amber)" },
+              { key:"niche",    label:"Niche Focus",  color:"#5cba6c"      },
+              { key:"trending", label:"Trending",     color:"#7c3aed"      },
+              { key:"branded",  label:"Branded",      color:"var(--amber)", span:3 },
+            ].map(g => (
+              <div key={g.key} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:14, ...(g.span?{gridColumn:`span ${g.span}`}:{}) }}>
+                <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:g.color, marginBottom:10 }}>{g.label}</div>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                  {results[g.key]?.map((tag,i) => (
+                    <span key={i} onClick={() => { navigator.clipboard.writeText(tag); }}
+                      style={{ fontSize:12, padding:"4px 10px", borderRadius:99, background:g.color+"15", color:g.color, border:`1px solid ${g.color}33`, cursor:"pointer", fontWeight:500 }}
+                      title="Click to copy">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Ready-to-use sets */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📋 Ready-to-Use Sets</div>
+            {results.sets && Object.entries(results.sets).map(([key, val]) => (
+              <div key={key} style={{ padding:"12px 0", borderBottom:"1px solid var(--border)" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+                  <div style={{ fontSize:12, fontWeight:600, textTransform:"capitalize" }}>{key.replace(/_/g," ")}</div>
+                  <button onClick={() => copySet(key, val)}
+                    style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied===key?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    {copied===key ? "✓ Copied!" : "Copy All"}
+                  </button>
+                </div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.7, wordBreak:"break-word" }}>{val}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SOCIAL IMAGE STUDIO ──────────────────────────────────────────────────────
+
+function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
+  const [topic,    setTopic]    = useState("");
+  const [style,    setStyle]    = useState("cinematic");
+  const [platform, setPlatform] = useState("instagram");
+  const [prompt,   setPrompt]   = useState("");
+  const [imageUrl, setImageUrl] = useState(null);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState("");
+  const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
+  const provider = imgProvider;
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
+
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [draftPrompt, setDraftPrompt] = useState("");
+
+  const STYLES = [
+    { id:"cinematic",   label:"Cinematic"    },
+    { id:"editorial",   label:"Editorial"    },
+    { id:"lifestyle",   label:"Lifestyle"    },
+    { id:"minimal",     label:"Minimal"      },
+    { id:"vintage",     label:"Vintage Film" },
+    { id:"moody",       label:"Dark & Moody" },
+  ];
+
+  const styleMap = {
+    cinematic:  "cinematic photography, anamorphic lens, golden hour, film grain",
+    editorial:  "editorial photography, clean composition, magazine quality",
+    lifestyle:  "lifestyle photography, authentic, natural light, candid",
+    minimal:    "minimalist photography, negative space, simple composition",
+    vintage:    "vintage film photography, faded colors, grain, retro aesthetic",
+    moody:      "dark moody photography, dramatic shadows, rich tones, atmospheric",
+  };
+
+  // Step 1 — draft the prompt and show it for review/editing
+  const openPromptPreview = async () => {
+    if (!topic.trim() || !provider) return;
+    setLoading(true); setError("");
+    try {
+      const aiPrompt = `Generate an image prompt for a Cask & Stream (fly fishing and whiskey lifestyle brand) ${platform} post. Style: ${styleMap[style]}. Topic: ${topic}. Amber and teal color palette. Return ONLY the prompt, no explanation.`;
+      const generatedPrompt = await callAI(activeProvider, activeModel, "You generate concise, vivid image prompts. Return only the prompt string.", aiPrompt, apiKeys[activeProvider]);
+      setDraftPrompt(generatedPrompt.trim());
+      setPreviewOpen(true);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  // Step 2 — actually generate the image from the (possibly edited) prompt
+  const generate = async (finalPrompt) => {
+    setPreviewOpen(false);
+    setLoading(true); setError(""); setImageUrl(null);
+    try {
+      setPrompt(finalPrompt);
+      const url = await generateImage(finalPrompt, platform, apiKeys, imgProvider);
+      setImageUrl(url);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const PLATS = ["instagram","facebook","tiktok","twitter"];
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
+        {/* Platform */}
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Platform</div>
+          <div style={{ display:"flex", gap:6 }}>
+            {PLATS.map(p => (
+              <button key={p} onClick={() => setPlatform(p)}
+                style={{ padding:"5px 14px", borderRadius:99, border:platform===p?"1px solid var(--amber)":"1px solid var(--border)", background:platform===p?"var(--amber-glow)":"transparent", color:platform===p?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
+                {p}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Style */}
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Visual Style</div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+            {STYLES.map(s => (
+              <button key={s.id} onClick={() => setStyle(s.id)}
+                style={{ padding:"5px 14px", borderRadius:99, border:style===s.id?"1px solid #7c3aed":"1px solid var(--border)", background:style===s.id?"#7c3aed18":"transparent", color:style===s.id?"#a78bfa":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Image AI Provider */}
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Image AI</div>
+          <ImageProviderPicker apiKeys={apiKeys} value={imgProvider} onChange={handleImgProviderChange} />
+        </div>
+
+        {/* Topic */}
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Topic / Subject</div>
+          <input style={iS} placeholder="e.g. dry fly fishing at sunset, aged bourbon on river rocks, fly tying…" value={topic} onChange={e=>setTopic(e.target.value)}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        </div>
+
+        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+          <button onClick={openPromptPreview} disabled={!topic.trim()||loading||!provider}
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:topic.trim()&&!loading&&provider?"#7c3aed":"var(--bg-elevated)", color:topic.trim()&&!loading&&provider?"#fff":"var(--muted)", fontSize:13, fontWeight:700, cursor:topic.trim()&&!loading&&provider?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Working…</> : "▣ Generate Image"}
+          </button>
+          {!provider && <span style={{ fontSize:11, color:"var(--amber)" }}>Select an image AI above</span>}
+          {error && <span style={{ fontSize:12, color:"var(--red)" }}>{error}</span>}
+        </div>
+      </div>
+
+      {/* Last used prompt (read-only reference, edit happens in the preview modal) */}
+      {prompt && (
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:14 }}>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Last Prompt Used</div>
+          <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{prompt}</div>
+          <button onClick={() => { setDraftPrompt(prompt); setPreviewOpen(true); }}
+            style={{ marginTop:8, padding:"5px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            View/Edit & Regenerate
+          </button>
+        </div>
+      )}
+
+      {/* Image output */}
+      {imageUrl && (
+        <div style={{ position:"relative", borderRadius:12, overflow:"hidden", border:"1px solid var(--border)" }}>
+          <img src={imageUrl} alt="Generated" style={{ width:"100%", display:"block" }} />
+          <div style={{ position:"absolute", bottom:12, right:12, display:"flex", gap:6 }}>
+            <button onClick={() => { const a=document.createElement("a"); a.href=imageUrl; a.download=`social-${platform}-${Date.now()}.webp`; a.click(); }}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              ↓ Download
+            </button>
+            <button onClick={openPromptPreview}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              ↻ New
+            </button>
+            <SaveToLibraryButton imageUrl={imageUrl} tags={[platform, "generated"]} name={`${platform}-${topic.slice(0,20)}`} />
+          </div>
+        </div>
+      )}
+
+      {previewOpen && (
+        <PromptPreviewModal
+          title="Review Image Prompt"
+          systemPrompt={null}
+          userPrompt={draftPrompt}
+          onUserChange={setDraftPrompt}
+          confirmLabel="Generate Image"
+          accentColor="#7c3aed"
+          onCancel={() => setPreviewOpen(false)}
+          onConfirm={() => generate(draftPrompt)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── SOCIAL POST IDEAS ────────────────────────────────────────────────────────
+
+function SocialPostIdeas({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
+  const [ideas,   setIdeas]   = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+  const [saved,   setSaved]   = useState({});
+  const [filter,  setFilter]  = useState("all");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  const FILTERS = [
+    { id:"all",       label:"All Platforms" },
+    { id:"instagram", label:"Instagram"     },
+    { id:"facebook",  label:"Facebook"      },
+    { id:"tiktok",    label:"TikTok"        },
+    { id:"twitter",   label:"X/Twitter"     },
+  ];
+
+  const generate = async () => {
+    setLoading(true); setError(""); setSaved({});
+    try {
+      const existingTitles = posts.slice(0,8).map(p=>p.title).join(", ");
+      const text = await callAI(activeProvider, activeModel,
+        `You are a social media strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Generate 10 social post ideas. Return ONLY valid JSON array, no markdown fences, no explanation before or after. Keep every field SHORT — one sentence max per field:
+[{"platform":"instagram","type":"reel","hook":"short hook","caption_idea":"one sentence","visual":"one sentence","hashtag_theme":"2-3 words"}]
+Mix platforms across instagram, tiktok, facebook, twitter. Be concise — brevity matters more than detail here.`,
+        `Cask & Stream. Existing: ${existingTitles}. Generate exactly 10 ideas, keep all fields brief.`,
+        apiKeys[activeProvider],
+        2200
+      );
+      setIdeas(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const saveIdea = (idea, i) => {
+    onAddInspiration({ id:Date.now()+i, title:idea.hook, source:`Social Ideas — ${idea.platform}`, type:"article", notes:`${idea.caption_idea}\n\nVisual: ${idea.visual}\nHashtag theme: ${idea.hashtag_theme}` });
+    setSaved(s => ({...s, [i]:true}));
+  };
+
+  const filtered = filter === "all" ? ideas : ideas.filter(i => i.platform === filter);
+  const platColor = { instagram:"#e1306c", facebook:"#1877f2", tiktok:"#010101", twitter:"#1da1f2" };
+  const platIcon  = { instagram:"📸", facebook:"👍", tiktok:"🎵", twitter:"🐦" };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 4px" }}>Social Post Ideas</h3>
+          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>AI-generated post ideas tailored to Cask & Stream — save to Inspiration Board.</p>
+        </div>
+        <button onClick={generate} disabled={loading}
+          style={{ padding:"10px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : `${provider.logo} Generate 10 Ideas`}
+        </button>
+      </div>
+
+      {error && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11" }}>{error}</div>}
+
+      {ideas.length > 0 && (
+        <>
+          <div style={{ display:"flex", gap:6 }}>
+            {FILTERS.map(f => (
+              <button key={f.id} onClick={() => setFilter(f.id)}
+                style={{ padding:"5px 12px", borderRadius:99, border:filter===f.id?"1px solid var(--amber)":"1px solid var(--border)", background:filter===f.id?"var(--amber-glow)":"transparent", color:filter===f.id?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                {f.label} {f.id!=="all"&&`(${ideas.filter(i=>i.platform===f.id).length})`}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {filtered.map((idea, i) => (
+              <div key={i} style={{ background:"var(--bg-surface)", border:`1px solid ${saved[ideas.indexOf(idea)]?"var(--green)44":"var(--border)"}`, borderRadius:10, padding:"14px 16px", display:"flex", gap:12, alignItems:"flex-start" }}>
+                <div style={{ width:36, height:36, borderRadius:8, background:(platColor[idea.platform]||"var(--amber)")+"15", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>
+                  {platIcon[idea.platform] || "📱"}
+                </div>
+                <div style={{ flex:1 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+                    <span style={{ fontSize:10, fontWeight:700, color:platColor[idea.platform]||"var(--amber)", textTransform:"uppercase" }}>{idea.platform}</span>
+                    <span style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:"var(--bg-elevated)", color:"var(--muted)", border:"1px solid var(--border)" }}>{idea.type}</span>
+                  </div>
+                  <div style={{ fontWeight:600, fontSize:13, marginBottom:4 }}>{idea.hook}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>{idea.caption_idea}</div>
+                  <div style={{ fontSize:11, color:"var(--muted)", fontStyle:"italic" }}>🎬 {idea.visual}</div>
+                </div>
+                <button onClick={() => saveIdea(idea, ideas.indexOf(idea))} disabled={saved[ideas.indexOf(idea)]}
+                  style={{ padding:"5px 12px", borderRadius:6, border:"none", background:saved[ideas.indexOf(idea)]?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[ideas.indexOf(idea)]?"default":"pointer", fontFamily:"var(--font-body)", flexShrink:0, whiteSpace:"nowrap" }}>
+                  {saved[ideas.indexOf(idea)] ? "✓ Saved" : "+ Board"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {!ideas.length && !loading && (
+        <div style={{ textAlign:"center", padding:"48px 20px", color:"var(--muted)", fontSize:13 }}>
+          <div style={{ fontSize:32, marginBottom:12 }}>◈</div>
+          Click "Generate 10 Ideas" to get platform-specific post ideas for Cask & Stream.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SOCIAL PIPELINE ──────────────────────────────────────────────────────────
+// 5-stage workflow: Idea → Caption → Hashtags → Image → Publish
+
+const SOCIAL_PIPELINE_STORAGE = "bb_social_pipeline_draft";
+function loadSocialPipelineDraft() { try { return JSON.parse(localStorage.getItem(SOCIAL_PIPELINE_STORAGE) || "null"); } catch { return null; } }
+function saveSocialPipelineDraft(d) { try { localStorage.setItem(SOCIAL_PIPELINE_STORAGE, JSON.stringify(d)); } catch {} }
+function clearSocialPipelineDraft() { try { localStorage.removeItem(SOCIAL_PIPELINE_STORAGE); } catch {} }
+
+// ─── SOCIAL POSTS STORE ───────────────────────────────────────────────────────
+const SOCIAL_POSTS_STORAGE = "bb_social_posts";
+
+function loadSocialPosts() {
+  try { return JSON.parse(localStorage.getItem(SOCIAL_POSTS_STORAGE) || "[]"); }
+  catch { return []; }
+}
+
+function saveSocialPostsToStorage(posts) {
+  try { localStorage.setItem(SOCIAL_POSTS_STORAGE, JSON.stringify(posts)); } catch {}
+}
+
+function createSocialPost({ platforms, captions, hashtags, imageUrl, imagePrompt, scheduledAt, status = "draft" }) {
+  return {
+    id:          Date.now(),
+    platforms,
+    captions,       // { instagram: "...", facebook: "..." }
+    hashtags,
+    imageUrl,
+    imagePrompt,
+    status,         // "draft" | "scheduled" | "published"
+    scheduledAt,    // ISO string or null
+    createdAt:   new Date().toISOString(),
+    publishedAt: null,
+    results:     {},  // { instagram: { success, id }, facebook: { success, id } }
+  };
+}
+
+const SOCIAL_STAGES = [
+  { id:"idea",     num:1, label:"Idea",     icon:"✦", desc:"Pick or write a concept" },
+  { id:"caption",  num:2, label:"Caption",  icon:"✎", desc:"Write the post"          },
+  { id:"hashtags", num:3, label:"Hashtags", icon:"#", desc:"Optimize for reach"       },
+  { id:"image",    num:4, label:"Image",    icon:"▣", desc:"Generate visual"          },
+  { id:"publish",  num:5, label:"Publish",  icon:"↑", desc:"Post or schedule"         },
+];
+
+function SocialPipelineProgress({ stage, setStage, completed }) {
+  return (
+    <div style={{ display:"flex", alignItems:"center", marginBottom:28, padding:"20px 28px", background:"var(--bg-surface)", borderRadius:12, border:"1px solid var(--border)" }}>
+      {SOCIAL_STAGES.map((s, i) => {
+        const isActive    = stage === s.id;
+        const isDone      = completed.includes(s.id);
+        const isReachable = i === 0 || completed.includes(SOCIAL_STAGES[i-1].id) || isDone || isActive;
+        return (
+          <div key={s.id} style={{ display:"contents" }}>
+            <div onClick={() => isReachable && setStage(s.id)}
+              style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:6, cursor:isReachable?"pointer":"default", opacity:isReachable?1:0.4, transition:"opacity 0.2s" }}>
+              <div style={{ width:40, height:40, borderRadius:99, display:"flex", alignItems:"center", justifyContent:"center", fontSize:isActive?18:14, fontWeight:700, background:isDone?"var(--green)":isActive?"var(--amber)":"var(--bg-elevated)", border:isDone?"none":isActive?"none":"1px solid var(--border)", color:isDone?"#fff":isActive?"#0e0f11":"var(--muted)", transition:"all 0.3s", boxShadow:isActive?"0 0 20px var(--amber-glow)":"none" }}>
+                {isDone ? "✓" : s.icon}
+              </div>
+              <div style={{ textAlign:"center" }}>
+                <div style={{ fontSize:11, fontWeight:isActive?700:500, color:isActive?"var(--amber)":isDone?"var(--green)":"var(--text-secondary)" }}>{s.label}</div>
+                <div style={{ fontSize:9, color:"var(--muted)", letterSpacing:"0.04em" }}>{s.desc}</div>
+              </div>
+            </div>
+            {i < SOCIAL_STAGES.length-1 && (
+              <div style={{ flex:1, height:2, background:completed.includes(s.id)?"var(--green)":isActive?"var(--amber)33":"var(--border)", margin:"0 12px", marginBottom:24, borderRadius:99, transition:"background 0.4s" }} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost }) {
+  let saved = loadSocialPipelineDraft();
+
+  // Migrate old single-platform draft schema (idea.platform: string) to new multi-platform (idea.platforms: array)
+  if (saved?.idea && !Array.isArray(saved.idea.platforms)) {
+    const legacyPlatform = saved.idea.platform || "instagram";
+    saved = {
+      ...saved,
+      idea: { ...saved.idea, platforms: [legacyPlatform] },
+      captions: saved.caption?.text ? { [legacyPlatform]: { text: saved.caption.text } } : (saved.captions || {}),
+    };
+  }
+  if (saved && !saved.captions) saved.captions = {};
+
+  const [stage,     setStage]     = useState(saved?.stage || "idea");
+  const [completed, setCompleted] = useState(saved?.completed || []);
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  const PLATFORMS = [
+    { id:"instagram", label:"Instagram", color:"#e1306c", icon:"📸" },
+    { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
+    { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
+    { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
+  ];
+
+  // idea.platforms is now an ARRAY — supports multi-select
+  const [idea, setIdea] = useState(saved?.idea || { topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
+  // captions is keyed by platform id: { instagram: {text}, facebook: {text}, ... }
+  const [captions, setCaptions] = useState(saved?.captions || {});
+  const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"" });
+  const [imageData, setImageData] = useState(saved?.imageData || { prompt:"", url:null, imgProvider: resolveImageProvider(apiKeys) });
+  const [schedule, setSchedule] = useState(saved?.schedule || { date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
+  const [publishResults, setPublishResults] = useState({});
+
+  const [loading, setLoading] = useState(false);
+  const [loadMsg, setLoadMsg] = useState("");
+  const [error,   setError]   = useState("");
+  const [success, setSuccess] = useState("");
+  const [savedAt, setSavedAt] = useState(saved?.savedAt || null);
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+  const btnA = { padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 };
+  const btnS = { padding:"10px 20px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" };
+
+  // Auto-save draft
+  useEffect(() => {
+    if (!idea.topic && Object.keys(captions).length === 0) return;
+    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url:null }, schedule, savedAt:new Date().toISOString() };
+    saveSocialPipelineDraft(data);
+    setSavedAt(data.savedAt);
+  }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, schedule]);
+
+  const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
+  const advance  = (next) => { setStage(next); setError(""); setSuccess(""); };
+
+  const togglePlatform = (platId) => {
+    setIdea(i => {
+      const has = i.platforms.includes(platId);
+      const next = has ? i.platforms.filter(p => p !== platId) : [...i.platforms, platId];
+      return { ...i, platforms: next.length ? next : i.platforms }; // never allow empty
+    });
+  };
+
+  const selectedPlatforms = PLATFORMS.filter(p => idea.platforms.includes(p.id));
+
+  // ── STAGE 1: IDEA ───────────────────────────────────────────────────────────
+
+  const useInspirationIdea = (item) => {
+    setIdea(i => ({ ...i, topic: item.title, inspirationSource: item }));
+  };
+
+  const generateIdeaFromScratch = async () => {
+    setLoading(true); setLoadMsg("Generating idea…"); setError("");
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a social strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Suggest ONE compelling, specific social post idea. Return ONLY the topic/concept as a single sentence, nothing else.`,
+        `Platforms: ${idea.platforms.join(", ")}. Suggest a fresh post idea that works across all of them.`,
+        apiKeys[activeProvider]
+      );
+      setIdea(i => ({ ...i, topic: text.trim() }));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 2: CAPTIONS (one per selected platform) ───────────────────────────
+
+  const toneMap = {
+    instagram: "warm, visual storytelling, evocative — Instagram caption style",
+    facebook:  "conversational, community-focused, slightly longer form",
+    tiktok:    "punchy, trend-aware, hook-first, short sentences",
+    twitter:   "concise, witty, under 280 characters",
+  };
+
+  const generateCaptionFor = async (platId) => {
+    if (!idea.topic.trim()) return;
+    setLoading(true); setLoadMsg(`Writing ${PLATFORMS.find(p=>p.id===platId)?.label} caption…`); setError("");
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${toneMap[platId]}.`,
+        `Write a ${platId} caption (post type: ${idea.type}) about: ${idea.topic}`,
+        apiKeys[activeProvider]
+      );
+      setCaptions(c => ({ ...c, [platId]: { text: text.trim() } }));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  const generateAllCaptions = async () => {
+    setLoading(true); setError("");
+    for (const plat of selectedPlatforms) {
+      setLoadMsg(`Writing ${plat.label} caption…`);
+      try {
+        const text = await callAI(activeProvider, activeModel,
+          `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${toneMap[plat.id]}.`,
+          `Write a ${plat.id} caption (post type: ${idea.type}) about: ${idea.topic}`,
+          apiKeys[activeProvider]
+        );
+        setCaptions(c => ({ ...c, [plat.id]: { text: text.trim() } }));
+      } catch(e) { setError(`${plat.label}: ${e.message}`); }
+    }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 3: HASHTAGS (shared across platforms) ─────────────────────────────
+
+  const generateHashtagsForPost = async () => {
+    setLoading(true); setLoadMsg("Optimizing hashtags…"); setError("");
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a hashtag strategist for Cask & Stream. Return ONLY valid JSON (no fences): {"primary":["#tag1","#tag2"],"niche":["#tag1"],"branded":["#CaskAndStream"],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags.`,
+        `Topic: ${idea.topic}\nPlatforms: ${idea.platforms.join(", ")}`,
+        apiKeys[activeProvider]
+      );
+      const parsed = parseAIJson(text);
+      setHashtags({ sets: parsed, selected: parsed.full_set || "" });
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 4: IMAGE (shared across platforms) ────────────────────────────────
+
+  const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
+  const [imageDraftPrompt, setImageDraftPrompt] = useState("");
+
+  const openImagePromptPreview = async () => {
+    setLoading(true); setLoadMsg("Writing image prompt…"); setError("");
+    try {
+      const aiPrompt = imageData.prompt || await generateImagePrompt(idea.topic, selectedPlatforms[0]?.id || "instagram", activeProvider, activeModel, apiKeys[activeProvider]);
+      setImageDraftPrompt(aiPrompt);
+      setImagePreviewOpen(true);
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  const generateSocialPipelineImage = async (finalPrompt) => {
+    setImagePreviewOpen(false);
+    setLoading(true); setLoadMsg(`Generating with ${getImageProviderLabel(imageData.imgProvider)}…`); setError("");
+    try {
+      setImageData(d => ({ ...d, prompt: finalPrompt }));
+      const url = await generateImage(finalPrompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
+      setImageData(d => ({ ...d, prompt: finalPrompt, url }));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  const regenerateImageWithPrompt = async () => {
+    setLoading(true); setLoadMsg("Generating image…"); setError("");
+    try {
+      const url = await generateImage(imageData.prompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
+      setImageData(d => ({ ...d, url }));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── STAGE 5: PUBLISH (one pass per selected platform) ───────────────────────
+
+  const [scheduleMode, setScheduleMode] = useState("now"); // "now" | "schedule" | "draft"
+  const [scheduleDate, setScheduleDate] = useState(() => {
+    const d = new Date(); d.setHours(d.getHours() + 1, 0, 0, 0);
+    return d.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM" for datetime-local input
+  });
+
+  const buildSocialPostRecord = (status, scheduledAt = null) => createSocialPost({
+    platforms: idea.platforms,
+    captions,
+    hashtags: hashtags.selected,
+    imageUrl: imageData.url,
+    imagePrompt: imageData.prompt,
+    scheduledAt,
+    status,
+  });
+
+  const handleSaveAsDraft = () => {
+    const post = buildSocialPostRecord("draft");
+    if (onSaveSocialPost) onSaveSocialPost(post);
+    setSuccess("✓ Saved as draft — find it in Social Posts tab.");
+    markDone("publish");
+    clearSocialPipelineDraft();
+  };
+
+  const handleSchedule = () => {
+    const post = buildSocialPostRecord("scheduled", scheduleDate);
+    if (onSaveSocialPost) onSaveSocialPost(post);
+    setSuccess(`✓ Scheduled for ${new Date(scheduleDate).toLocaleString([], {dateStyle:"medium",timeStyle:"short"})}`);
+    markDone("publish");
+    clearSocialPipelineDraft();
+  };
+
+  const handlePublish = async () => {
+    setLoading(true); setError(""); setSuccess(""); setPublishResults({});
+    const results = {};
+
+    for (const plat of selectedPlatforms) {
+      const captionText = captions[plat.id]?.text || "";
+      const fullMessage = `${captionText}\n\n${hashtags.selected}`;
+      setLoadMsg(`Publishing to ${plat.label}…`);
+
+      try {
+        if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
+          const page = metaConfig.pages[0];
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: imageData.url, platforms: ["facebook"] });
+          if (!res.facebook?.success) throw new Error(res.facebook?.error || "Facebook post failed");
+          results[plat.id] = { success: true, message: "✓ Posted to Facebook" };
+
+        } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
+          if (!imageData.url) throw new Error("Instagram requires an image");
+          const page = metaConfig.pages.find(p => p.instagram_id);
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: imageData.url, platforms: ["instagram"] });
+          if (!res.instagram?.success) throw new Error(res.instagram?.error || "Instagram post failed");
+          results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
+
+        } else {
+          results[plat.id] = { success: "manual", message: `Not connected — copy & paste manually` };
+        }
+      } catch(e) {
+        results[plat.id] = { success: false, message: e.message };
+      }
+      setPublishResults({ ...results });
+    }
+
+    const manualPlat = selectedPlatforms.find(p => results[p.id]?.success === "manual");
+    if (manualPlat) navigator.clipboard.writeText(`${captions[manualPlat.id]?.text || ""}\n\n${hashtags.selected}`);
+
+    const allOk = selectedPlatforms.every(p => results[p.id]?.success === true || results[p.id]?.success === "manual");
+    if (allOk) {
+      // Save a "published" record
+      const post = buildSocialPostRecord("published");
+      post.publishedAt = new Date().toISOString();
+      post.results = results;
+      if (onSaveSocialPost) onSaveSocialPost(post);
+      setSuccess(`Done! ${selectedPlatforms.length > 1 ? `Processed ${selectedPlatforms.length} platforms.` : ""}`);
+      markDone("publish");
+      clearSocialPipelineDraft();
+    } else {
+      setError("Some platforms failed — see results below. You can retry.");
+    }
+    setLoading(false); setLoadMsg("");
+  };
+
+  const resetPipeline = () => {
+    clearSocialPipelineDraft();
+    setStage("idea"); setCompleted([]); setError(""); setSuccess(""); setSavedAt(null); setPublishResults({});
+    setIdea({ topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
+    setCaptions({});
+    setHashtags({ sets:null, selected:"" });
+    setImageData({ prompt:"", url:null, imgProvider: resolveImageProvider(apiKeys) });
+  };
+
+  const allCaptionsReady = selectedPlatforms.length > 0 && selectedPlatforms.every(p => captions[p.id]?.text?.trim());
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Social Pipeline</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>
+            From idea to published — across as many platforms as you like, at once.
+            {savedAt && <span style={{ color:"var(--green)", marginLeft:8, fontSize:11 }}>✓ Draft auto-saved {new Date(savedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</span>}
+          </p>
+        </div>
+        {(completed.length > 0 || idea.topic) && (
+          <button onClick={resetPipeline} style={btnS}>↺ New Post</button>
+        )}
+      </div>
+
+      <SocialPipelineProgress stage={stage} setStage={setStage} completed={completed} />
+
+      {error   && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>{error}</div>}
+      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", color:"#5cba6c", fontSize:13 }}>{success}</div>}
+      {loading && (
+        <div style={{ marginBottom:16, padding:"12px 16px", borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)44", display:"flex", alignItems:"center", gap:10, fontSize:13, color:"var(--amber)" }}>
+          <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>
+          {loadMsg || "Working…"}
+        </div>
+      )}
+
+      {/* ── STAGE 1: IDEA ── */}
+      {stage === "idea" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+            <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 16px" }}>What's the post about?</h3>
+
+            <div style={{ marginBottom:16 }}>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>
+                Platforms <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0 }}>— select one or more</span>
+              </label>
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                {PLATFORMS.map(p => {
+                  const isSelected = idea.platforms.includes(p.id);
+                  return (
+                    <button key={p.id} onClick={() => togglePlatform(p.id)}
+                      style={{ padding:"7px 16px", borderRadius:99, border:isSelected?`1px solid ${p.color}`:"1px solid var(--border)", background:isSelected?p.color+"18":"transparent", color:isSelected?p.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                      <span style={{ width:14, height:14, borderRadius:4, border:`2px solid ${isSelected?p.color:"var(--border)"}`, background:isSelected?p.color:"transparent", display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:9, color:"#fff" }}>
+                        {isSelected ? "✓" : ""}
+                      </span>
+                      <span>{p.icon}</span>{p.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {idea.platforms.length > 1 && (
+                <div style={{ fontSize:11, color:"var(--amber)", marginTop:8 }}>
+                  ✦ {idea.platforms.length} platforms selected — you'll get a tailored caption for each, one shared image, and a one-click multi-publish at the end.
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginBottom:16 }}>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Post Type</label>
+              <div style={{ display:"flex", gap:6 }}>
+                {["photo","reel","carousel","story"].map(t => (
+                  <button key={t} onClick={() => setIdea(i => ({...i, type:t}))}
+                    style={{ padding:"6px 14px", borderRadius:99, border:idea.type===t?"1px solid var(--amber)":"1px solid var(--border)", background:idea.type===t?"var(--amber-glow)":"transparent", color:idea.type===t?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Topic / Concept *</label>
+              <div style={{ display:"flex", gap:10 }}>
+                <input style={iS} placeholder="e.g. golden hour on the river, pouring bourbon by the fire…" value={idea.topic} onChange={e=>setIdea(i=>({...i,topic:e.target.value}))} autoFocus
+                  onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                <button onClick={generateIdeaFromScratch} disabled={loading}
+                  style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)", whiteSpace:"nowrap" }}>
+                  ✦ Surprise Me
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Inspiration board quick-select */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>Use from Inspiration Board</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:240, overflow:"auto" }}>
+              {inspiration.length === 0 && (
+                <div style={{ fontSize:12, color:"var(--muted)", padding:"8px 0" }}>No inspiration saved yet — use Research or Post Ideas tabs to add some.</div>
+              )}
+              {inspiration.map(item => (
+                <button key={item.id} onClick={() => useInspirationIdea(item)}
+                  style={{ padding:"10px 14px", borderRadius:8, border:idea.inspirationSource?.id===item.id?"1px solid var(--amber)":"1px solid var(--border)", background:idea.inspirationSource?.id===item.id?"var(--amber-glow)":"var(--bg-elevated)", color:"var(--text)", fontSize:12, cursor:"pointer", textAlign:"left", fontFamily:"var(--font-body)" }}>
+                  <div style={{ fontWeight:600, marginBottom:2 }}>{item.title}</div>
+                  <div style={{ fontSize:10, color:"var(--muted)" }}>{item.source}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={() => { markDone("idea"); advance("caption"); }} disabled={!idea.topic.trim()}
+              style={{ ...btnA, background:idea.topic.trim()?"var(--amber)":"var(--bg-elevated)", color:idea.topic.trim()?"#0e0f11":"var(--muted)", cursor:idea.topic.trim()?"pointer":"not-allowed" }}>
+              Continue to Caption{idea.platforms.length>1?"s":""} →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 2: CAPTIONS ── */}
+      {stage === "caption" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {selectedPlatforms.length > 1 && (
+            <div style={{ display:"flex", justifyContent:"flex-end" }}>
+              <button onClick={generateAllCaptions} disabled={loading}
+                style={{ padding:"9px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Write All ${selectedPlatforms.length} Captions`}
+              </button>
+            </div>
+          )}
+
+          {selectedPlatforms.map(plat => (
+            <div key={plat.id} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+                <div>
+                  <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:plat.color }}>{plat.icon} {plat.label}</div>
+                  <div style={{ fontSize:12, color:"var(--text-secondary)", marginTop:2 }}>{idea.topic}</div>
+                </div>
+                <button onClick={() => generateCaptionFor(plat.id)} disabled={loading}
+                  style={{ padding:"9px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                  {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>…</> : captions[plat.id]?.text ? "↻ Regenerate" : `${provider.logo} Write Caption`}
+                </button>
+              </div>
+              <textarea value={captions[plat.id]?.text || ""} onChange={e=>setCaptions(c=>({...c,[plat.id]:{text:e.target.value}}))} rows={5}
+                placeholder="Caption will appear here — or write your own…"
+                style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
+              <div style={{ fontSize:11, color:"var(--muted)", marginTop:6, textAlign:"right" }}>{(captions[plat.id]?.text || "").length} characters</div>
+            </div>
+          ))}
+
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={() => { markDone("caption"); advance("hashtags"); }} disabled={!allCaptionsReady}
+              style={{ ...btnA, background:allCaptionsReady?"var(--amber)":"var(--bg-elevated)", color:allCaptionsReady?"#0e0f11":"var(--muted)", cursor:allCaptionsReady?"pointer":"not-allowed" }}>
+              Continue to Hashtags →
+            </button>
+            <button onClick={() => setStage("idea")} style={btnS}>← Back to Idea</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 3: HASHTAGS ── */}
+      {stage === "hashtags" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {!hashtags.sets ? (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:32, textAlign:"center" }}>
+              <div style={{ fontSize:32, marginBottom:12 }}>#</div>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8 }}>Optimize Your Hashtags</h3>
+              <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24, maxWidth:400, margin:"0 auto 24px" }}>
+                One shared hashtag set, generated to work across {selectedPlatforms.map(p=>p.label).join(", ")}.
+              </p>
+              <button onClick={generateHashtagsForPost} disabled={loading} style={btnA}>
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : "# Generate Hashtags"}
+              </button>
+            </div>
+          ) : (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:16 }}>
+
+              {/* Clickable tag groups */}
+              {[
+                { key:"primary", label:"High Volume",  color:"var(--amber)", hint:"Broad reach" },
+                { key:"niche",   label:"Niche",         color:"#5cba6c",      hint:"Targeted audience" },
+                { key:"branded", label:"Branded",       color:"#7c3aed",      hint:"Your brand tags" },
+              ].map(g => (
+                <div key={g.key}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                    <span style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:g.color }}>{g.label}</span>
+                    <span style={{ fontSize:10, color:"var(--muted)" }}>— {g.hint} · click to add/remove</span>
+                    <button onClick={() => {
+                      // Select all in this group
+                      const all = hashtags.sets[g.key] || [];
+                      const current = hashtags.selected.split(/\s+/).filter(Boolean);
+                      const allSelected = all.every(t => current.includes(t));
+                      const next = allSelected
+                        ? current.filter(t => !all.includes(t))
+                        : [...new Set([...current, ...all])];
+                      setHashtags(h => ({...h, selected: next.join(" ")}));
+                    }}
+                      style={{ marginLeft:"auto", padding:"2px 8px", borderRadius:6, border:`1px solid ${g.color}44`, background:"transparent", color:g.color, fontSize:10, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      {(() => {
+                        const all = hashtags.sets[g.key] || [];
+                        const current = hashtags.selected.split(/\s+/).filter(Boolean);
+                        return all.every(t => current.includes(t)) ? "Deselect All" : "Select All";
+                      })()}
+                    </button>
+                  </div>
+                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                    {hashtags.sets[g.key]?.map((tag, i) => {
+                      const selected = hashtags.selected.split(/\s+/).includes(tag);
+                      return (
+                        <button key={i} onClick={() => {
+                          const current = hashtags.selected.split(/\s+/).filter(Boolean);
+                          const next = selected
+                            ? current.filter(t => t !== tag)
+                            : [...current, tag];
+                          setHashtags(h => ({...h, selected: next.join(" ")}));
+                        }}
+                          style={{ fontSize:12, padding:"5px 12px", borderRadius:99, border:`1px solid ${selected ? g.color : g.color+"33"}`, background:selected ? g.color+"20" : "transparent", color:selected ? g.color : "var(--text-secondary)", cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:selected ? 700 : 400, transition:"all 0.15s" }}>
+                          {selected && <span style={{ marginRight:4, fontSize:10 }}>✓</span>}{tag}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+
+              {/* Selected set count + clear */}
+              <div style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                <span style={{ fontSize:12, color:"var(--text-secondary)", flex:1 }}>
+                  {hashtags.selected.split(/\s+/).filter(Boolean).length} hashtags selected
+                </span>
+                <button onClick={() => setHashtags(h => ({...h, selected:""}))}
+                  style={{ padding:"3px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  Clear all
+                </button>
+                <button onClick={() => {
+                  const all = [
+                    ...(hashtags.sets.primary || []),
+                    ...(hashtags.sets.niche || []),
+                    ...(hashtags.sets.branded || []),
+                  ];
+                  setHashtags(h => ({...h, selected: [...new Set(all)].join(" ")}));
+                }}
+                  style={{ padding:"3px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  Select all
+                </button>
+              </div>
+
+              {/* Editable final set */}
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+                  Final Set <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0 }}>— editable, added to every caption</span>
+                </label>
+                <textarea value={hashtags.selected} onChange={e=>setHashtags(h=>({...h,selected:e.target.value}))} rows={3}
+                  style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
+              </div>
+
+              <button onClick={generateHashtagsForPost} disabled={loading}
+                style={{ padding:"5px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start" }}>
+                ↻ Re-generate suggestions
+              </button>
+            </div>
+          )}
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={() => { markDone("hashtags"); advance("image"); }} style={btnA}>Continue to Image →</button>
+            <button onClick={() => setStage("caption")} style={btnS}>← Back to Captions</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── STAGE 4: IMAGE ── */}
+      {stage === "image" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16, flexWrap:"wrap", gap:10 }}>
+              <div>
+                <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Visual</h3>
+                <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"4px 0 0" }}>One shared image for: {selectedPlatforms.map(p=>p.label).join(", ")}</p>
+              </div>
+              <ImageProviderPicker apiKeys={apiKeys} value={imageData.imgProvider} onChange={(id)=>{ setImageData(d=>({...d,imgProvider:id})); saveImageProviderPref(id); }} compact />
+            </div>
+
+            {!imageData.url && !loading && (
+              <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
+                {/* Generate option */}
+                <div style={{ height:130, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:10 }}>
+                  <span style={{ fontSize:24, opacity:0.3 }}>▣</span>
+                  <button onClick={openImagePromptPreview} disabled={!imageData.imgProvider}
+                    style={{ padding:"8px 20px", borderRadius:8, border:"none", background:imageData.imgProvider?"#7c3aed":"var(--bg-elevated)", color:imageData.imgProvider?"#fff":"var(--muted)", fontSize:12, fontWeight:700, cursor:imageData.imgProvider?"pointer":"not-allowed", fontFamily:"var(--font-body)" }}>
+                    ▣ Generate Image
+                  </button>
+                </div>
+
+                {/* Library picker */}
+                <LibraryImagePicker onSelect={(url) => setImageData(d=>({...d, url, prompt:"from library"}))} />
+              </div>
+            )}
+
+            {imageData.url && (
+              <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
+                <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)" }}>
+                  <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
+                  <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
+                    <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-post-${Date.now()}.webp`; a.click(); }}
+                      style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      ↓ Download
+                    </button>
+                    <button onClick={regenerateImageWithPrompt}
+                      style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      ↻ New
+                    </button>
+                    <button onClick={() => setImageData(d=>({...d,url:null,prompt:""}))}
+                      style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      ✕ Remove
+                    </button>
+                    <SaveToLibraryButton imageUrl={imageData.url} tags={[...idea.platforms, "generated"]} name={idea.topic?.slice(0,30) || "social-post"} />
+                  </div>
+                </div>
+                {/* Allow swapping even with image selected */}
+                <LibraryImagePicker onSelect={(url) => setImageData(d=>({...d, url, prompt:"from library"}))} compact />
+              </div>
+            )}
+
+            {imageData.prompt && imageData.prompt !== "from library" && (
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Prompt (editable)</label>
+                <div style={{ display:"flex", gap:8 }}>
+                  <textarea value={imageData.prompt} onChange={e=>setImageData(d=>({...d,prompt:e.target.value}))} rows={2}
+                    style={{ ...iS, resize:"vertical", fontSize:12 }} />
+                  <button onClick={regenerateImageWithPrompt} disabled={loading}
+                    style={{ padding:"8px 14px", borderRadius:8, border:"none", background:"#7c3aed", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start", whiteSpace:"nowrap" }}>
+                    Run →
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={() => { markDone("image"); advance("publish"); }} style={btnA}>Continue to Publish →</button>
+            <button onClick={() => setStage("hashtags")} style={btnS}>← Back to Hashtags</button>
+          </div>
+        </div>
+      )}
+
+      {imagePreviewOpen && (
+        <PromptPreviewModal
+          title="Review Image Prompt"
+          systemPrompt={null}
+          userPrompt={imageDraftPrompt}
+          onUserChange={setImageDraftPrompt}
+          confirmLabel="Generate Image"
+          accentColor="#7c3aed"
+          onCancel={() => setImagePreviewOpen(false)}
+          onConfirm={() => generateSocialPipelineImage(imageDraftPrompt)}
+        />
+      )}
+
+      {/* ── STAGE 5: PUBLISH ── */}
+      {stage === "publish" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {success ? (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:40, textAlign:"center" }}>
+              <div style={{ fontSize:48, marginBottom:16 }}>✓</div>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, marginBottom:8 }}>Done!</h3>
+              <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:20 }}>{success}</p>
+              <div style={{ display:"flex", flexDirection:"column", gap:8, maxWidth:380, margin:"0 auto 24px" }}>
+                {selectedPlatforms.map(plat => publishResults[plat.id] && (
+                  <div key={plat.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", textAlign:"left" }}>
+                    <span>{plat.icon}</span>
+                    <span style={{ fontSize:12, fontWeight:600, flex:1 }}>{plat.label}</span>
+                    <span style={{ fontSize:11, color:publishResults[plat.id].success===true?"#5cba6c":publishResults[plat.id].success==="manual"?"var(--amber)":"var(--red)" }}>
+                      {publishResults[plat.id].message}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <button onClick={resetPipeline} style={btnA}>Start New Post</button>
+            </div>
+          ) : (
+            <>
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
+                <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 20px" }}>Review & Publish — {selectedPlatforms.length} Platform{selectedPlatforms.length>1?"s":""}</h3>
+
+                <div style={{ display:"flex", flexDirection:"column", gap:14, marginBottom:20 }}>
+                  {selectedPlatforms.map(plat => {
+                    const isConnected = (plat.id==="facebook" && metaConfig?.connected && metaConfig?.pages?.length>0) ||
+                                        (plat.id==="instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id));
+                    const prevResult = publishResults[plat.id];
+                    return (
+                      <div key={plat.id} style={{ display:"grid", gridTemplateColumns: imageData.url ? "auto 1fr 120px" : "auto 1fr", gap:14, alignItems:"flex-start", padding:14, borderRadius:10, background:"var(--bg-elevated)", border:`1px solid ${isConnected?"#5cba6c33":"var(--border)"}` }}>
+                        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4, width:70 }}>
+                          <span style={{ fontSize:20 }}>{plat.icon}</span>
+                          <span style={{ fontSize:10, fontWeight:700, color:plat.color }}>{plat.label}</span>
+                          {isConnected
+                            ? <span style={{ fontSize:9, color:"#5cba6c" }}>● Live</span>
+                            : <span style={{ fontSize:9, color:"var(--muted)" }}>Manual</span>}
+                        </div>
+                        <div style={{ fontSize:12, lineHeight:1.6, whiteSpace:"pre-wrap", color:"var(--text-secondary)" }}>
+                          {captions[plat.id]?.text}
+                          {hashtags.selected && <div style={{ marginTop:6, color:"var(--amber)" }}>{hashtags.selected}</div>}
+                          {prevResult && (
+                            <div style={{ marginTop:8, fontSize:11, color:prevResult.success===true?"#5cba6c":prevResult.success==="manual"?"var(--amber)":"var(--red)" }}>
+                              {prevResult.message}
+                            </div>
+                          )}
+                        </div>
+                        {imageData.url && <img src={imageData.url} alt="" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ padding:14, borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)" }}>
+                  {selectedPlatforms.some(p => (p.id==="facebook"||p.id==="instagram") && metaConfig?.connected)
+                    ? "● Connected platforms publish directly. Others copy to clipboard for manual posting."
+                    : "⚠ No platforms connected for direct publishing — captions will copy to clipboard. Connect in Settings → Facebook & Instagram."}
+                </div>
+
+                {/* Action mode selector */}
+                <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:18 }}>
+                  <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>When to post?</div>
+                  <div style={{ display:"flex", gap:6, marginBottom:14 }}>
+                    {[["now","↑ Publish Now","#5cba6c"],["schedule","⏰ Schedule","var(--amber)"],["draft","📋 Save as Draft","var(--text-secondary)"]].map(([id,label,color]) => (
+                      <button key={id} onClick={() => setScheduleMode(id)}
+                        style={{ padding:"7px 16px", borderRadius:8, border:scheduleMode===id?`1px solid ${color}`:"1px solid var(--border)", background:scheduleMode===id?color+"18":"transparent", color:scheduleMode===id?color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {scheduleMode === "schedule" && (
+                    <div style={{ marginBottom:14 }}>
+                      <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Schedule Date & Time</label>
+                      <input type="datetime-local" value={scheduleDate} onChange={e=>setScheduleDate(e.target.value)}
+                        style={{ padding:"8px 12px", borderRadius:8, border:"1px solid var(--amber)44", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none" }} />
+                      <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"6px 0 0", lineHeight:1.5 }}>
+                        Blog Bunker will remind you when it's time to post. Auto-publishing from the web is coming soon.
+                      </p>
+                    </div>
+                  )}
+
+                  {scheduleMode === "draft" && (
+                    <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 14px", lineHeight:1.5 }}>
+                      Save everything — captions, hashtags, image — to Social Posts. Come back and publish anytime.
+                    </p>
+                  )}
+
+                  <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                    {scheduleMode === "now" && (
+                      <button onClick={handlePublish} disabled={loading}
+                        style={{ ...btnA, background:loading?"var(--bg-elevated)":"#5cba6c", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
+                        {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `↑ Publish to ${selectedPlatforms.length} Platform${selectedPlatforms.length>1?"s":""}`}
+                      </button>
+                    )}
+                    {scheduleMode === "schedule" && (
+                      <button onClick={handleSchedule} disabled={!scheduleDate}
+                        style={{ ...btnA, background:!scheduleDate?"var(--bg-elevated)":"var(--amber)", color:!scheduleDate?"var(--muted)":"#0e0f11" }}>
+                        ⏰ Schedule Post
+                      </button>
+                    )}
+                    {scheduleMode === "draft" && (
+                      <button onClick={handleSaveAsDraft}
+                        style={{ ...btnA, background:"var(--bg-elevated)", color:"var(--text-secondary)", border:"1px solid var(--border)" }}>
+                        📋 Save as Draft
+                      </button>
+                    )}
+                    <button onClick={() => setStage("image")} style={btnS}>← Back to Image</button>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── BRAND GUIDE PANEL ───────────────────────────────────────────────────────
+
+function BrandGuidePanel({ onSave }) {
+  const [guide, setGuide] = useState(loadBrandGuide);
+  const [saved, setSaved] = useState(false);
+
+  const set = (key, val) => setGuide(g => ({ ...g, [key]: val }));
+
+  const handleSave = () => {
+    saveBrandGuide(guide);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+    if (onSave) onSave(guide);
+  };
+
+  const iS = {
+    width:"100%", padding:"10px 14px", borderRadius:8,
+    border:"1px solid var(--border)", background:"var(--bg-elevated)",
+    color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)",
+    outline:"none", boxSizing:"border-box",
+  };
+  const taS = { ...iS, resize:"vertical", lineHeight:1.6 };
+
+  const SECTIONS = [
+    {
+      title:"Brand Identity",
+      icon:"◈",
+      fields:[
+        { key:"brandName",  label:"Brand Name",    ph:"e.g. Cask & Stream",                   rows:0 },
+        { key:"tagline",    label:"Tagline",        ph:'e.g. "Cast at Dawn. Sip at Dusk."',    rows:0 },
+        { key:"audience",   label:"Target Audience",ph:"e.g. Fly fishers aged 30-55, whiskey enthusiasts, outdoor lifestyle...", rows:2 },
+        { key:"topics",     label:"Core Topics",    ph:"e.g. fly fishing, whiskey/bourbon, outdoor lifestyle, river conservation...", rows:2 },
+      ],
+    },
+    {
+      title:"Voice & Writing Style",
+      icon:"✎",
+      color:"#5cba6c",
+      fields:[
+        { key:"voiceTone",    label:"Voice & Tone",     ph:"e.g. Warm, knowledgeable, poetic. Like a seasoned guide talking to a friend over a pour of bourbon...", rows:3 },
+        { key:"writingStyle", label:"Writing Style",    ph:"e.g. Short punchy sentences. Active voice. Evocative nature descriptions. Avoid corporate jargon...", rows:3 },
+        { key:"avoidWords",   label:"Words/Phrases to Avoid", ph:"e.g. 'leverage', 'synergy', 'best-in-class', 'utilize'...", rows:2 },
+      ],
+    },
+    {
+      title:"Visual Style",
+      icon:"▣",
+      color:"#7c3aed",
+      fields:[
+        { key:"imageStyle",   label:"Image Style",    ph:"e.g. Cinematic photography, golden hour light, moody and atmospheric, authentic outdoor scenes, no stock-photo feel...", rows:3 },
+        { key:"colorPalette", label:"Color Palette",  ph:"e.g. Amber, teal, deep forest green, copper, warm shadows. Think bourbon and rivers at dusk...", rows:2 },
+      ],
+    },
+  ];
+
+  const hasContent = Object.values(guide).some(v => v?.trim());
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24 }}>
+      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between" }}>
+        <div>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 6px" }}>Brand Guide</h3>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+            Define your brand voice, writing style, and visual identity. Blog Bunker injects this into every AI content and image generation call automatically.
+          </p>
+        </div>
+        {hasContent && (
+          <div style={{ fontSize:11, color:"#5cba6c", padding:"4px 10px", borderRadius:99, background:"#5cba6c0a", border:"1px solid #5cba6c33", whiteSpace:"nowrap", marginLeft:16 }}>
+            ● Active
+          </div>
+        )}
+      </div>
+
+      {SECTIONS.map(section => (
+        <div key={section.title} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:section.color||"var(--amber)", marginBottom:16, display:"flex", alignItems:"center", gap:8 }}>
+            <span>{section.icon}</span>{section.title}
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            {section.fields.map(f => (
+              <div key={f.key}>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
+                {f.rows > 0
+                  ? <textarea rows={f.rows} style={taS} placeholder={f.ph} value={guide[f.key]} onChange={e=>set(f.key, e.target.value)}
+                      onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                  : <input style={iS} placeholder={f.ph} value={guide[f.key]} onChange={e=>set(f.key, e.target.value)}
+                      onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                }
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {/* Preview */}
+      {hasContent && (
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>AI Context Preview</div>
+          <pre style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.7, whiteSpace:"pre-wrap", margin:0, fontFamily:"monospace", background:"var(--bg-elevated)", padding:12, borderRadius:8, border:"1px solid var(--border)" }}>
+            {buildBrandContext(guide)}
+          </pre>
+          {guide.imageStyle && (
+            <div style={{ marginTop:10 }}>
+              <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7c3aed", marginBottom:6 }}>Image Prompt Prefix</div>
+              <pre style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.6, whiteSpace:"pre-wrap", margin:0, fontFamily:"monospace", background:"var(--bg-elevated)", padding:12, borderRadius:8, border:"1px solid var(--border)" }}>
+                {buildBrandImageContext(guide)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+
+      <button onClick={handleSave}
+        style={{ padding:"11px 28px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start", display:"flex", alignItems:"center", gap:8 }}>
+        {saved ? "✓ Saved!" : "Save Brand Guide"}
+      </button>
+    </div>
+  );
+}
+
+// ─── PROMPT PREVIEW MODAL ─────────────────────────────────────────────────────
+// Lets the user see and edit the exact AI prompt before it's sent — used for
+// both blog post generation and image generation across the app.
+
+function PromptPreviewModal({ title, systemPrompt, userPrompt, onSystemChange, onUserChange, onConfirm, onCancel, confirmLabel = "Generate", accentColor = "var(--amber)" }) {
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.7)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:2000, padding:20 }}
+      onClick={onCancel}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:14, padding:28, width:"100%", maxWidth:680, maxHeight:"85vh", overflow:"auto", display:"flex", flexDirection:"column", gap:18 }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:0 }}>{title}</h3>
+          <button onClick={onCancel} style={{ background:"transparent", border:"none", color:"var(--muted)", fontSize:20, cursor:"pointer", padding:4, lineHeight:1 }}>✕</button>
+        </div>
+
+        <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+          This is exactly what will be sent to the AI. Edit either field below before generating — your brand guide context (if any) is already included.
+        </p>
+
+        {onSystemChange && (
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+              System Prompt <span style={{ fontWeight:400, textTransform:"none" }}>(instructions/context)</span>
+            </label>
+            <textarea value={systemPrompt} onChange={e=>onSystemChange(e.target.value)} rows={6}
+              style={{ width:"100%", padding:"12px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"monospace", lineHeight:1.6, outline:"none", resize:"vertical", boxSizing:"border-box" }}
+              onFocus={e=>e.target.style.borderColor=accentColor} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+        )}
+
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+            {onSystemChange ? "Your Request" : "Prompt"}
+          </label>
+          <textarea value={userPrompt} onChange={e=>onUserChange(e.target.value)} rows={onSystemChange ? 5 : 4}
+            style={{ width:"100%", padding:"12px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", lineHeight:1.6, outline:"none", resize:"vertical", boxSizing:"border-box" }}
+            onFocus={e=>e.target.style.borderColor=accentColor} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        </div>
+
+        <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
+          <button onClick={onCancel}
+            style={{ padding:"10px 20px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            Cancel
+          </button>
+          <button onClick={onConfirm}
+            style={{ padding:"10px 24px", borderRadius:8, border:"none", background:accentColor, color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            ✓ {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── EMAIL NEWSLETTER STUDIO ─────────────────────────────────────────────────
+
+function EmailNewsletterStudio({ activeProvider, activeModel, apiKeys, posts, brandGuide }) {
+  const [mode,     setMode]    = useState("from-post"); // "from-post" | "from-scratch"
+  const [postId,   setPostId]  = useState("");
+  const [topic,    setTopic]   = useState("");
+  const [subject,  setSubject] = useState("");
+  const [body,     setBody]    = useState("");
+  const [loading,  setLoading] = useState(false);
+  const [error,    setError]   = useState("");
+  const [copied,   setCopied]  = useState("");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const selectedPost = posts.find(p => p.id === Number(postId));
+
+  const generate = async () => {
+    setLoading(true); setError("");
+    try {
+      const context = mode === "from-post" && selectedPost
+        ? `Blog post title: "${selectedPost.title}"\nContent excerpt: ${(selectedPost.body || "").slice(0, 600)}`
+        : `Topic: ${topic}`;
+
+      const [subjectResult, bodyResult] = await Promise.all([
+        callAI(activeProvider, activeModel,
+          `${brandCtx}You write compelling email newsletter subject lines for bloggers. Return ONLY the subject line, nothing else. Max 60 characters. No quotes.`,
+          `Write an email subject line for this newsletter: ${context}`,
+          apiKeys[activeProvider]),
+        callAI(activeProvider, activeModel,
+          `${brandCtx}You write engaging email newsletters for bloggers. Write in a warm, personal voice — like writing to a friend. Structure: greeting → hook → main content → call to action → sign-off. Include a clear CTA to read the full post. Use plain text formatting only. 200-350 words.`,
+          `Write an email newsletter. ${context}${selectedPost ? `\nLink to post: [Read the full post →](https://caskandstream.com/blog/${selectedPost.title?.toLowerCase().replace(/\s+/g,"-")})` : ""}`,
+          apiKeys[activeProvider]),
+      ]);
+
+      setSubject(subjectResult.trim());
+      setBody(bodyResult.trim());
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const copySection = (key, text) => {
+    navigator.clipboard.writeText(text);
+    setCopied(key);
+    setTimeout(() => setCopied(""), 2000);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div>
+        <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Email Newsletter</h2>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Turn your blog posts into subscriber emails — your most owned marketing channel.</p>
+      </div>
+
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        <div style={{ display:"flex", gap:6, marginBottom:16 }}>
+          {[["from-post","From a Blog Post"],["from-scratch","From Scratch"]].map(([id,label]) => (
+            <button key={id} onClick={() => setMode(id)}
+              style={{ padding:"6px 16px", borderRadius:99, border:mode===id?"1px solid var(--amber)":"1px solid var(--border)", background:mode===id?"var(--amber-glow)":"transparent", color:mode===id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode === "from-post" ? (
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Select Blog Post</label>
+            <select value={postId} onChange={e=>setPostId(e.target.value)} style={{ ...iS }}>
+              <option value="">Choose a post…</option>
+              {posts.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+            </select>
+          </div>
+        ) : (
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Newsletter Topic</label>
+            <input style={iS} placeholder="e.g. Spring hatch season preview, Top bourbon pairings for river trips…" value={topic} onChange={e=>setTopic(e.target.value)}
+              onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+        )}
+
+        <button onClick={generate} disabled={loading || (mode==="from-post" && !postId) || (mode==="from-scratch" && !topic.trim())}
+          style={{ marginTop:14, padding:"10px 24px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Writing…</> : `${provider.logo} Generate Newsletter`}
+        </button>
+        {error && <div style={{ fontSize:12, color:"var(--red)", marginTop:10 }}>{error}</div>}
+      </div>
+
+      {(subject || body) && (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          {/* Subject */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)" }}>Subject Line</div>
+              <button onClick={() => copySection("subject", subject)} style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied==="subject"?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                {copied==="subject" ? "✓ Copied" : "Copy"}
+              </button>
+            </div>
+            <input value={subject} onChange={e=>setSubject(e.target.value)} style={{ ...iS, fontWeight:600 }} />
+          </div>
+
+          {/* Body */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)" }}>Email Body</div>
+              <div style={{ display:"flex", gap:6 }}>
+                <button onClick={() => copySection("body", body)} style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied==="body"?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  {copied==="body" ? "✓ Copied" : "Copy Body"}
+                </button>
+                <button onClick={() => copySection("all", `Subject: ${subject}\n\n${body}`)} style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied==="all"?"var(--green)":"var(--bg-elevated)", color:copied==="all"?"#0e0f11":"var(--text-secondary)", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  {copied==="all" ? "✓ Copied" : "Copy All"}
+                </button>
+              </div>
+            </div>
+            <textarea value={body} onChange={e=>setBody(e.target.value)} rows={14}
+              style={{ ...iS, resize:"vertical", lineHeight:1.7, fontSize:13 }} />
+          </div>
+
+          <div style={{ fontSize:11, color:"var(--text-secondary)", padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+            💡 Paste into Mailchimp, ConvertKit, Beehiiv, or any email tool. The subject line and body are formatted for direct paste.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── PINTEREST STUDIO ─────────────────────────────────────────────────────────
+
+function PinterestStudio({ activeProvider, activeModel, apiKeys, posts, brandGuide }) {
+  const [mode,    setMode]   = useState("from-post");
+  const [postId,  setPostId] = useState("");
+  const [topic,   setTopic]  = useState("");
+  const [pins,    setPins]   = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]  = useState("");
+  const [copied,  setCopied] = useState("");
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const selectedPost = posts.find(p => p.id === Number(postId));
+
+  const generate = async () => {
+    setLoading(true); setError(""); setPins(null);
+    try {
+      const context = mode === "from-post" && selectedPost
+        ? `Blog post: "${selectedPost.title}". Excerpt: ${(selectedPost.body || "").slice(0, 400)}`
+        : `Topic: ${topic}`;
+
+      const text = await callAI(activeProvider, activeModel,
+        `${brandCtx}You are a Pinterest strategy expert. Create 3 Pinterest pin ideas for a blog post or topic. Pinterest is a SEARCH ENGINE — optimize for discoverability. Return ONLY valid JSON array (no fences):
+[{"title":"pin title under 100 chars","description":"pin description 200-500 chars with keywords","keywords":["keyword1","keyword2","keyword3","keyword4","keyword5"],"board":"suggested board name","imageDescription":"describe the ideal pin image in 1 sentence","type":"standard|idea|video"}]`,
+        `Create 3 Pinterest pins for: ${context}`,
+        apiKeys[activeProvider]
+      );
+      setPins(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div>
+        <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Pinterest Studio</h2>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Pinterest is a search engine — pins drive traffic for years, not hours. Create SEO-optimized pins for every post.</p>
+      </div>
+
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        <div style={{ display:"flex", gap:6, marginBottom:16 }}>
+          {[["from-post","From a Blog Post"],["from-scratch","From Topic"]].map(([id,label]) => (
+            <button key={id} onClick={() => setMode(id)}
+              style={{ padding:"6px 16px", borderRadius:99, border:mode===id?"1px solid #e60023":"1px solid var(--border)", background:mode===id?"#e6002310":"transparent", color:mode===id?"#e60023":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode === "from-post" ? (
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Select Blog Post</label>
+            <select value={postId} onChange={e=>setPostId(e.target.value)} style={iS}>
+              <option value="">Choose a post…</option>
+              {posts.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+            </select>
+          </div>
+        ) : (
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Topic</label>
+            <input style={iS} placeholder="e.g. dry fly fishing tips, bourbon cocktail recipes, fly tying for beginners…" value={topic} onChange={e=>setTopic(e.target.value)}
+              onFocus={e=>e.target.style.borderColor="#e60023"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          </div>
+        )}
+
+        <button onClick={generate} disabled={loading || (mode==="from-post" && !postId) || (mode==="from-scratch" && !topic.trim())}
+          style={{ marginTop:14, padding:"10px 24px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":"#e60023", color:loading?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Creating Pins…</> : "📌 Generate 3 Pin Ideas"}
+        </button>
+        {error && <div style={{ fontSize:12, color:"var(--red)", marginTop:10 }}>{error}</div>}
+      </div>
+
+      {pins && (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          {pins.map((pin, i) => (
+            <div key={i} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:12 }}>
+                <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                  <span style={{ fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:99, background:"#e6002315", color:"#e60023", border:"1px solid #e6002333" }}>📌 Pin {i+1}</span>
+                  <span style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:"var(--bg-elevated)", color:"var(--muted)", border:"1px solid var(--border)", textTransform:"capitalize" }}>{pin.type}</span>
+                </div>
+                <button onClick={() => { navigator.clipboard.writeText(`${pin.title}\n\n${pin.description}\n\nKeywords: ${pin.keywords?.join(", ")}`); setCopied(`pin-${i}`); setTimeout(()=>setCopied(""),2000); }}
+                  style={{ padding:"4px 12px", borderRadius:6, border:"none", background:copied===`pin-${i}`?"var(--green)":"var(--bg-elevated)", color:copied===`pin-${i}`?"#0e0f11":"var(--text-secondary)", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  {copied===`pin-${i}` ? "✓ Copied" : "Copy"}
+                </button>
+              </div>
+
+              <div style={{ fontWeight:700, fontSize:14, marginBottom:10, color:"var(--text)" }}>{pin.title}</div>
+              <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.7, marginBottom:12 }}>{pin.description}</div>
+
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:10 }}>
+                {pin.keywords?.map((kw,j) => <span key={j} style={{ fontSize:11, padding:"2px 8px", borderRadius:99, background:"var(--amber-glow)", color:"var(--amber)", border:"1px solid var(--amber)33" }}>{kw}</span>)}
+              </div>
+
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:11, color:"var(--muted)" }}>
+                <div><span style={{ color:"var(--amber)", fontWeight:600 }}>Board:</span> {pin.board}</div>
+                <div><span style={{ color:"var(--amber)", fontWeight:600 }}>Image:</span> {pin.imageDescription}</div>
+              </div>
+            </div>
+          ))}
+
+          <div style={{ fontSize:11, color:"var(--text-secondary)", padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+            💡 Pinterest tip: Post each pin to a separate board, 3-4 weeks apart. Pin the same blog post multiple times with different images and titles — Pinterest treats them as unique content.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── KEYWORD RESEARCH STUDIO ──────────────────────────────────────────────────
+
+function KeywordResearchStudio({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
+  const [topic,   setTopic]   = useState("");
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+  const [saved,   setSaved]   = useState({});
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const existingTopics = posts.map(p => p.title).join(", ");
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const research = async () => {
+    setLoading(true); setError(""); setResults(null); setSaved({});
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are an SEO keyword strategist for small niche bloggers. Focus on LONG-TAIL keywords that small sites can realistically rank for. Return ONLY valid JSON (no fences):
+{
+  "primary": {"keyword":"...","monthly_searches":"est. range","difficulty":"low|medium|high","intent":"informational|commercial|navigational"},
+  "long_tail": [{"keyword":"...","why":"why a small blog can rank for this","content_idea":"...","difficulty":"low|medium"}],
+  "questions": ["question keyword 1","question keyword 2","question keyword 3","question keyword 4","question keyword 5"],
+  "related": ["related term 1","related term 2","related term 3"],
+  "avoid": ["too competitive keyword 1","too competitive keyword 2"]
+}
+long_tail array = 6 keywords. Focus heavily on low-difficulty, high-specificity terms.`,
+        `Niche: fly fishing and whiskey lifestyle blog. Research keywords for topic: "${topic}". Already covered: ${existingTopics.slice(0,300)}`,
+        apiKeys[activeProvider],
+        2000
+      );
+      setResults(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const saveKeyword = (kw, i) => {
+    onAddInspiration({ id:Date.now()+i, title:kw.keyword || kw, source:"Keyword Research", type:"article", notes:kw.content_idea ? `Content idea: ${kw.content_idea}\nDifficulty: ${kw.difficulty}\nWhy rank: ${kw.why}` : "" });
+    setSaved(s => ({ ...s, [i]:true }));
+  };
+
+  const diffColor = { low:"#5cba6c", medium:"var(--amber)", high:"var(--red)" };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div>
+        <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Keyword Research</h2>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Find long-tail keywords small blogs can actually rank for. Save the best ones to your Inspiration Board.</p>
+      </div>
+
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        <div style={{ display:"flex", gap:10 }}>
+          <input style={iS} placeholder="e.g. dry fly fishing, bourbon barrel aging, reading trout streams…" value={topic} onChange={e=>setTopic(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&research()}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          <button onClick={research} disabled={!topic.trim()||loading}
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:topic.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:topic.trim()&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:8 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Researching…</> : `${provider.logo} Research Keywords`}
+          </button>
+        </div>
+        {error && <div style={{ fontSize:12, color:"var(--red)", marginTop:10 }}>{error}</div>}
+      </div>
+
+      {results && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Primary keyword */}
+          {results.primary && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)", marginBottom:10 }}>Primary Keyword</div>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <div style={{ fontWeight:700, fontSize:16 }}>{results.primary.keyword}</div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <span style={{ fontSize:11, padding:"2px 8px", borderRadius:99, background:diffColor[results.primary.difficulty]+"15", color:diffColor[results.primary.difficulty], border:`1px solid ${diffColor[results.primary.difficulty]}33` }}>{results.primary.difficulty} difficulty</span>
+                  <span style={{ fontSize:11, padding:"2px 8px", borderRadius:99, background:"var(--bg-elevated)", color:"var(--muted)", border:"1px solid var(--border)" }}>{results.primary.monthly_searches}/mo</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Long-tail keywords */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:14 }}>🎯 Long-Tail Keywords (Rankable for Small Blogs)</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+              {results.long_tail?.map((kw, i) => (
+                <div key={i} style={{ padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", display:"flex", gap:12, alignItems:"flex-start" }}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+                      <span style={{ fontWeight:600, fontSize:13 }}>{kw.keyword}</span>
+                      <span style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:diffColor[kw.difficulty]+"15", color:diffColor[kw.difficulty] }}>{kw.difficulty}</span>
+                    </div>
+                    <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>💡 {kw.why}</div>
+                    {kw.content_idea && <div style={{ fontSize:11, color:"var(--amber)" }}>Post idea: {kw.content_idea}</div>}
+                  </div>
+                  <button onClick={() => saveKeyword(kw, i)} disabled={saved[i]}
+                    style={{ padding:"4px 10px", borderRadius:6, border:"none", background:saved[i]?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[i]?"default":"pointer", fontFamily:"var(--font-body)", flexShrink:0, whiteSpace:"nowrap" }}>
+                    {saved[i] ? "✓ Saved" : "+ Board"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Questions */}
+          {results.questions?.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7c3aed", marginBottom:12 }}>❓ Question Keywords (FAQ Content)</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                {results.questions.map((q, i) => (
+                  <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"8px 12px", borderRadius:7, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                    <span style={{ fontSize:12 }}>{q}</span>
+                    <button onClick={() => saveKeyword({ keyword:q, why:"Question keyword — great for FAQ sections" }, 100+i)} disabled={saved[100+i]}
+                      style={{ padding:"2px 8px", borderRadius:5, border:"none", background:saved[100+i]?"var(--green)":"transparent", color:saved[100+i]?"#0e0f11":"var(--muted)", fontSize:10, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      {saved[100+i] ? "✓" : "+ Board"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Avoid */}
+          {results.avoid?.length > 0 && (
+            <div style={{ padding:"12px 16px", borderRadius:10, background:"var(--red)08", border:"1px solid var(--red)22", fontSize:12, color:"var(--text-secondary)" }}>
+              <strong style={{ color:"var(--red)" }}>⚠ Too Competitive for Small Blogs:</strong> {results.avoid.join(" · ")}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── COMPETITOR MARKETING PANEL ───────────────────────────────────────────────
+
+function CompetitorMarketingPanel({ activeProvider, activeModel, apiKeys, competitors, posts, inspiration, onAddInspiration }) {
+  const [selected,  setSelected]  = useState(competitors[0]?.url || "");
+  const [analysis,  setAnalysis]  = useState(null);
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState("");
+  const [saved,     setSaved]     = useState({});
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const selectedCompetitor = competitors.find(c => c.url === selected);
+
+  const analyze = async () => {
+    if (!selectedCompetitor) return;
+    setLoading(true); setError(""); setAnalysis(null);
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a competitive marketing analyst for bloggers. Analyze a competitor blog and identify opportunities. Return ONLY valid JSON (no fences):
+{
+  "strengths": ["what they do well 1","what they do well 2","what they do well 3"],
+  "weaknesses": ["gap or weakness 1","gap or weakness 2","gap or weakness 3"],
+  "content_gaps": [{"topic":"...","why_opportunity":"...","angle":"how to differentiate"}],
+  "keyword_opportunities": ["keyword 1","keyword 2","keyword 3","keyword 4"],
+  "social_strategy": {"what_works":"...","what_to_steal":"...","how_to_differentiate":"..."},
+  "quick_wins": ["actionable win 1","actionable win 2","actionable win 3"]
+}
+content_gaps = 4 items. Be specific and actionable.`,
+        `Analyze this competitor blog for a fly fishing and whiskey lifestyle blogger (Cask & Stream):
+Competitor: ${selectedCompetitor.name} (${selectedCompetitor.url})
+Their content focus: ${selectedCompetitor.focus || "general fly fishing blog"}
+My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
+        apiKeys[activeProvider],
+        2000
+      );
+      setAnalysis(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const saveIdea = (text, i) => {
+    onAddInspiration({ id:Date.now()+i, title:text, source:`Competitor Intel — ${selectedCompetitor?.name}`, type:"article", notes:"" });
+    setSaved(s => ({ ...s, [i]:true }));
+  };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div>
+        <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Competitor Intelligence</h2>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Analyze competitor blogs to find content gaps, keyword opportunities, and ways to differentiate.</p>
+      </div>
+
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+        {competitors.length === 0 ? (
+          <div style={{ textAlign:"center", padding:"20px 0", color:"var(--muted)", fontSize:13 }}>
+            No competitors added yet — go to Research tab → Competitors to add some.
+          </div>
+        ) : (
+          <>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Select Competitor</label>
+            <div style={{ display:"flex", gap:10 }}>
+              <select value={selected} onChange={e=>{ setSelected(e.target.value); setAnalysis(null); setSaved({}); }} style={iS}>
+                {competitors.map(c => <option key={c.url} value={c.url}>{c.name} — {c.url}</option>)}
+              </select>
+              <button onClick={analyze} disabled={!selected||loading}
+                style={{ padding:"10px 20px", borderRadius:8, border:"none", background:selected&&!loading?provider.color:"var(--bg-elevated)", color:selected&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:selected&&!loading?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:8 }}>
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Analyzing…</> : `${provider.logo} Analyze`}
+              </button>
+            </div>
+          </>
+        )}
+        {error && <div style={{ fontSize:12, color:"var(--red)", marginTop:10 }}>{error}</div>}
+      </div>
+
+      {analysis && (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          {/* Quick wins */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:12 }}>⚡ Quick Wins</div>
+            {analysis.quick_wins?.map((win,i) => (
+              <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom:"1px solid var(--border)" }}>
+                <span style={{ fontSize:13 }}>{win}</span>
+                <button onClick={() => saveIdea(win, i)} disabled={saved[i]}
+                  style={{ padding:"3px 8px", borderRadius:5, border:"none", background:saved[i]?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:10, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", flexShrink:0, marginLeft:10 }}>
+                  {saved[i] ? "✓" : "+ Board"}
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Content gaps */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)", marginBottom:14 }}>🎯 Content Gaps (Topics They Miss)</div>
+            {analysis.content_gaps?.map((gap,i) => (
+              <div key={i} style={{ padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", marginBottom:8, display:"flex", gap:12, alignItems:"flex-start" }}>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontWeight:600, fontSize:13, marginBottom:3 }}>{gap.topic}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>{gap.why_opportunity}</div>
+                  <div style={{ fontSize:11, color:"var(--amber)" }}>Your angle: {gap.angle}</div>
+                </div>
+                <button onClick={() => saveIdea(`${gap.topic} — ${gap.angle}`, 20+i)} disabled={saved[20+i]}
+                  style={{ padding:"4px 10px", borderRadius:6, border:"none", background:saved[20+i]?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", flexShrink:0 }}>
+                  {saved[20+i] ? "✓" : "+ Board"}
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Strengths/Weaknesses */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+            {[
+              { key:"strengths",  label:"Their Strengths",  color:"var(--text-secondary)", icon:"👍" },
+              { key:"weaknesses", label:"Their Weaknesses", color:"#5cba6c",               icon:"🎯" },
+            ].map(({ key, label, color, icon }) => (
+              <div key={key} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color, marginBottom:10 }}>{icon} {label}</div>
+                {analysis[key]?.map((item,i) => (
+                  <div key={i} style={{ fontSize:12, padding:"6px 0", borderBottom:"1px solid var(--border)", color:"var(--text-secondary)", lineHeight:1.5 }}>{item}</div>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          {/* Keyword opportunities */}
+          {analysis.keyword_opportunities?.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7c3aed", marginBottom:10 }}>🔑 Keyword Opportunities They Miss</div>
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                {analysis.keyword_opportunities.map((kw,i) => (
+                  <span key={i} onClick={() => saveIdea(kw, 50+i)}
+                    style={{ fontSize:12, padding:"4px 10px", borderRadius:99, background:"#7c3aed15", color:"#a78bfa", border:"1px solid #7c3aed33", cursor:"pointer" }}
+                    title="Click to save to Inspiration Board">
+                    {kw} {saved[50+i] ? "✓" : "+"}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Social strategy */}
+          {analysis.social_strategy && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>📱 Social Media Analysis</div>
+              {Object.entries(analysis.social_strategy).map(([key,val]) => (
+                <div key={key} style={{ padding:"8px 0", borderBottom:"1px solid var(--border)" }}>
+                  <div style={{ fontSize:10, fontWeight:700, color:"var(--amber)", textTransform:"capitalize", marginBottom:3 }}>{key.replace(/_/g," ")}</div>
+                  <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.5 }}>{val}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SOCIAL POSTS MANAGER ─────────────────────────────────────────────────────
+
+function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) {
+  const [filter,   setFilter]   = useState("all");
+  const [expanded, setExpanded] = useState(null);
+  const [posting,  setPosting]  = useState({});
+  const [postResults, setPostResults] = useState({});
+
+  const PLATFORMS = [
+    { id:"instagram", label:"Instagram", color:"#e1306c", icon:"📸" },
+    { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
+    { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
+    { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
+  ];
+
+  const filtered = filter === "all" ? socialPosts : socialPosts.filter(p => p.status === filter);
+  const counts = { all: socialPosts.length, draft: socialPosts.filter(p=>p.status==="draft").length, scheduled: socialPosts.filter(p=>p.status==="scheduled").length, published: socialPosts.filter(p=>p.status==="published").length };
+
+  const statusColor = { draft:"var(--muted)", scheduled:"var(--amber)", published:"#5cba6c" };
+  const statusIcon  = { draft:"📋", scheduled:"⏰", published:"✓" };
+
+  const publishNow = async (post) => {
+    setPosting(p => ({ ...p, [post.id]: true }));
+    const results = {};
+    const selectedPlats = PLATFORMS.filter(p => post.platforms?.includes(p.id));
+
+    for (const plat of selectedPlats) {
+      const captionRaw = post.captions?.[plat.id]; const captionText = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
+      const fullMessage = `${captionText}\n\n${post.hashtags || ""}`;
+      try {
+        if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
+          const page = metaConfig.pages[0];
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: post.imageUrl, platforms: ["facebook"] });
+          results[plat.id] = res.facebook?.success ? "✓ Posted" : `Error: ${res.facebook?.error}`;
+        } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
+          const page = metaConfig.pages.find(p => p.instagram_id);
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: post.imageUrl, platforms: ["instagram"] });
+          results[plat.id] = res.instagram?.success ? "✓ Posted" : `Error: ${res.instagram?.error}`;
+        } else {
+          navigator.clipboard.writeText(fullMessage);
+          results[plat.id] = "Copied to clipboard";
+        }
+      } catch(e) { results[plat.id] = `Error: ${e.message}`; }
+    }
+
+    setPostResults(r => ({ ...r, [post.id]: results }));
+    const allOk = Object.values(results).every(r => r.startsWith("✓") || r === "Copied to clipboard");
+    if (allOk) onSave({ ...post, status:"published", publishedAt: new Date().toISOString(), results });
+    setPosting(p => ({ ...p, [post.id]: false }));
+  };
+
+  if (socialPosts.length === 0) {
+    return (
+      <div style={{ textAlign:"center", padding:"60px 20px", color:"var(--muted)" }}>
+        <div style={{ fontSize:40, marginBottom:16 }}>📋</div>
+        <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8, color:"var(--text)" }}>No Social Posts Yet</h3>
+        <p style={{ fontSize:13, lineHeight:1.6 }}>Use the Social Pipeline to create posts, then save them as drafts or schedule them for later.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Social Posts</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Manage your saved, scheduled, and published social posts.</p>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div style={{ display:"flex", gap:6 }}>
+        {Object.entries(counts).map(([key, count]) => (
+          <button key={key} onClick={() => setFilter(key)}
+            style={{ padding:"5px 14px", borderRadius:99, border:filter===key?"1px solid var(--amber)":"1px solid var(--border)", background:filter===key?"var(--amber-glow)":"transparent", color:filter===key?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
+            {key} ({count})
+          </button>
+        ))}
+      </div>
+
+      {/* Post list */}
+      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+        {filtered.map(post => {
+          const isExpanded = expanded === post.id;
+          const platIcons = (post.platforms || []).map(id => PLATFORMS.find(p=>p.id===id)?.icon || "📱").join(" ");
+          const scheduledDate = post.scheduledAt ? new Date(post.scheduledAt) : null;
+          const isOverdue = scheduledDate && scheduledDate < new Date() && post.status === "scheduled";
+
+          return (
+            <div key={post.id} style={{ background:"var(--bg-surface)", border:`1px solid ${isOverdue?"var(--amber)44":"var(--border)"}`, borderRadius:12, overflow:"hidden" }}>
+              {/* Post header */}
+              <div style={{ padding:"14px 18px", display:"flex", alignItems:"center", gap:12, cursor:"pointer" }}
+                onClick={() => setExpanded(isExpanded ? null : post.id)}>
+                <div style={{ fontSize:18 }}>{platIcons}</div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontWeight:600, fontSize:13, marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    {(() => { const c = Object.values(post.captions || {})[0]; const t = typeof c === "string" ? c : c?.text || ""; return t.slice(0,80) || "Untitled post"; })()}…
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)", display:"flex", gap:8 }}>
+                    <span style={{ color:statusColor[post.status], fontWeight:600 }}>{statusIcon[post.status]} {post.status}</span>
+                    {scheduledDate && <span>{isOverdue ? "⚠ Overdue: " : "🕐 "}{scheduledDate.toLocaleString([], {dateStyle:"medium",timeStyle:"short"})}</span>}
+                    <span>{new Date(post.createdAt).toLocaleDateString()}</span>
+                  </div>
+                </div>
+                <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                  {post.status !== "published" && (
+                    <button onClick={e=>{ e.stopPropagation(); publishNow(post); }} disabled={posting[post.id]}
+                      style={{ padding:"5px 12px", borderRadius:7, border:"none", background:posting[post.id]?"var(--bg-elevated)":"#5cba6c", color:posting[post.id]?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:posting[post.id]?"not-allowed":"pointer", fontFamily:"var(--font-body)" }}>
+                      {posting[post.id] ? "◌" : "↑ Post Now"}
+                    </button>
+                  )}
+                  <button onClick={e=>{ e.stopPropagation(); onDelete(post.id); }}
+                    style={{ padding:"5px 10px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    🗑
+                  </button>
+                  <span style={{ fontSize:14, color:"var(--muted)", display:"flex", alignItems:"center" }}>{isExpanded ? "▲" : "▼"}</span>
+                </div>
+              </div>
+
+              {/* Expanded detail */}
+              {isExpanded && (
+                <div style={{ borderTop:"1px solid var(--border)", padding:"16px 18px", display:"flex", flexDirection:"column", gap:14 }}>
+                  {/* Per-platform captions */}
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                    {(post.platforms || []).map(platId => {
+                      const plat = PLATFORMS.find(p=>p.id===platId);
+                      return (
+                        <div key={platId} style={{ background:"var(--bg-elevated)", borderRadius:8, padding:12 }}>
+                          <div style={{ fontSize:10, fontWeight:700, color:plat?.color||"var(--amber)", marginBottom:6 }}>{plat?.icon} {plat?.label}</div>
+                          <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6, whiteSpace:"pre-wrap" }}>
+                            {(() => { const c = post.captions?.[platId]; return typeof c === "string" ? c : (c?.text || "—"); })()}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Hashtags */}
+                  {post.hashtags && (
+                    <div style={{ fontSize:12, color:"var(--amber)", lineHeight:1.6 }}>{post.hashtags}</div>
+                  )}
+
+                  {/* Image */}
+                  {post.imageUrl && (
+                    <img src={post.imageUrl} alt="" style={{ maxWidth:300, borderRadius:8, border:"1px solid var(--border)" }} />
+                  )}
+
+                  {/* Publish results */}
+                  {postResults[post.id] && (
+                    <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                      {Object.entries(postResults[post.id]).map(([platId, result]) => (
+                        <div key={platId} style={{ fontSize:11, color:result.startsWith("✓")?"#5cba6c":"var(--red)" }}>
+                          {PLATFORMS.find(p=>p.id===platId)?.icon} {result}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Change status */}
+                  <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                    <span style={{ fontSize:11, color:"var(--muted)" }}>Status:</span>
+                    <select value={post.status} onChange={e => onSave({ ...post, status: e.target.value })}
+                      style={{ padding:"4px 10px", borderRadius:6, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", cursor:"pointer" }}>
+                      <option value="draft">Draft</option>
+                      <option value="scheduled">Scheduled</option>
+                      <option value="published">Published</option>
+                    </select>
+                    {post.status === "scheduled" && (
+                      <input type="datetime-local" value={post.scheduledAt?.slice(0,16) || ""} onChange={e => onSave({ ...post, scheduledAt: e.target.value })}
+                        style={{ padding:"4px 10px", borderRadius:6, border:"1px solid var(--amber)44", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)" }} />
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── MEDIA LIBRARY ────────────────────────────────────────────────────────────
+// Local image store — upload files or save generated images.
+// Images are stored as base64 in localStorage (up to ~5MB each).
+
+const MEDIA_STORAGE = "bb_media_library";
+
+function loadMediaLibrary() {
+  try { return JSON.parse(localStorage.getItem(MEDIA_STORAGE) || "[]"); }
+  catch { return []; }
+}
+
+function saveMediaLibraryToStorage(items) {
+  try { localStorage.setItem(MEDIA_STORAGE, JSON.stringify(items)); } catch(e) {
+    console.error("Media library storage failed:", e);
+  }
+}
+
+// Global helper — save a blob: URL or data URL into the media library
+async function saveToMediaLibrary(url, name = "generated", tags = ["generated"]) {
+  try {
+    let dataUrl = url;
+    if (url.startsWith("blob:")) {
+      const res  = await fetch(url);
+      const blob = await res.blob();
+      dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+    const item = {
+      id:        Date.now() + Math.random(),
+      dataUrl,
+      name,
+      type:      dataUrl.match(/data:([^;]+)/)?.[1] || "image/png",
+      size:      Math.round(dataUrl.length * 0.75), // approx base64 decoded size
+      tags,
+      notes:     "",
+      source:    "generated",
+      createdAt: new Date().toISOString(),
+    };
+    const current = loadMediaLibrary();
+    saveMediaLibraryToStorage([item, ...current]);
+    return item;
+  } catch(e) {
+    console.error("saveToMediaLibrary failed:", e);
+    throw e;
+  }
+}
+
+function MediaLibrary() {
+  const [items,    setItems]    = useState(loadMediaLibrary);
+  const [filter,   setFilter]   = useState("all");
+  const [selected, setSelected] = useState(null);
+  const [uploading,setUploading]= useState(false);
+  const [search,   setSearch]   = useState("");
+  const [editTag,  setEditTag]  = useState("");
+  const [copied,   setCopied]   = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const fileInput = useRef(null);
+
+  const TAGS = ["blog headline","instagram","facebook","pinterest","tiktok","brand","product","landscape","portrait","other"];
+
+  const save = (next) => { setItems(next); saveMediaLibraryToStorage(next); };
+
+  const addItem = (item) => save([item, ...items]);
+
+  const deleteItem = (id) => {
+    if (!window.confirm("Delete this image?")) return;
+    const next = items.filter(i => i.id !== id);
+    save(next);
+    if (selected?.id === id) setSelected(null);
+  };
+
+  const updateItem = (id, patch) => {
+    const next = items.map(i => i.id === id ? { ...i, ...patch } : i);
+    save(next);
+    if (selected?.id === id) setSelected(s => ({ ...s, ...patch }));
+  };
+
+  // Convert file to base64 and add to library
+  const processFile = async (file) => {
+    if (!file.type.startsWith("image/")) { alert("Only image files are supported."); return; }
+    if (file.size > 8 * 1024 * 1024) { alert("File too large — max 8MB."); return; }
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const item = {
+          id:        Date.now() + Math.random(),
+          dataUrl:   e.target.result,
+          name:      file.name.replace(/\.[^.]+$/, ""),
+          type:      file.type,
+          size:      file.size,
+          tags:      [],
+          notes:     "",
+          source:    "upload",
+          createdAt: new Date().toISOString(),
+        };
+        addItem(item);
+        resolve(item);
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleFiles = async (files) => {
+    setUploading(true);
+    for (const file of Array.from(files)) await processFile(file);
+    setUploading(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault(); setDragOver(false);
+    handleFiles(e.dataTransfer.files);
+  };
+
+  // Save a generated image (blob URL) to the library
+  const saveFromBlobUrl = async (blobUrl, name = "generated") => {
+    try {
+      const res = await fetch(blobUrl);
+      const blob = await res.blob();
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        addItem({
+          id:        Date.now() + Math.random(),
+          dataUrl:   e.target.result,
+          name,
+          type:      blob.type || "image/png",
+          size:      blob.size,
+          tags:      ["generated"],
+          notes:     "",
+          source:    "generated",
+          createdAt: new Date().toISOString(),
+        });
+      };
+      reader.readAsDataURL(blob);
+    } catch(e) { console.error("Failed to save image:", e); }
+  };
+
+  const copyUrl = (item) => {
+    navigator.clipboard.writeText(item.dataUrl);
+    setCopied(item.id);
+    setTimeout(() => setCopied(""), 2000);
+  };
+
+  const download = (item) => {
+    const a = document.createElement("a");
+    a.href = item.dataUrl;
+    a.download = `${item.name || "image"}.${item.type?.split("/")[1] || "png"}`;
+    a.click();
+  };
+
+  const filteredItems = items.filter(item => {
+    if (filter !== "all" && !item.tags?.includes(filter)) return false;
+    if (search && !item.name?.toLowerCase().includes(search.toLowerCase()) && !item.tags?.join(" ").toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+
+  const formatSize = (bytes) => bytes > 1024*1024 ? `${(bytes/1024/1024).toFixed(1)}MB` : `${Math.round(bytes/1024)}KB`;
+
+  const iS = { padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", width:"100%" };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Media Library</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>
+            Upload images or save generated visuals — {items.length} image{items.length!==1?"s":""} stored
+          </p>
+        </div>
+        <button onClick={() => fileInput.current?.click()}
+          style={{ padding:"9px 20px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          + Upload Images
+        </button>
+        <input ref={fileInput} type="file" accept="image/*" multiple style={{ display:"none" }} onChange={e=>handleFiles(e.target.files)} />
+      </div>
+
+      {/* Drop zone */}
+      <div
+        onDragOver={e=>{ e.preventDefault(); setDragOver(true); }}
+        onDragLeave={()=>setDragOver(false)}
+        onDrop={handleDrop}
+        onClick={() => fileInput.current?.click()}
+        style={{ border:`2px dashed ${dragOver?"var(--amber)":"var(--border)"}`, borderRadius:12, padding:"28px 20px", textAlign:"center", cursor:"pointer", background:dragOver?"var(--amber-glow)":"transparent", transition:"all 0.2s" }}>
+        {uploading ? (
+          <div style={{ fontSize:13, color:"var(--amber)" }}>
+            <span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>Processing…
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize:28, marginBottom:8 }}>🖼</div>
+            <div style={{ fontSize:13, fontWeight:600, color:"var(--text-secondary)", marginBottom:4 }}>
+              {dragOver ? "Drop to upload" : "Drag & drop images here or click to browse"}
+            </div>
+            <div style={{ fontSize:11, color:"var(--muted)" }}>PNG, JPG, WEBP, GIF · Max 8MB each</div>
+          </>
+        )}
+      </div>
+
+      {items.length > 0 && (
+        <>
+          {/* Search & filter */}
+          <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+            <input style={{ ...iS, flex:1, minWidth:200 }} placeholder="Search by name or tag…" value={search} onChange={e=>setSearch(e.target.value)}
+              onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+              {["all","generated","upload","blog headline","instagram","facebook","pinterest"].map(tag => (
+                <button key={tag} onClick={() => setFilter(tag)}
+                  style={{ padding:"5px 12px", borderRadius:99, border:filter===tag?"1px solid var(--amber)":"1px solid var(--border)", background:filter===tag?"var(--amber-glow)":"transparent", color:filter===tag?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
+                  {tag}{tag!=="all"?" ▾":""}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Grid */}
+          {filteredItems.length === 0 ? (
+            <div style={{ textAlign:"center", padding:"40px 20px", color:"var(--muted)", fontSize:13 }}>No images match your filter.</div>
+          ) : (
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:12 }}>
+              {filteredItems.map(item => (
+                <div key={item.id}
+                  onClick={() => setSelected(selected?.id===item.id ? null : item)}
+                  style={{ position:"relative", borderRadius:10, overflow:"hidden", border:`2px solid ${selected?.id===item.id?"var(--amber)":"var(--border)"}`, cursor:"pointer", background:"var(--bg-elevated)", transition:"border-color 0.2s" }}>
+                  <img src={item.dataUrl} alt={item.name} style={{ width:"100%", aspectRatio:"1", objectFit:"cover", display:"block" }} />
+                  <div style={{ padding:"8px 10px", background:"var(--bg-surface)" }}>
+                    <div style={{ fontSize:11, fontWeight:600, color:"var(--text)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginBottom:3 }}>{item.name || "Untitled"}</div>
+                    <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+                      {(item.tags||[]).slice(0,2).map(tag => (
+                        <span key={tag} style={{ fontSize:9, padding:"1px 5px", borderRadius:99, background:"var(--amber-glow)", color:"var(--amber)", border:"1px solid var(--amber)33" }}>{tag}</span>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Quick action overlay */}
+                  <div style={{ position:"absolute", top:6, right:6, display:"flex", gap:4 }}
+                    onClick={e=>e.stopPropagation()}>
+                    <button onClick={() => copyUrl(item)} title="Copy data URL"
+                      style={{ width:26, height:26, borderRadius:6, border:"none", background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:11, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      {copied===item.id ? "✓" : "⎘"}
+                    </button>
+                    <button onClick={() => download(item)} title="Download"
+                      style={{ width:26, height:26, borderRadius:6, border:"none", background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:11, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      ↓
+                    </button>
+                    <button onClick={() => deleteItem(item.id)} title="Delete"
+                      style={{ width:26, height:26, borderRadius:6, border:"none", background:"rgba(180,20,20,0.75)", color:"#fff", fontSize:11, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Detail panel for selected image */}
+          {selected && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20, display:"grid", gridTemplateColumns:"240px 1fr", gap:20 }}>
+              <img src={selected.dataUrl} alt={selected.name} style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", objectFit:"contain", maxHeight:220 }} />
+              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                <div>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Name</label>
+                  <input value={selected.name} onChange={e=>{ setSelected(s=>({...s,name:e.target.value})); updateItem(selected.id,{name:e.target.value}); }}
+                    style={iS} />
+                </div>
+
+                <div>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Tags</label>
+                  <div style={{ display:"flex", gap:5, flexWrap:"wrap", marginBottom:8 }}>
+                    {TAGS.map(tag => {
+                      const has = selected.tags?.includes(tag);
+                      return (
+                        <button key={tag} onClick={() => { const next = has ? selected.tags.filter(t=>t!==tag) : [...(selected.tags||[]),tag]; updateItem(selected.id,{tags:next}); setSelected(s=>({...s,tags:next})); }}
+                          style={{ padding:"3px 10px", borderRadius:99, border:has?"1px solid var(--amber)":"1px solid var(--border)", background:has?"var(--amber-glow)":"transparent", color:has?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                          {tag}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Notes</label>
+                  <textarea value={selected.notes||""} onChange={e=>{ setSelected(s=>({...s,notes:e.target.value})); updateItem(selected.id,{notes:e.target.value}); }}
+                    rows={2} style={{ ...iS, resize:"none", lineHeight:1.5, fontSize:12 }} placeholder="e.g. Used for Spring Hatch post, River Stone palette…" />
+                </div>
+
+                <div style={{ fontSize:11, color:"var(--muted)", display:"flex", gap:16 }}>
+                  <span>📐 {selected.type?.split("/")[1]?.toUpperCase()}</span>
+                  {selected.size && <span>💾 {formatSize(selected.size)}</span>}
+                  <span>🗓 {new Date(selected.createdAt).toLocaleDateString()}</span>
+                  <span style={{ textTransform:"capitalize" }}>📥 {selected.source}</span>
+                </div>
+
+                <div style={{ display:"flex", gap:8 }}>
+                  <button onClick={() => copyUrl(selected)}
+                    style={{ padding:"7px 16px", borderRadius:7, border:"none", background:copied===selected.id?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    {copied===selected.id ? "✓ Copied!" : "⎘ Copy Image URL"}
+                  </button>
+                  <button onClick={() => download(selected)}
+                    style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    ↓ Download
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── LIBRARY IMAGE PICKER ─────────────────────────────────────────────────────
+// Inline picker for selecting an image from the Media Library.
+// Used in Social Pipeline image stage, HeadlineImagePanel, etc.
+
+function LibraryImagePicker({ onSelect, compact = false }) {
+  const [open,    setOpen]   = useState(false);
+  const [filter,  setFilter] = useState("all");
+  const [search,  setSearch] = useState("");
+  const items = loadMediaLibrary();
+
+  const filtered = items.filter(item => {
+    const typeMatch  = filter === "all" || item.tags?.includes(filter);
+    const searchMatch = !search || item.name?.toLowerCase().includes(search.toLowerCase());
+    return typeMatch && searchMatch;
+  });
+
+  const tags = ["all", ...new Set(items.flatMap(i => i.tags || []))].slice(0, 8);
+
+  if (items.length === 0) return null;
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)}
+        style={{ padding: compact ? "5px 14px" : "8px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+        🖼 {compact ? "Swap from Library" : `Choose from Library (${items.length})`}
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:16 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+        <div style={{ fontSize:12, fontWeight:700, color:"var(--amber)" }}>🖼 Media Library — {items.length} images</div>
+        <button onClick={() => setOpen(false)} style={{ background:"transparent", border:"none", color:"var(--muted)", fontSize:16, cursor:"pointer", padding:2, lineHeight:1 }}>✕</button>
+      </div>
+
+      {/* Search */}
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…"
+        style={{ width:"100%", padding:"7px 12px", borderRadius:7, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box", marginBottom:10 }} />
+
+      {/* Tag filters */}
+      <div style={{ display:"flex", gap:5, flexWrap:"wrap", marginBottom:12 }}>
+        {tags.map(tag => (
+          <button key={tag} onClick={() => setFilter(tag)}
+            style={{ padding:"3px 10px", borderRadius:99, border:filter===tag?"1px solid var(--amber)":"1px solid var(--border)", background:filter===tag?"var(--amber-glow)":"transparent", color:filter===tag?"var(--amber)":"var(--text-secondary)", fontSize:10, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
+            {tag}
+          </button>
+        ))}
+      </div>
+
+      {/* Grid */}
+      {filtered.length === 0 ? (
+        <div style={{ textAlign:"center", padding:"20px", color:"var(--muted)", fontSize:12 }}>No images match.</div>
+      ) : (
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(90px,1fr))", gap:8, maxHeight:260, overflow:"auto" }}>
+          {filtered.map(item => (
+            <div key={item.id} onClick={() => { onSelect(item.dataUrl); setOpen(false); }}
+              style={{ position:"relative", borderRadius:8, overflow:"hidden", border:"1px solid var(--border)", cursor:"pointer", aspectRatio:"1" }}
+              onMouseEnter={e=>{ e.currentTarget.style.borderColor="var(--amber)"; e.currentTarget.querySelector(".overlay").style.opacity="1"; }}
+              onMouseLeave={e=>{ e.currentTarget.style.borderColor="var(--border)"; e.currentTarget.querySelector(".overlay").style.opacity="0"; }}>
+              <img src={item.dataUrl} alt={item.name} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+              <div className="overlay" style={{ position:"absolute", inset:0, background:"rgba(196,124,43,0.8)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"#0e0f11", opacity:0, transition:"opacity 0.15s" }}>
+                Use This
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ fontSize:10, color:"var(--muted)", marginTop:10, lineHeight:1.5 }}>
+        Click any image to use it. Add more in Marketing → Media Library.
+      </div>
+    </div>
+  );
+}
+
+// ─── INSPIRATION BOARD ───────────────────────────────────────────────────────
+
+function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, btnS, btnP }) {
+  const [inspFilter, setInspFilter] = useState("all");
+  const [inspSearch, setInspSearch] = useState("");
+
+  const ALL_TYPES = [
+    { id:"all",       label:"All",       icon:"◈" },
+    { id:"article",   label:"Article",   icon:"📄" },
+    { id:"instagram", label:"Instagram", icon:"📸" },
+    { id:"facebook",  label:"Facebook",  icon:"👍" },
+    { id:"tiktok",    label:"TikTok",    icon:"🎵" },
+    { id:"twitter",   label:"X",         icon:"🐦" },
+    { id:"pinterest", label:"Pinterest", icon:"📌" },
+    { id:"youtube",   label:"YouTube",   icon:"▶" },
+    { id:"podcast",   label:"Podcast",   icon:"🎙" },
+    { id:"email",     label:"Email",     icon:"✉" },
+    { id:"visual",    label:"Visual",    icon:"🖼" },
+    { id:"thread",    label:"Thread",    icon:"💬" },
+    { id:"keyword",   label:"Keyword",   icon:"◎" },
+    { id:"video",     label:"Video",     icon:"🎬" },
+  ];
+
+  const typeConfig = {
+    article:{icon:"📄",color:"var(--amber)"},
+    instagram:{icon:"📸",color:"#e1306c"},
+    facebook:{icon:"👍",color:"#1877f2"},
+    tiktok:{icon:"🎵",color:"#010101"},
+    twitter:{icon:"🐦",color:"#1da1f2"},
+    pinterest:{icon:"📌",color:"#e60023"},
+    youtube:{icon:"▶",color:"var(--red)"},
+    podcast:{icon:"🎙",color:"#a78bfa"},
+    email:{icon:"✉",color:"#5cba6c"},
+    visual:{icon:"🖼",color:"#7c8abf"},
+    thread:{icon:"💬",color:"#5cba6c"},
+    keyword:{icon:"◎",color:"#7c3aed"},
+    video:{icon:"🎬",color:"var(--red)"},
+  };
+
+  const presentTypes = new Set(inspiration.map(i => i.type || "article"));
+  const visibleFilters = ALL_TYPES.filter(t => t.id === "all" || presentTypes.has(t.id));
+
+  const filtered = inspiration.filter(item => {
+    const typeMatch  = inspFilter === "all" || (item.type || "article") === inspFilter;
+    const searchMatch = !inspSearch || item.title?.toLowerCase().includes(inspSearch.toLowerCase()) || item.source?.toLowerCase().includes(inspSearch.toLowerCase()) || item.notes?.toLowerCase().includes(inspSearch.toLowerCase());
+    return typeMatch && searchMatch;
+  });
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div>
+          <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:"0 0 4px"}}>Inspiration Board</h2>
+          <p style={{fontSize:12,color:"var(--text-secondary)",margin:0}}>{inspiration.length} idea{inspiration.length!==1?"s":""} saved</p>
+        </div>
+        <button onClick={onAddNew} style={btnP}>+ Save New</button>
+      </div>
+
+      {inspiration.length > 0 && (
+        <>
+          <input value={inspSearch} onChange={e=>setInspSearch(e.target.value)}
+            placeholder="Search ideas…"
+            style={{ width:"100%", padding:"9px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box", marginBottom:10 }}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+
+          <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:16}}>
+            {visibleFilters.map(f => {
+              const count = f.id === "all" ? inspiration.length : inspiration.filter(i=>(i.type||"article")===f.id).length;
+              return (
+                <button key={f.id} onClick={()=>setInspFilter(f.id)}
+                  style={{padding:"5px 12px",borderRadius:99,border:inspFilter===f.id?"1px solid var(--amber)":"1px solid var(--border)",background:inspFilter===f.id?"var(--amber-glow)":"transparent",color:inspFilter===f.id?"var(--amber)":"var(--text-secondary)",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:4}}>
+                  <span>{f.icon}</span>{f.label}
+                  <span style={{fontSize:9,fontWeight:700,padding:"1px 5px",borderRadius:99,background:"var(--bg-elevated)",color:"var(--muted)",marginLeft:2}}>{count}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {filtered.map(item => {
+              const tc = typeConfig[item.type] || typeConfig.article;
+              return (
+                <div key={item.id} style={{...card,padding:18,display:"flex",gap:16,alignItems:"flex-start"}}>
+                  <div style={{width:40,height:40,borderRadius:10,background:tc.color+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{tc.icon}</div>
+                  <div style={{flex:1}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                      <span style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",color:tc.color}}>{item.type||"article"}</span>
+                      <span style={{fontSize:11,color:"var(--text-secondary)"}}>from {item.source}</span>
+                    </div>
+                    <div style={{fontSize:14,fontWeight:600,marginBottom:4}}>{item.title}</div>
+                    {item.notes&&<div style={{fontSize:12,color:"var(--text-secondary)",fontStyle:"italic"}}>💡 {item.notes}</div>}
+                  </div>
+                  <div style={{display:"flex",gap:6,flexShrink:0}}>
+                    <button onClick={()=>onToDraft(item)} style={{...btnS,fontSize:11,padding:"5px 10px"}}>→ Draft</button>
+                    <button onClick={()=>onDelete(item.id)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14,padding:"5px"}} title="Remove">✕</button>
+                  </div>
+                </div>
+              );
+            })}
+            {filtered.length === 0 && (
+              <div style={{...card,padding:32,textAlign:"center",color:"var(--muted)",fontSize:13}}>
+                {inspSearch || inspFilter !== "all" ? "No ideas match your filter — try clearing it." : "No inspiration saved yet."}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {inspiration.length === 0 && (
+        <div style={{...card,padding:32,textAlign:"center",color:"var(--muted)",fontSize:13}}>
+          No inspiration saved yet. Click + Save New or use AI Ideas to generate content ideas.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -2754,7 +6472,330 @@ function Modal({ title, onClose, children, wide }) {
   );
 }
 
-// ─── WIX CONTENT CONVERTER ───────────────────────────────────────────────────
+// ─── HEADLINE IMAGE ───────────────────────────────────────────────────────────
+
+// Blog headline images use a wide 16:9 ratio
+const HEADLINE_IMAGE_SPEC = {
+  ratio: "16:9",
+  label: "Blog Headline (16:9)",
+  style: "cinematic editorial photography, moody atmospheric, fly fishing and whiskey lifestyle, amber and teal tones, wide landscape",
+};
+
+function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys }) {
+  const [imageUrl,   setImageUrl]   = useState(null);
+  const [prompt,     setPrompt]     = useState("");
+  const [loading,    setLoading]    = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [error,      setError]      = useState("");
+  const [copied,     setCopied]     = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [draftPrompt, setDraftPrompt] = useState("");
+
+  const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
+  const provider = imgProvider;
+  const providerLabel = getImageProviderLabel(provider);
+  const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
+
+  // Opens the preview modal with an AI-drafted prompt the user can edit before generating
+  const openPromptPreview = async () => {
+    setLoading(true); setError("");
+    try {
+      let draftedPrompt = prompt;
+      if (!draftedPrompt) {
+        const topic = `${title}. ${(body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim()}`;
+        draftedPrompt = await generateImagePrompt(topic, "facebook", activeProvider, activeModel, apiKeys[activeProvider]);
+        draftedPrompt += `, ${HEADLINE_IMAGE_SPEC.style}, wide editorial banner`;
+      }
+      setDraftPrompt(draftedPrompt);
+      setPreviewOpen(true);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const generate = async (finalPrompt) => {
+    setPreviewOpen(false);
+    setLoading(true); setError(""); setImageUrl(null);
+    try {
+      setPrompt(finalPrompt);
+      const url = await generateImage(finalPrompt, "facebook", apiKeys, imgProvider);
+      setImageUrl(url);
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const handleDownload = () => {
+    if (!imageUrl) return;
+    const a = document.createElement("a");
+    a.href = imageUrl;
+    a.download = `headline-${(title||"blog").toLowerCase().replace(/\s+/g,"-").slice(0,30)}.webp`;
+    a.click();
+  };
+
+  return (
+    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10 }}>
+        <div>
+          <div style={{ fontWeight:700, fontSize:14 }}>🖼 Headline Image</div>
+          <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>
+            Wide banner image for your blog post header · {HEADLINE_IMAGE_SPEC.label}
+          </div>
+        </div>
+        <ImageProviderPicker apiKeys={apiKeys} value={imgProvider} onChange={handleImgProviderChange} compact />
+      </div>
+      <div style={{ display:"flex", justifyContent:"flex-end" }}>
+        <div style={{ display:"flex", gap:8 }}>
+          {prompt && (
+            <button onClick={() => { setDraftPrompt(prompt); setPreviewOpen(true); }}
+              style={{ padding:"5px 12px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              View/Edit Prompt
+            </button>
+          )}
+          <button onClick={openPromptPreview} disabled={loading || !title?.trim() || !provider}
+            style={{ padding:"7px 18px", borderRadius:8, border:"none", background:loading||!title?.trim()||!provider?"var(--bg-elevated)":"#7c3aed", color:loading||!title?.trim()||!provider?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:loading||!title?.trim()||!provider?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Working…</> : imageUrl ? "↻ Regenerate" : "▣ Generate Headline Image"}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>
+      )}
+
+      {/* Image output */}
+      {imageUrl ? (
+        <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)" }}>
+          <img src={imageUrl} alt="Blog headline" style={{ width:"100%", display:"block", borderRadius:10 }} />
+          <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
+            <button onClick={handleDownload}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              ↓ Download
+            </button>
+            <button onClick={openPromptPreview}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              ↻ New
+            </button>
+            <button onClick={async ()=>{ await saveToMediaLibrary(imageUrl, `${title||"headline"}-${Date.now()}`, ["blog headline"]); setCopied(true); setTimeout(()=>setCopied(false),2000); }}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:copied?"rgba(92,186,108,0.85)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              {copied ? "✓ Saved" : "🖼 Save to Library"}
+            </button>
+          </div>
+        </div>
+      ) : !loading && (
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          <div style={{ height:130, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:8 }}>
+            <span style={{ fontSize:28, opacity:0.25 }}>🖼</span>
+            <span style={{ fontSize:12, color:"var(--muted)" }}>
+              {!provider ? "Add Stability AI, OpenAI, or Gemini key in Settings" : !title?.trim() ? "Enter a title first" : "Click Generate to create your headline image"}
+            </span>
+          </div>
+          {title?.trim() && <LibraryImagePicker onSelect={(url) => { setImageUrl(url); setPrompt("from library"); }} />}
+        </div>
+      )}
+
+      {loading && (
+        <div style={{ height:160, borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
+          <span style={{ animation:"spin 1s linear infinite", display:"inline-block", fontSize:20, opacity:0.4 }}>◌</span>
+          <span style={{ fontSize:12, color:"var(--muted)" }}>{providerLabel ? `Generating headline image with ${providerLabel}…` : "Working…"}</span>
+        </div>
+      )}
+
+      {previewOpen && (
+        <PromptPreviewModal
+          title="Review Image Prompt"
+          systemPrompt={null}
+          userPrompt={draftPrompt}
+          onUserChange={setDraftPrompt}
+          confirmLabel="Generate Image"
+          accentColor="#7c3aed"
+          onCancel={() => setPreviewOpen(false)}
+          onConfirm={() => generate(draftPrompt)}
+        />
+      )}
+    </div>
+  );
+}
+// ─── MARKDOWN ↔ HTML CONVERTERS ──────────────────────────────────────────────
+// Keeps the rest of the app (AI generation, Wix push, pipeline) working with
+// plain markdown while the editor itself works with HTML.
+
+function markdownToHtml(md) {
+  if (!md) return "<p></p>";
+  const lines = md.split("\n");
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    if (line.startsWith("### "))      { blocks.push(`<h3>${inlineMd(line.slice(4))}</h3>`); i++; continue; }
+    if (line.startsWith("## "))       { blocks.push(`<h2>${inlineMd(line.slice(3))}</h2>`); i++; continue; }
+    if (line.startsWith("# "))        { blocks.push(`<h1>${inlineMd(line.slice(2))}</h1>`); i++; continue; }
+    if (/^[-*]\s/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^[-*]\s/.test(lines[i])) { items.push(`<li>${inlineMd(lines[i].slice(2))}</li>`); i++; }
+      blocks.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    }
+    if (/^\d+\.\s/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\d+\.\s/.test(lines[i])) { items.push(`<li>${inlineMd(lines[i].replace(/^\d+\.\s/, ""))}</li>`); i++; }
+      blocks.push(`<ol>${items.join("")}</ol>`);
+      continue;
+    }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !/^#{1,3}\s/.test(lines[i]) && !/^[-*]\s/.test(lines[i]) && !/^\d+\.\s/.test(lines[i])) {
+      para.push(lines[i]); i++;
+    }
+    blocks.push(`<p>${inlineMd(para.join(" "))}</p>`);
+  }
+  return blocks.join("\n") || "<p></p>";
+}
+
+function inlineMd(text) {
+  return text
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2">$1</a>');
+}
+
+function htmlToMarkdown(html) {
+  if (!html) return "";
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  const lines = [];
+
+  const walk = (node) => {
+    for (const child of node.childNodes) {
+      if (child.nodeType === 3) { lines.push(child.textContent); continue; }
+      const tag = child.tagName?.toLowerCase();
+      const inner = () => inlineHtmlToMd(child);
+      if (tag === "h1") lines.push(`\n# ${inner()}\n`);
+      else if (tag === "h2") lines.push(`\n## ${inner()}\n`);
+      else if (tag === "h3") lines.push(`\n### ${inner()}\n`);
+      else if (tag === "p") lines.push(`\n${inner()}\n`);
+      else if (tag === "ul") { for (const li of child.children) lines.push(`- ${inlineHtmlToMd(li)}\n`); lines.push(""); }
+      else if (tag === "ol") { let n=1; for (const li of child.children) { lines.push(`${n++}. ${inlineHtmlToMd(li)}\n`); } lines.push(""); }
+      else if (tag === "br") lines.push("\n");
+      else walk(child);
+    }
+  };
+  walk(div);
+  return lines.join("").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function inlineHtmlToMd(node) {
+  let out = "";
+  for (const child of node.childNodes) {
+    if (child.nodeType === 3) { out += child.textContent; continue; }
+    const tag = child.tagName?.toLowerCase();
+    if (tag === "strong" || tag === "b") out += `**${inlineHtmlToMd(child)}**`;
+    else if (tag === "em" || tag === "i") out += `*${inlineHtmlToMd(child)}*`;
+    else if (tag === "a") out += `[${inlineHtmlToMd(child)}](${child.getAttribute("href")})`;
+    else out += inlineHtmlToMd(child);
+  }
+  return out;
+}
+
+// ─── RICH TEXT EDITOR (TipTap) ────────────────────────────────────────────────
+
+function RichTextToolbar({ editor }) {
+  if (!editor) return null;
+  const btn = (active) => ({
+    width:32, height:32, borderRadius:6, border:"none",
+    background: active ? "var(--amber)" : "transparent",
+    color: active ? "#0e0f11" : "var(--text-secondary)",
+    cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center",
+    fontSize:13, fontWeight:700, fontFamily:"var(--font-body)",
+  });
+  const sep = { width:1, height:20, background:"var(--border)", margin:"0 4px" };
+
+  const setLink = () => {
+    const url = window.prompt("Link URL:", editor.getAttributes("link").href || "https://");
+    if (url === null) return;
+    if (url === "") { editor.chain().focus().extendMarkRange("link").unsetLink().run(); return; }
+    editor.chain().focus().extendMarkRange("link").setLink({ href: url }).run();
+  };
+
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:2, padding:"6px 8px", borderBottom:"1px solid var(--border)", background:"var(--bg-elevated)", borderRadius:"8px 8px 0 0", flexWrap:"wrap" }}>
+      <button type="button" onClick={() => editor.chain().focus().toggleBold().run()} style={btn(editor.isActive("bold"))} title="Bold">B</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleItalic().run()} style={{...btn(editor.isActive("italic")), fontStyle:"italic"}} title="Italic">I</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleUnderline().run()} style={{...btn(editor.isActive("underline")), textDecoration:"underline"}} title="Underline">U</button>
+      <div style={sep} />
+      <button type="button" onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} style={btn(editor.isActive("heading", {level:1}))} title="Heading 1">H1</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()} style={btn(editor.isActive("heading", {level:2}))} title="Heading 2">H2</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()} style={btn(editor.isActive("heading", {level:3}))} title="Heading 3">H3</button>
+      <div style={sep} />
+      <button type="button" onClick={() => editor.chain().focus().toggleBulletList().run()} style={btn(editor.isActive("bulletList"))} title="Bullet List">• ≡</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleOrderedList().run()} style={btn(editor.isActive("orderedList"))} title="Numbered List">1. ≡</button>
+      <button type="button" onClick={() => editor.chain().focus().toggleBlockquote().run()} style={btn(editor.isActive("blockquote"))} title="Quote">"</button>
+      <div style={sep} />
+      <button type="button" onClick={setLink} style={btn(editor.isActive("link"))} title="Link">🔗</button>
+      <button type="button" onClick={() => editor.chain().focus().undo().run()} style={btn(false)} title="Undo">↺</button>
+      <button type="button" onClick={() => editor.chain().focus().redo().run()} style={btn(false)} title="Redo">↻</button>
+    </div>
+  );
+}
+
+function RichTextEditor({ value, onChange, placeholder = "Write your post here…", minHeight = 380 }) {
+  const isInternalUpdate = useRef(false);
+
+  const editor = useEditor({
+    extensions: [
+      StarterKit.configure({ heading: { levels: [1,2,3] } }),
+      Underline,
+      Link.configure({ openOnClick: false, autolink: true }),
+      Placeholder.configure({ placeholder }),
+    ],
+    content: markdownToHtml(value || ""),
+    onUpdate: ({ editor }) => {
+      isInternalUpdate.current = true;
+      const md = htmlToMarkdown(editor.getHTML());
+      onChange(md);
+    },
+  });
+
+  // Sync external changes (e.g. AI regenerating the draft) into the editor
+  useEffect(() => {
+    if (!editor) return;
+    if (isInternalUpdate.current) { isInternalUpdate.current = false; return; }
+    const currentMd = htmlToMarkdown(editor.getHTML());
+    if (currentMd.trim() !== (value || "").trim()) {
+      editor.commands.setContent(markdownToHtml(value || ""));
+    }
+  }, [value, editor]);
+
+  return (
+    <div style={{ border:"1px solid var(--border)", borderRadius:8, overflow:"hidden", background:"var(--bg-elevated)" }}>
+      <RichTextToolbar editor={editor} />
+      <div
+        onClick={() => editor?.chain().focus().run()}
+        style={{ padding:"14px 16px", minHeight, cursor:"text", fontSize:14, lineHeight:1.8, color:"var(--text)" }}>
+        <EditorContent editor={editor} />
+      </div>
+      <style>{`
+        .ProseMirror { outline: none; }
+        .ProseMirror p.is-editor-empty:first-child::before {
+          content: attr(data-placeholder);
+          color: var(--muted);
+          float: left;
+          pointer-events: none;
+          height: 0;
+        }
+        .ProseMirror h1 { font-family: var(--font-display); font-size: 1.7em; font-weight: 700; margin: 0.6em 0 0.3em; }
+        .ProseMirror h2 { font-family: var(--font-display); font-size: 1.4em; font-weight: 700; margin: 0.6em 0 0.3em; }
+        .ProseMirror h3 { font-family: var(--font-display); font-size: 1.15em; font-weight: 700; margin: 0.5em 0 0.3em; }
+        .ProseMirror p { margin: 0.5em 0; }
+        .ProseMirror ul, .ProseMirror ol { margin: 0.5em 0; padding-left: 1.4em; }
+        .ProseMirror blockquote { border-left: 3px solid var(--amber); padding-left: 14px; margin: 0.6em 0; color: var(--text-secondary); font-style: italic; }
+        .ProseMirror a { color: var(--amber); text-decoration: underline; }
+        .ProseMirror strong { font-weight: 700; }
+      `}</style>
+    </div>
+  );
+}
+
 // Converts plain text / basic markdown → Wix rich content document format
 
 function textToWixContent(text) {
@@ -2799,22 +6840,62 @@ function textToWixContent(text) {
 }
 
 // Build the Wix create/update post body
-function buildWixPostBody(form) {
-  const richContent = textToWixContent(form.body);
+function buildWixPostBody(form, status = "DRAFT") {
   return {
-    draftPost: {
-      title: form.title,
-      richContent,
-      excerpt: form.body.slice(0, 200).replace(/[#*]/g, "").trim(),
-    }
+    title:   form.title,
+    content: form.body || "",
+    excerpt: (form.body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim(),
+    status,
   };
+}
+
+function getWixCfgWithAccount(cfg) {
+  return { ...cfg, accountId: cfg.memberId || cfg.siteId || "" };
+}
+
+// Push post via Wix Velo HTTP function (runs as site identity — no memberId needed)
+async function wixVeloPush(form, publishNow = false, cfg = {}) {
+  // Use Wix JS SDK with OAuth token for blog post creation
+  // SDK handles auth properly — no memberId needed
+  const { createClient, OAuthStrategy } = await import("@wix/sdk");
+  const { posts: blogPosts } = await import("@wix/blog");
+
+  const client = createClient({
+    modules: { blogPosts },
+    auth: OAuthStrategy({
+      clientId: "c6500272-f2ac-4fad-aeef-6cd500382297",
+      tokens: {
+        accessToken:  { value: cfg.oauthToken || "", expiresAt: 9999999999 },
+        refreshToken: { role: "member", value: cfg.oauthRefresh || "" },
+      },
+    }),
+  });
+
+  // Create the post using SDK
+  const richContent = textToWixContent(form.body);
+  const result = await client.blogPosts.createDraftPost({
+    draftPost: {
+      title:       form.title,
+      excerpt:     (form.body || "").slice(0, 200).replace(/[^a-zA-Z0-9 .,!?]/g, " ").trim(),
+      richContent,
+    }
+  });
+
+  const draftId = result?.draftPost?._id || result?._id;
+  if (!draftId) throw new Error(`No draft ID returned: ${JSON.stringify(result).slice(0,200)}`);
+
+  if (publishNow) {
+    await client.blogPosts.publishDraftPost(draftId);
+  }
+
+  return { success: true, postId: draftId };
 }
 
 // ─── POST EDITOR MODAL ────────────────────────────────────────────────────────
 
 const CATEGORIES = ["Culture", "Whiskey", "Gear", "Destinations", "Technique", "Lifestyle", "Reviews", "News"];
 
-function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
+function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {}, activeProvider = "anthropic", activeModel = "claude-sonnet-4-6" }) {
   const isNew = !post?.id;
   const [form, setForm] = useState({
     title:    post?.title    || "",
@@ -2843,34 +6924,13 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
     const wixCfg = loadWixConfig();
 
     try {
-      const body = buildWixPostBody(form);
-
-      if (post?.wixId) {
-        // Update existing draft post on Wix
-        setWixStatus("Updating on Wix…");
-        await wixFetch(`/blog/v3/draft-posts/${post.wixId}`, "PATCH", body, wixCfg);
-        if (!asDraft) {
-          setWixStatus("Publishing…");
-          await wixFetch(`/blog/v3/draft-posts/${post.wixId}/publish`, "POST", {}, wixCfg);
-        }
-        setWixStatus(asDraft ? "✓ Updated as draft on Wix" : "✓ Published to Wix!");
-      } else {
-        // Create new draft post on Wix, then optionally publish
-        setWixStatus("Creating draft on Wix…");
-        const res = await wixFetch("/blog/v3/draft-posts", "POST", body, wixCfg);
-        const newWixId = res?.draftPost?.id;
-        if (!newWixId) throw new Error(`Wix didn't return a post ID. Response: ${JSON.stringify(res).slice(0,200)}`);
-
-        if (!asDraft) {
-          setWixStatus("Publishing…");
-          await wixFetch(`/blog/v3/draft-posts/${newWixId}/publish`, "POST", {}, wixCfg);
-        }
-
-        // Save wixId back to the post
-        const updatedPost = { ...post, ...form, id: post?.id || Date.now(), wixId: newWixId, status: asDraft ? "draft" : "published", fromWix: true };
-        onSave(updatedPost);
-        setWixStatus(asDraft ? "✓ Saved as draft on Wix" : "✓ Published to caskandstream.com!");
-      }
+      // Use Velo HTTP function — runs as site identity, no memberId needed
+      setWixStatus(asDraft ? "Saving draft to Wix…" : "Publishing to Wix…");
+      const result = await wixVeloPush(form, !asDraft, wixCfg);
+      const newWixId = result.postId;
+      const updatedPost = { ...post, ...form, id: post?.id || Date.now(), wixId: newWixId, status: asDraft ? "draft" : "published", fromWix: true };
+      onSave(updatedPost);
+      setWixStatus(asDraft ? "✓ Saved as draft on Wix" : "✓ Published to caskandstream.com!");
     } catch(e) {
       setWixError(`Wix error: ${e.message}`);
       setWixStatus("");
@@ -2906,37 +6966,47 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected }) {
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
             Body
-            <span style={{ fontWeight:400, marginLeft:8, color:"var(--muted)", textTransform:"none", letterSpacing:0, fontSize:10 }}>
-              Markdown supported: # H1, ## H2, **bold**, - list
-            </span>
           </label>
-          <textarea rows={14} value={form.body} onChange={e=>setForm(f=>({...f,body:e.target.value}))} placeholder="Write your post here…" style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
+          <RichTextEditor value={form.body} onChange={(md)=>setForm(f=>({...f,body:md}))} placeholder="Write your post here…" minHeight={300} />
         </div>
 
-        {/* Wix push section */}
-        {wixConnected && (
-          <div style={{ padding:"14px 16px", borderRadius:10, border:"1px solid #5cba6c44", background:"#5cba6c08" }}>
-            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>
-              ◉ Publish to Wix Blog
-              {post?.wixId && <span style={{ marginLeft:8, fontWeight:400, color:"var(--text-secondary)" }}>· Already on Wix</span>}
-            </div>
-            <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
-              <button onClick={() => handlePublishToWix(false)} disabled={!form.title.trim() || wixLoading}
-                style={{ padding:"8px 18px", borderRadius:8, border:"none", background:!form.title.trim()||wixLoading?"var(--bg-elevated)":"#5cba6c", color:!form.title.trim()||wixLoading?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:!form.title.trim()||wixLoading?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:6 }}>
-                {wixLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{wixStatus||"Working…"}</> : post?.wixId ? "↑ Update on Wix" : "↑ Publish to Wix"}
-              </button>
-              <button onClick={() => handlePublishToWix(true)} disabled={!form.title.trim() || wixLoading}
-                style={{ padding:"8px 16px", borderRadius:8, border:"1px solid #5cba6c44", background:"transparent", color:"#5cba6c", fontSize:13, cursor:!form.title.trim()||wixLoading?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif" }}>
-                Save as Draft on Wix
-              </button>
-              {wixStatus && !wixLoading && <span style={{ fontSize:12, color:"#5cba6c", fontWeight:600 }}>{wixStatus}</span>}
-              {wixError && <span style={{ fontSize:12, color:"var(--red)" }}>{wixError}</span>}
-            </div>
-            <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"8px 0 0", lineHeight:1.5 }}>
-              Posts are converted from markdown to Wix rich content format automatically.
-            </p>
+        {/* Headline Image */}
+        <HeadlineImagePanel
+          title={form.title}
+          body={form.body}
+          activeProvider={activeProvider || "anthropic"}
+          activeModel={activeModel || "claude-sonnet-4-6"}
+          apiKeys={apiKeys || {}}
+        />
+
+        {/* Copy to Wix */}
+        <div style={{ padding:"14px 16px", borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)" }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+            📋 Copy to Wix Blog
           </div>
-        )}
+          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+            <button onClick={() => {
+              const html = (form.body || "").split("\n\n").filter(Boolean).map(block => {
+                if (block.startsWith("# "))  return `<h1>${block.slice(2)}</h1>`;
+                if (block.startsWith("## ")) return `<h2>${block.slice(3)}</h2>`;
+                if (block.startsWith("### "))return `<h3>${block.slice(4)}</h3>`;
+                const formatted = block.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\*(.*?)\*/g, "<em>$1</em>");
+                return `<p>${formatted}</p>`;
+              }).join("\n");
+              navigator.clipboard.writeText(`<h1>${form.title}</h1>\n${html}`);
+            }}
+              style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+              📋 Copy as HTML
+            </button>
+            <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
+              style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+              ↗ Open Wix Blog
+            </button>
+          </div>
+          <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"8px 0 0", lineHeight:1.5 }}>
+            Copy post as HTML → Open Wix Blog → click HTML view → paste. Takes about 30 seconds.
+          </p>
+        </div>
 
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <div style={{ display:"flex", gap:8 }}>
@@ -3040,11 +7110,25 @@ function AddInspirationModal({ onSave, onClose }) {
         </div>
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Type</label>
-          <div style={{ display:"flex", gap:6 }}>
-            {["article","thread","visual","video","podcast"].map(t => (
-              <button key={t} onClick={()=>setForm(f=>({...f,type:t}))}
-                style={{ padding:"6px 12px", borderRadius:99, border:form.type===t?"1px solid var(--amber)":"1px solid var(--border)", background:form.type===t?"var(--amber-glow)":"transparent", color:form.type===t?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textTransform:"capitalize" }}>
-                {t}
+          <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+            {[
+              { id:"article",   label:"Article",   icon:"📄" },
+              { id:"instagram", label:"Instagram", icon:"📸" },
+              { id:"facebook",  label:"Facebook",  icon:"👍" },
+              { id:"tiktok",    label:"TikTok",    icon:"🎵" },
+              { id:"twitter",   label:"X",         icon:"🐦" },
+              { id:"pinterest", label:"Pinterest", icon:"📌" },
+              { id:"youtube",   label:"YouTube",   icon:"▶" },
+              { id:"podcast",   label:"Podcast",   icon:"🎙" },
+              { id:"email",     label:"Email",     icon:"✉" },
+              { id:"visual",    label:"Visual",    icon:"🖼" },
+              { id:"thread",    label:"Thread",    icon:"💬" },
+              { id:"keyword",   label:"Keyword",   icon:"◎" },
+              { id:"video",     label:"Video",     icon:"🎬" },
+            ].map(t => (
+              <button key={t.id} onClick={()=>setForm(f=>({...f,type:t.id}))}
+                style={{ padding:"5px 10px", borderRadius:99, border:form.type===t.id?"1px solid var(--amber)":"1px solid var(--border)", background:form.type===t.id?"var(--amber-glow)":"transparent", color:form.type===t.id?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:4 }}>
+                <span>{t.icon}</span>{t.label}
               </button>
             ))}
           </div>
@@ -3071,7 +7155,6 @@ function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
   const today = new Date();
   const m = month ?? today.getMonth();
   const y = year  ?? today.getFullYear();
-  const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
   const [form, setForm] = useState({ title:"", type:"idea", day: day || today.getDate() });
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
   const valid = form.title.trim();
@@ -3132,6 +7215,53 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const [calEvents,   setCalEvents]   = useState(() => { try { const s = localStorage.getItem("bb_cal_events"); return s ? JSON.parse(s) : CALENDAR_EVENTS; } catch { return CALENDAR_EVENTS; } });
   const [wsSettings,  setWsSettings]  = useState(() => { try { const s = localStorage.getItem("bb_ws_settings"); return s ? JSON.parse(s) : null; } catch { return null; } });
 
+  // ── Cloud sync (Netlify Blobs) — survives localStorage clearing ──────────
+  const userId = user?.id || user?.email || "anonymous";
+  const [cloudSynced, setCloudSynced] = useState(false);
+
+  // Pull from cloud once on mount — cloud wins if it has data
+  useEffect(() => {
+    (async () => {
+      const cloudPosts = await cloudGet("posts", userId);
+      if (cloudPosts && Array.isArray(cloudPosts) && cloudPosts.length > 0) {
+        setPosts(cloudPosts);
+      }
+      const cloudInspiration = await cloudGet("inspiration", userId);
+      if (cloudInspiration && Array.isArray(cloudInspiration)) {
+        setInspiration(cloudInspiration);
+      }
+      const cloudCompetitors = await cloudGet("competitors", userId);
+      if (cloudCompetitors && Array.isArray(cloudCompetitors)) {
+        setCompetitors(cloudCompetitors);
+      }
+      // Pull social posts — scheduler may have updated them (scheduled → published)
+      const cloudSocialPosts = await cloudGet("social_posts", userId);
+      if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
+        setSocialPosts(cloudSocialPosts);
+        saveSocialPostsToStorage(cloudSocialPosts);
+      }
+      setCloudSynced(true);
+    })();
+  }, []);
+
+  // Re-pull social posts from cloud whenever Marketing tab is opened
+  // (catches any auto-publishes that happened while the tab was closed)
+  useEffect(() => {
+    if (activeTab !== "social") return;
+    (async () => {
+      const cloudSocialPosts = await cloudGet("social_posts", userId);
+      if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
+        setSocialPosts(cloudSocialPosts);
+        saveSocialPostsToStorage(cloudSocialPosts);
+      }
+    })();
+  }, [activeTab]);
+
+  // Push to cloud whenever posts/inspiration/competitors change (debounced)
+  useEffect(() => { if (cloudSynced) cloudSaveDebounced("posts", userId, posts); }, [posts, cloudSynced]);
+  useEffect(() => { if (cloudSynced) cloudSaveDebounced("inspiration", userId, inspiration); }, [inspiration, cloudSynced]);
+  useEffect(() => { if (cloudSynced) cloudSaveDebounced("competitors", userId, competitors); }, [competitors, cloudSynced]);
+
   // Persist whenever data changes
   useEffect(() => { try { localStorage.setItem("bb_posts",       JSON.stringify(posts));       } catch {} }, [posts]);
   useEffect(() => { try { localStorage.setItem("bb_competitors", JSON.stringify(competitors)); } catch {} }, [competitors]);
@@ -3171,8 +7301,43 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const saveCalEvent = (ev) => setCalEvents(all => [...all, ev]);
   const deleteCalEvent = (idx) => setCalEvents(all => all.filter((_, i) => i !== idx));
 
-  const [gscData, setGscData] = useState(loadGSCData);
+  const [gscData,     setGscData]     = useState(loadGSCData);
+  const [metaConfig,   setMetaConfig]   = useState(loadMetaConfig);
+  const [brandGuide,   setBrandGuide]   = useState(loadBrandGuide);
+  const [socialPosts,  setSocialPosts]  = useState(loadSocialPosts);
+
+  const saveSocialPost = (post) => {
+    setSocialPosts(all => {
+      const idx = all.findIndex(p => p.id === post.id);
+      const next = idx >= 0 ? all.map(p => p.id===post.id ? post : p) : [post, ...all];
+      saveSocialPostsToStorage(next);
+      // Sync to Blobs — strips blob: image URLs (can't serialize) but keeps data: URLs
+      const forCloud = next.map(p => ({
+        ...p,
+        imageUrl: p.imageUrl?.startsWith("blob:") ? null : p.imageUrl,
+      }));
+      cloudSet("social_posts", userId, forCloud);
+      // Also sync Meta credentials alongside so the scheduler can publish
+      const meta = loadMetaConfig();
+      if (meta?.connected) cloudSet("meta_config", userId, meta);
+      return next;
+    });
+  };
+
+  const deleteSocialPost = (id) => {
+    setSocialPosts(all => {
+      const next = all.filter(p => p.id !== id);
+      saveSocialPostsToStorage(next);
+      cloudSet("social_posts", userId, next);
+      return next;
+    });
+  };
   const [wixConnected, setWixConnected] = useState(() => !!loadWixConfig().connected);
+
+  // Re-check wix connection state whenever settings tab is visited
+  useEffect(() => {
+    setWixConnected(!!loadWixConfig().connected);
+  }, [activeTab, settingsSection]);
 
   const handleWixSync = (wixPosts) => {
     setPosts(current => {
@@ -3246,20 +7411,22 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const connectedSocial    = SOCIAL_PLATFORMS.filter(p => loadSocialConnections()[p.id]?.enabled).length;
 
   const TABS = [
-    { id:"pipeline",  label:"Pipeline",  icon:"◈", highlight:true },
-    { id:"posts",     label:"Posts",     icon:"▤" },
-    { id:"analytics", label:"Analytics", icon:"◔" },
-    { id:"calendar",  label:"Calendar",  icon:"▦" },
-    { id:"research",  label:"Research",  icon:"◎" },
-    { id:"ai",        label:"AI Tools",  icon:"✦" },
-    { id:"social",    label:"Social",    icon:"▣" },
-    { id:"settings",  label:"Settings",  icon:"⚙" },
+    { id:"pipeline",  label:"Pipeline",   icon:"◈", highlight:true },
+    { id:"posts",     label:"Posts",      icon:"▤" },
+    { id:"analytics", label:"Analytics",  icon:"◔" },
+    { id:"calendar",  label:"Calendar",   icon:"▦" },
+    { id:"research",  label:"Research",   icon:"◎" },
+    { id:"ai",        label:"AI Tools",   icon:"✦" },
+    { id:"social",    label:"Marketing",  icon:"▣" },
+    { id:"settings",  label:"Settings",   icon:"⚙" },
   ];
 
   const SETTINGS_SECTIONS = [
     { id:"general",  label:"General"             },
+    { id:"brand",    label:"Brand Guide"         },
     { id:"apikeys",  label:"API Keys"            },
     { id:"gsc",      label:"Search Console"      },
+    { id:"meta",     label:"Facebook & Instagram"},
     { id:"social",   label:"Social Media"        },
     { id:"wix",      label:"Wix Integration"     },
     { id:"billing",  label:"Billing & Plan"      },
@@ -3271,7 +7438,14 @@ export default function Dashboard({ user, workspace, onLogout }) {
       <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;700;900&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
 
-      {/* ── MODALS ── */}
+      {/* ── GLOBAL AI QUICK-SWITCHER ── */}
+      <AIQuickSwitcher
+        activeProvider={activeProvider}
+        activeModel={activeModel}
+        onProviderChange={handleProviderChange}
+        onModelChange={handleModelChange}
+        apiKeys={apiKeys}
+      />
       {postEditorOpen && (
         <PostEditor
           post={editingPost}
@@ -3279,6 +7453,9 @@ export default function Dashboard({ user, workspace, onLogout }) {
           onClose={() => setPostEditorOpen(false)}
           onDelete={deletePost}
           wixConnected={wixConnected}
+          apiKeys={apiKeys}
+          activeProvider={activeProvider}
+          activeModel={activeModel}
         />
       )}
       {addCompetitorOpen && (
@@ -3322,6 +7499,10 @@ export default function Dashboard({ user, workspace, onLogout }) {
           </div>
           <div style={{fontSize:10,marginTop:4,color:"var(--text-secondary)"}}>
             <span style={{color:fixedGreen}}>◈</span> {connectedProviders} AI · {connectedSocial} social
+          </div>
+          <div style={{fontSize:10,marginTop:4,color:cloudSynced?fixedGreen:"var(--muted)"}}>
+            <span style={{width:6,height:6,borderRadius:99,background:cloudSynced?fixedGreen:"var(--muted)",display:"inline-block",marginRight:4}}/>
+            {cloudSynced?"☁ Cloud synced":"☁ Syncing…"}
           </div>
         </div>
 
@@ -3385,40 +7566,23 @@ export default function Dashboard({ user, workspace, onLogout }) {
               wsTagline={wsTagline}
               onProviderChange={handleProviderChange}
               onModelChange={handleModelChange}
+              brandGuide={brandGuide}
             />
           )}
 
           {/* ══ POSTS ══ */}
           {activeTab==="posts"&&(
-            <div>
-              <div style={{display:"flex",gap:8,marginBottom:20}}>
-                {["all","published","draft","scheduled"].map(f=>(
-                  <button key={f} onClick={()=>setPostFilter(f)} style={{padding:"6px 14px",borderRadius:99,border:postFilter===f?"1px solid var(--amber)":"1px solid var(--border)",background:postFilter===f?"var(--amber-glow)":"transparent",color:postFilter===f?"var(--amber)":"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",textTransform:"capitalize"}}>
-                    {f==="all"?`All (${posts.length})`:`${f} (${posts.filter(p=>p.status===f).length})`}
-                  </button>
-                ))}
-              </div>
-              <div style={{...card,padding:0,overflow:"hidden"}}>
-                <table style={{width:"100%",borderCollapse:"collapse"}}>
-                  <thead><tr style={{borderBottom:"1px solid var(--border)"}}>
-                    {["Title","Status","Category","Date","Views"].map(h=>(
-                      <th key={h} style={{textAlign:"left",padding:"12px 16px",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{h}</th>
-                    ))}
-                  </tr></thead>
-                  <tbody>
-                    {filteredPosts.map(p=>(
-                      <tr key={p.id} onClick={()=>openEditPost(p)} style={{borderBottom:"1px solid var(--border)",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                        <td style={{padding:"14px 16px",fontWeight:600,fontSize:13}}>{p.title}</td>
-                        <td style={{padding:"14px 16px"}}><StatusBadge status={p.status}/></td>
-                        <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{p.category}</td>
-                        <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{p.date}</td>
-                        <td style={{padding:"14px 16px",fontSize:13,fontWeight:600}}>{p.views>0?p.views.toLocaleString():"—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <PostsTab
+              posts={posts}
+              filteredPosts={filteredPosts}
+              postFilter={postFilter}
+              setPostFilter={setPostFilter}
+              setPosts={setPosts}
+              savePost={savePost}
+              openEditPost={openEditPost}
+              card={card}
+              btnP={btnP}
+            />
           )}
 
           {/* ══ ANALYTICS ══ */}
@@ -3540,40 +7704,15 @@ export default function Dashboard({ user, workspace, onLogout }) {
                 </div>
               )}
               {researchTab==="inspiration"&&(
-                <div>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-                    <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:0}}>Inspiration Board</h2>
-                    <button onClick={()=>setAddInspirationOpen(true)} style={btnP}>+ Save New</button>
-                  </div>
-                  <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                    {inspiration.map(item=>{
-                      const tc={article:{icon:"📄",color:"var(--amber)"},thread:{icon:"💬",color:fixedGreen},visual:{icon:"📸",color:"#7c8abf"},video:{icon:"▶",color:"var(--red)"},podcast:{icon:"🎙",color:"#a78bfa"}};
-                      const t=tc[item.type]||tc.article;
-                      return (
-                        <div key={item.id} style={{...card,padding:18,display:"flex",gap:16,alignItems:"flex-start"}}>
-                          <div style={{width:40,height:40,borderRadius:10,background:t.color+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{t.icon}</div>
-                          <div style={{flex:1}}>
-                            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                              <span style={{fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",color:t.color}}>{item.type}</span>
-                              <span style={{fontSize:11,color:"var(--text-secondary)"}}>from {item.source}</span>
-                            </div>
-                            <div style={{fontSize:14,fontWeight:600,marginBottom:4}}>{item.title}</div>
-                            {item.notes&&<div style={{fontSize:12,color:"var(--text-secondary)",fontStyle:"italic"}}>💡 {item.notes}</div>}
-                          </div>
-                          <div style={{display:"flex",gap:6,flexShrink:0}}>
-                            <button onClick={()=>inspirationToDraft(item)} style={{...btnS,fontSize:11,padding:"5px 10px"}}>→ Draft</button>
-                            <button onClick={()=>deleteInspiration(item.id)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14,padding:"5px"}} title="Remove">✕</button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {inspiration.length === 0 && (
-                      <div style={{...card,padding:32,textAlign:"center",color:"var(--muted)",fontSize:13}}>
-                        No inspiration saved yet. Click + Save New or use AI Ideas to generate content ideas.
-                      </div>
-                    )}
-                  </div>
-                </div>
+                <InspirationBoard
+                  inspiration={inspiration}
+                  onAddNew={()=>setAddInspirationOpen(true)}
+                  onDelete={deleteInspiration}
+                  onToDraft={inspirationToDraft}
+                  card={card}
+                  btnS={btnS}
+                  btnP={btnP}
+                />
               )}
               {researchTab==="ideas"&&(
                 <AIIdeaGenerator
@@ -3628,18 +7767,25 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
           {/* ══ SOCIAL ══ */}
           {activeTab==="social"&&(
-            <div>
-              <div style={{marginBottom:24}}>
-                <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:"0 0 4px"}}>Social Media Posts</h2>
-                <p style={{fontSize:13,color:"var(--text-secondary)",margin:0}}>Generate from a topic or blog post — adapted automatically for each platform.</p>
-              </div>
-              <SocialPostTab
+            <MarketingErrorBoundary>
+              <MarketingStudio
                 activeProvider={activeProvider}
                 activeModel={activeModel}
                 apiKeys={apiKeys}
                 dark={dark}
+                metaConfig={metaConfig}
+                posts={posts}
+                inspiration={inspiration}
+                competitors={competitors}
+                onAddInspiration={saveInspiration}
+                handleProviderChange={handleProviderChange}
+                handleModelChange={handleModelChange}
+                brandGuide={brandGuide}
+                socialPosts={socialPosts}
+                onSaveSocialPost={saveSocialPost}
+                onDeleteSocialPost={deleteSocialPost}
               />
-            </div>
+            </MarketingErrorBoundary>
           )}
 
           {/* ══ SETTINGS ══ */}
@@ -3675,8 +7821,22 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   <APIKeysSettings apiKeys={apiKeys} onSave={setApiKeys}/>
                 )}
 
+                {settingsSection==="brand"&&(
+                  <BrandGuidePanel onSave={(g) => setBrandGuide(g)} />
+                )}
+
                 {settingsSection==="gsc"&&(
                   <GSCPanel onDataLoaded={(data)=>{ setGscData(data); saveGSCData(data); }} />
+                )}
+
+                {settingsSection==="meta"&&(
+                  <div>
+                    <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Facebook & Instagram</h3>
+                    <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 20px", lineHeight:1.6 }}>
+                      Connect your Facebook Page and Instagram Business account to publish directly from Blog Bunker.
+                    </p>
+                    <MetaConnectPanel onConnected={(cfg) => setMetaConfig(cfg)} />
+                  </div>
                 )}
 
                 {settingsSection==="social"&&(
@@ -3687,6 +7847,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   <WixSyncPanel
                     onSync={handleWixSync}
                     onDisconnect={handleWixDisconnect}
+                    onConnect={() => setWixConnected(true)}
                     currentPostCount={posts.length}
                   />
                 )}
