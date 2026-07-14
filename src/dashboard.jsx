@@ -6815,9 +6815,7 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
 
       {/* AI Rewrite panel — appears when text is selected */}
       {aiPanel && (
-        <div style={{ position:"sticky", top:8, zIndex:100, margin:"0 12px 8px", padding:"14px 16px", borderRadius:10, background:"var(--bg-surface)", border:"1px solid var(--amber)44", boxShadow:"0 4px 20px rgba(0,0,0,0.3)" }}
-          onMouseDown={e => e.preventDefault()} // prevent losing selection
-        >
+        <div style={{ position:"sticky", top:8, zIndex:100, margin:"0 12px 8px", padding:"14px 16px", borderRadius:10, background:"var(--bg-surface)", border:"1px solid var(--amber)44", boxShadow:"0 4px 20px rgba(0,0,0,0.3)" }}>
           <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
             <span style={{ fontSize:13, fontWeight:700, color:"var(--amber)" }}>✦ AI Rewrite</span>
             <span style={{ fontSize:11, color:"var(--text-secondary)", flex:1 }}>"{aiPanel.text.slice(0,60)}{aiPanel.text.length>60?"…":""}"</span>
@@ -6833,7 +6831,6 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
                 placeholder="e.g. make it more concise, add more detail, use a fishing metaphor…"
                 style={{ flex:1, padding:"8px 12px", borderRadius:7, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none" }}
                 onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"}
-                autoFocus
               />
               <button onClick={rewriteSelection} disabled={aiLoading}
                 style={{ padding:"8px 16px", borderRadius:7, border:"none", background:aiLoading?"var(--bg-elevated)":"var(--amber)", color:aiLoading?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:aiLoading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, whiteSpace:"nowrap" }}>
