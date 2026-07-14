@@ -540,12 +540,41 @@ async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
 }
 
 function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", style: extraStyle = {} }) {
-  const [saved, setSaved] = useState(false);
+  const [saved,  setSaved]  = useState(false);
   const [saving, setSaving] = useState(false);
   const handle = async () => {
+    if (!imageUrl) return;
     setSaving(true);
-    try { await saveToMediaLibrary(imageUrl, `${name}-${Date.now()}`, tags); setSaved(true); setTimeout(() => setSaved(false), 2500); }
-    catch(e) { console.error(e); }
+    try {
+      // Convert to JPEG via canvas
+      const jpeg = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+          const c = document.createElement("canvas");
+          c.width = img.naturalWidth || img.width;
+          c.height = img.naturalHeight || img.height;
+          c.getContext("2d").drawImage(img, 0, 0);
+          resolve(c.toDataURL("image/jpeg", 0.92));
+        };
+        img.onerror = () => reject(new Error("Image load failed"));
+        img.src = imageUrl;
+      });
+      const item = {
+        id:        Date.now() + Math.random(),
+        dataUrl:   jpeg,
+        name:      `${name}-${Date.now()}`,
+        type:      "image/jpeg",
+        size:      Math.round(jpeg.length * 0.75),
+        tags,
+        notes:     "",
+        source:    "generated",
+        createdAt: new Date().toISOString(),
+      };
+      saveMediaLibraryToStorage([item, ...loadMediaLibrary()]);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch(e) { console.error("Save to library failed:", e); }
     setSaving(false);
   };
   return (
@@ -668,7 +697,7 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
     if (!imageUrl) return;
     const a = document.createElement("a");
     a.href = imageUrl;
-    a.download = `cask-stream-${platId}-${Date.now()}.webp`;
+    a.download = `cask-stream-${platId}-${Date.now()}.jpg`;
     a.click();
   };
 
@@ -2791,7 +2820,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
                       {social.images[plat.id] && (
                         <div style={{ position:"relative" }}>
                           <img src={social.images[plat.id]} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
-                          <button onClick={()=>{ const a=document.createElement("a"); a.href=social.images[plat.id]; a.download=`cask-stream-${plat.id}.webp`; a.click(); }}
+                          <button onClick={()=>{ const a=document.createElement("a"); a.href=social.images[plat.id]; a.download=`cask-stream-${plat.id}.jpg`; a.click(); }}
                             style={{ position:"absolute", bottom:8, right:8, padding:"4px 10px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.7)", color:"#fff", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
                             ↓ Download
                           </button>
@@ -4111,7 +4140,7 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
         <div style={{ position:"relative", borderRadius:12, overflow:"hidden", border:"1px solid var(--border)" }}>
           <img src={imageUrl} alt="Generated" style={{ width:"100%", display:"block" }} />
           <div style={{ position:"absolute", bottom:12, right:12, display:"flex", gap:6 }}>
-            <button onClick={() => { const a=document.createElement("a"); a.href=imageUrl; a.download=`social-${platform}-${Date.now()}.webp`; a.click(); }}
+            <button onClick={() => { const a=document.createElement("a"); a.href=imageUrl; a.download=`social-${platform}-${Date.now()}.jpg`; a.click(); }}
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↓ Download
             </button>
@@ -4880,7 +4909,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)" }}>
                   <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
                   <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
-                    <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-post-${Date.now()}.webp`; a.click(); }}
+                    <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-post-${Date.now()}.jpg`; a.click(); }}
                       style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                       ↓ Download
                     </button>
@@ -6476,12 +6505,13 @@ const HEADLINE_IMAGE_SPEC = {
 };
 
 function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys }) {
-  const [imageUrl,   setImageUrl]   = useState(null);
-  const [prompt,     setPrompt]     = useState("");
-  const [loading,    setLoading]    = useState(false);
-  const [showPrompt, setShowPrompt] = useState(false);
-  const [error,      setError]      = useState("");
-  const [copied,     setCopied]     = useState(false);
+  const [imageUrl,    setImageUrl]    = useState(null);
+  const [prompt,      setPrompt]      = useState("");
+  const [loading,     setLoading]     = useState(false);
+  const [error,       setError]       = useState("");
+  const [copied,      setCopied]      = useState(false);
+  const [savedToLib,  setSavedToLib]  = useState(false);
+  const [saveError,   setSaveError]   = useState("");
   const [previewOpen, setPreviewOpen] = useState(false);
   const [draftPrompt, setDraftPrompt] = useState("");
 
@@ -6489,6 +6519,49 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
   const provider = imgProvider;
   const providerLabel = getImageProviderLabel(provider);
   const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
+
+  // Convert any image URL to a JPEG data URL via canvas before saving
+  const toJpegDataUrl = (url) => new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width  = img.naturalWidth  || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      canvas.getContext("2d").drawImage(img, 0, 0);
+      resolve(canvas.toDataURL("image/jpeg", 0.92));
+    };
+    img.onerror = () => reject(new Error("Could not load image for conversion"));
+    img.src = url;
+  });
+
+  const handleSaveToLibrary = async () => {
+    if (!imageUrl) return;
+    setSavedToLib(false); setSaveError("");
+    try {
+      // Convert to JPEG via canvas (works for blob:, data:, and https: URLs)
+      const jpegDataUrl = await toJpegDataUrl(imageUrl);
+      const safeName = `headline-${(title || "image").toLowerCase().replace(/\s+/g, "-").slice(0, 30)}-${Date.now()}`;
+      const item = {
+        id:        Date.now() + Math.random(),
+        dataUrl:   jpegDataUrl,
+        name:      safeName,
+        type:      "image/jpeg",
+        size:      Math.round(jpegDataUrl.length * 0.75),
+        tags:      ["blog headline", "generated"],
+        notes:     prompt ? `Prompt: ${prompt.slice(0, 100)}` : "",
+        source:    "generated",
+        createdAt: new Date().toISOString(),
+      };
+      const current = loadMediaLibrary();
+      saveMediaLibraryToStorage([item, ...current]);
+      setSavedToLib(true);
+      setTimeout(() => setSavedToLib(false), 3000);
+    } catch(e) {
+      setSaveError(e.message);
+      setTimeout(() => setSaveError(""), 4000);
+    }
+  };
 
   // Opens the preview modal with an AI-drafted prompt the user can edit before generating
   const openPromptPreview = async () => {
@@ -6521,7 +6594,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
     if (!imageUrl) return;
     const a = document.createElement("a");
     a.href = imageUrl;
-    a.download = `headline-${(title||"blog").toLowerCase().replace(/\s+/g,"-").slice(0,30)}.webp`;
+    a.download = `headline-${(title||"blog").toLowerCase().replace(/\s+/g,"-").slice(0,30)}.jpg`;
     a.click();
   };
 
@@ -6558,6 +6631,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
 
       {/* Image output */}
       {imageUrl ? (
+        <>
         <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)" }}>
           <img src={imageUrl} alt="Blog headline" style={{ width:"100%", display:"block", borderRadius:10 }} />
           <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
@@ -6569,12 +6643,14 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↻ New
             </button>
-            <button onClick={async ()=>{ await saveToMediaLibrary(imageUrl, `${title||"headline"}-${Date.now()}`, ["blog headline"]); setCopied(true); setTimeout(()=>setCopied(false),2000); }}
-              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:copied?"rgba(92,186,108,0.85)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
-              {copied ? "✓ Saved" : "🖼 Save to Library"}
+            <button onClick={handleSaveToLibrary}
+              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:savedToLib?"rgba(92,186,108,0.85)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+              {savedToLib ? "✓ Saved!" : "🖼 Save to Library"}
             </button>
           </div>
         </div>
+        {saveError && <div style={{ fontSize:11, color:"var(--red)", marginTop:6 }}>{saveError}</div>}
+        </>
       ) : !loading && (
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
           <div style={{ height:130, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:8 }}>
