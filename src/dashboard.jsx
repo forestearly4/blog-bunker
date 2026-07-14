@@ -2372,7 +2372,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
       const system = overridePrompt?.system ?? `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`;
       const user = overridePrompt?.user ?? `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`;
-      const text = await callAI(activeProvider, activeModel, system, user, apiKeys[activeProvider]);
+      const text = await callAI(activeProvider, activeModel, system, user, apiKeys[activeProvider], 4000);
       // Extract title from first # line
       const lines  = text.split("\n");
       const titleLine = lines.find(l => l.startsWith("# "));
@@ -2400,7 +2400,8 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       const text = await callAI(activeProvider, activeModel,
         `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write in markdown. # title, ## sections. 800+ words. Literary, evocative voice.`,
         `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\n\nWrite a fresh version of the full post.`,
-        apiKeys[activeProvider]
+        apiKeys[activeProvider],
+        4000
       );
       const lines = text.split("\n");
       const titleLine = lines.find(l => l.startsWith("# "));
@@ -2659,7 +2660,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
               <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
                 Body
               </label>
-              <RichTextEditor value={draft.body} onChange={(md)=>setDraft(d=>({...d,body:md}))} minHeight={380} />
+              <RichTextEditor value={draft.body} onChange={(md)=>setDraft(d=>({...d,body:md}))} minHeight={380} activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys} />
             </div>
           </div>
           <div style={{ display:"flex", gap:10 }}>
@@ -2906,25 +2907,18 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
                           onAddCalEvent({ title: finalPost.title, type: finalPost.status, day });
                         }
                         markDone("publish");
-                        // Copy HTML to clipboard
-                        const html = (draft.body || "")
-                          .split("\n\n").filter(Boolean)
-                          .map(block => {
-                            if (block.startsWith("# "))  return `<h1>${block.slice(2)}</h1>`;
-                            if (block.startsWith("## ")) return `<h2>${block.slice(3)}</h2>`;
-                            if (block.startsWith("### "))return `<h3>${block.slice(4)}</h3>`;
-                            if (block.startsWith("- ") || block.startsWith("* ")) {
-                              const items = block.split("\n").map(l => `<li>${l.slice(2)}</li>`).join("");
-                              return `<ul>${items}</ul>`;
-                            }
-                            const formatted = block.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\*(.*?)\*/g, "<em>$1</em>");
-                            return `<p>${formatted}</p>`;
-                          }).join("\n");
-                        navigator.clipboard.writeText(`<h1>${enhance.metaTitle || draft.title}</h1>\n${html}`);
+                        // Copy as plain text — title + body, markdown stripped
+                        const plainText = `${enhance.metaTitle || draft.title}\n\n${(draft.body || "")
+                          .replace(/^#{1,3}\s+/gm, "")
+                          .replace(/\*\*(.*?)\*\*/g, "$1")
+                          .replace(/\*(.*?)\*/g, "$1")
+                          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+                          .trim()}`;
+                        navigator.clipboard.writeText(plainText);
                         setSuccess(`✓ Copied! Post saved to Posts tab as "${finalPost.status}".`);
                       }}
                         style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                        📋 Copy as HTML
+                        📋 Copy Post Text
                       </button>
                       <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
                         style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -4759,29 +4753,90 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               </button>
             </div>
           ) : (
-            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
-              <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:16 }}>
-                {[
-                  { key:"primary", label:"High Volume", color:"var(--amber)" },
-                  { key:"niche",   label:"Niche",        color:"#5cba6c"      },
-                  { key:"branded", label:"Branded",      color:"#7c3aed"      },
-                ].map(g => (
-                  <div key={g.key}>
-                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:g.color, marginBottom:8 }}>{g.label}</div>
-                    <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
-                      {hashtags.sets[g.key]?.map((tag,i) => (
-                        <span key={i} style={{ fontSize:11, padding:"3px 8px", borderRadius:99, background:g.color+"15", color:g.color, border:`1px solid ${g.color}33` }}>{tag}</span>
-                      ))}
-                    </div>
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:16 }}>
+
+              {/* Clickable tag groups */}
+              {[
+                { key:"primary", label:"High Volume",  color:"var(--amber)", hint:"Broad reach" },
+                { key:"niche",   label:"Niche",         color:"#5cba6c",      hint:"Targeted audience" },
+                { key:"branded", label:"Branded",       color:"#7c3aed",      hint:"Your brand tags" },
+              ].map(g => (
+                <div key={g.key}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                    <span style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:g.color }}>{g.label}</span>
+                    <span style={{ fontSize:10, color:"var(--muted)" }}>— {g.hint} · click to add/remove</span>
+                    <button onClick={() => {
+                      // Select all in this group
+                      const all = hashtags.sets[g.key] || [];
+                      const current = hashtags.selected.split(/\s+/).filter(Boolean);
+                      const allSelected = all.every(t => current.includes(t));
+                      const next = allSelected
+                        ? current.filter(t => !all.includes(t))
+                        : [...new Set([...current, ...all])];
+                      setHashtags(h => ({...h, selected: next.join(" ")}));
+                    }}
+                      style={{ marginLeft:"auto", padding:"2px 8px", borderRadius:6, border:`1px solid ${g.color}44`, background:"transparent", color:g.color, fontSize:10, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      {(() => {
+                        const all = hashtags.sets[g.key] || [];
+                        const current = hashtags.selected.split(/\s+/).filter(Boolean);
+                        return all.every(t => current.includes(t)) ? "Deselect All" : "Select All";
+                      })()}
+                    </button>
                   </div>
-                ))}
+                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                    {hashtags.sets[g.key]?.map((tag, i) => {
+                      const selected = hashtags.selected.split(/\s+/).includes(tag);
+                      return (
+                        <button key={i} onClick={() => {
+                          const current = hashtags.selected.split(/\s+/).filter(Boolean);
+                          const next = selected
+                            ? current.filter(t => t !== tag)
+                            : [...current, tag];
+                          setHashtags(h => ({...h, selected: next.join(" ")}));
+                        }}
+                          style={{ fontSize:12, padding:"5px 12px", borderRadius:99, border:`1px solid ${selected ? g.color : g.color+"33"}`, background:selected ? g.color+"20" : "transparent", color:selected ? g.color : "var(--text-secondary)", cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:selected ? 700 : 400, transition:"all 0.15s" }}>
+                          {selected && <span style={{ marginRight:4, fontSize:10 }}>✓</span>}{tag}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+
+              {/* Selected set count + clear */}
+              <div style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                <span style={{ fontSize:12, color:"var(--text-secondary)", flex:1 }}>
+                  {hashtags.selected.split(/\s+/).filter(Boolean).length} hashtags selected
+                </span>
+                <button onClick={() => setHashtags(h => ({...h, selected:""}))}
+                  style={{ padding:"3px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  Clear all
+                </button>
+                <button onClick={() => {
+                  const all = [
+                    ...(hashtags.sets.primary || []),
+                    ...(hashtags.sets.niche || []),
+                    ...(hashtags.sets.branded || []),
+                  ];
+                  setHashtags(h => ({...h, selected: [...new Set(all)].join(" ")}));
+                }}
+                  style={{ padding:"3px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  Select all
+                </button>
               </div>
-              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Final Set (editable — will be added to every caption)</label>
-              <textarea value={hashtags.selected} onChange={e=>setHashtags(h=>({...h,selected:e.target.value}))} rows={3}
-                style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
+
+              {/* Editable final set */}
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+                  Final Set <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0 }}>— editable, added to every caption</span>
+                </label>
+                <textarea value={hashtags.selected} onChange={e=>setHashtags(h=>({...h,selected:e.target.value}))} rows={3}
+                  style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
+              </div>
+
               <button onClick={generateHashtagsForPost} disabled={loading}
-                style={{ marginTop:8, padding:"5px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                ↻ Re-generate
+                style={{ padding:"5px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start" }}>
+                ↻ Re-generate suggestions
               </button>
             </div>
           )}
@@ -6677,8 +6732,13 @@ function RichTextToolbar({ editor }) {
   );
 }
 
-function RichTextEditor({ value, onChange, placeholder = "Write your post here…", minHeight = 380 }) {
+function RichTextEditor({ value, onChange, placeholder = "Write your post here…", minHeight = 380, activeProvider, activeModel, apiKeys }) {
   const isInternalUpdate = useRef(false);
+  const [aiPanel,     setAiPanel]     = useState(null); // { text, from, to }
+  const [aiNote,      setAiNote]      = useState("");
+  const [aiLoading,   setAiLoading]   = useState(false);
+  const [aiResult,    setAiResult]    = useState("");
+  const containerRef = useRef(null);
 
   const editor = useEditor({
     extensions: [
@@ -6693,9 +6753,17 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
       const md = htmlToMarkdown(editor.getHTML());
       onChange(md);
     },
+    onSelectionUpdate: ({ editor }) => {
+      const { from, to } = editor.state.selection;
+      if (from === to) { setAiPanel(null); setAiResult(""); setAiNote(""); return; }
+      const selectedText = editor.state.doc.textBetween(from, to, " ").trim();
+      if (selectedText.length < 10) { setAiPanel(null); return; }
+      setAiPanel({ text: selectedText, from, to });
+      setAiResult("");
+    },
   });
 
-  // Sync external changes (e.g. AI regenerating the draft) into the editor
+  // Sync external changes into editor
   useEffect(() => {
     if (!editor) return;
     if (isInternalUpdate.current) { isInternalUpdate.current = false; return; }
@@ -6705,9 +6773,97 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
     }
   }, [value, editor]);
 
+  const rewriteSelection = async () => {
+    if (!aiPanel || !editor) return;
+    setAiLoading(true); setAiResult("");
+    try {
+      const guide = loadBrandGuide();
+      const brandCtx = buildBrandContext(guide);
+      const result = await callAI(
+        activeProvider || "anthropic",
+        activeModel || "claude-sonnet-4-6",
+        `${brandCtx}You are an editor. Rewrite the provided text based on the user's notes. Return ONLY the rewritten text — no explanation, no quotes around it, no preamble. Match the surrounding article's voice and style exactly.`,
+        `Original text:\n"${aiPanel.text}"\n\nEditor notes: ${aiNote || "Improve clarity and flow"}`,
+        apiKeys?.[activeProvider || "anthropic"],
+        800
+      );
+      setAiResult(result.trim());
+    } catch(e) { setAiResult(`Error: ${e.message}`); }
+    setAiLoading(false);
+  };
+
+  const applyRewrite = () => {
+    if (!editor || !aiResult || !aiPanel) return;
+    // Replace selected range with rewritten text
+    const { from, to } = aiPanel;
+    editor.chain()
+      .focus()
+      .deleteRange({ from, to })
+      .insertContentAt(from, aiResult)
+      .run();
+    setAiPanel(null); setAiResult(""); setAiNote("");
+  };
+
+  const dismissPanel = () => {
+    setAiPanel(null); setAiResult(""); setAiNote("");
+    editor?.commands.setTextSelection(editor.state.selection.from);
+  };
+
   return (
-    <div style={{ border:"1px solid var(--border)", borderRadius:8, overflow:"hidden", background:"var(--bg-elevated)" }}>
+    <div ref={containerRef} style={{ border:"1px solid var(--border)", borderRadius:8, overflow:"visible", background:"var(--bg-elevated)", position:"relative" }}>
       <RichTextToolbar editor={editor} />
+
+      {/* AI Rewrite panel — appears when text is selected */}
+      {aiPanel && (
+        <div style={{ position:"sticky", top:8, zIndex:100, margin:"0 12px 8px", padding:"14px 16px", borderRadius:10, background:"var(--bg-surface)", border:"1px solid var(--amber)44", boxShadow:"0 4px 20px rgba(0,0,0,0.3)" }}
+          onMouseDown={e => e.preventDefault()} // prevent losing selection
+        >
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+            <span style={{ fontSize:13, fontWeight:700, color:"var(--amber)" }}>✦ AI Rewrite</span>
+            <span style={{ fontSize:11, color:"var(--text-secondary)", flex:1 }}>"{aiPanel.text.slice(0,60)}{aiPanel.text.length>60?"…":""}"</span>
+            <button onClick={dismissPanel} style={{ background:"none", border:"none", color:"var(--muted)", fontSize:16, cursor:"pointer", padding:2, lineHeight:1 }}>✕</button>
+          </div>
+
+          {!aiResult ? (
+            <div style={{ display:"flex", gap:8 }}>
+              <input
+                value={aiNote}
+                onChange={e => setAiNote(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && rewriteSelection()}
+                placeholder="e.g. make it more concise, add more detail, use a fishing metaphor…"
+                style={{ flex:1, padding:"8px 12px", borderRadius:7, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none" }}
+                onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"}
+                autoFocus
+              />
+              <button onClick={rewriteSelection} disabled={aiLoading}
+                style={{ padding:"8px 16px", borderRadius:7, border:"none", background:aiLoading?"var(--bg-elevated)":"var(--amber)", color:aiLoading?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:aiLoading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, whiteSpace:"nowrap" }}>
+                {aiLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Rewriting…</> : "↻ Rewrite"}
+              </button>
+            </div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+              <div style={{ padding:"10px 12px", borderRadius:7, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:13, lineHeight:1.7, color:"var(--text)", whiteSpace:"pre-wrap" }}>
+                {aiResult}
+              </div>
+              <div style={{ display:"flex", gap:8 }}>
+                <button onClick={applyRewrite}
+                  style={{ padding:"7px 18px", borderRadius:7, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  ✓ Apply
+                </button>
+                <button onClick={() => { setAiResult(""); }}
+                  style={{ padding:"7px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  ↻ Try again
+                </button>
+                <button onClick={dismissPanel}
+                  style={{ padding:"7px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  Discard
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       <div
         onClick={() => editor?.chain().focus().run()}
         style={{ padding:"14px 16px", minHeight, cursor:"text", fontSize:14, lineHeight:1.8, color:"var(--text)" }}>
@@ -6730,6 +6886,7 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
         .ProseMirror blockquote { border-left: 3px solid var(--amber); padding-left: 14px; margin: 0.6em 0; color: var(--text-secondary); font-style: italic; }
         .ProseMirror a { color: var(--amber); text-decoration: underline; }
         .ProseMirror strong { font-weight: 700; }
+        .ProseMirror ::selection { background: var(--amber-glow); }
       `}</style>
     </div>
   );
@@ -6906,7 +7063,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
             Body
           </label>
-          <RichTextEditor value={form.body} onChange={(md)=>setForm(f=>({...f,body:md}))} placeholder="Write your post here…" minHeight={300} />
+          <RichTextEditor value={form.body} onChange={(md)=>setForm(f=>({...f,body:md}))} placeholder="Write your post here…" minHeight={300} activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys} />
         </div>
 
         {/* Headline Image */}
@@ -6925,17 +7082,16 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           </div>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
             <button onClick={() => {
-              const html = (form.body || "").split("\n\n").filter(Boolean).map(block => {
-                if (block.startsWith("# "))  return `<h1>${block.slice(2)}</h1>`;
-                if (block.startsWith("## ")) return `<h2>${block.slice(3)}</h2>`;
-                if (block.startsWith("### "))return `<h3>${block.slice(4)}</h3>`;
-                const formatted = block.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\*(.*?)\*/g, "<em>$1</em>");
-                return `<p>${formatted}</p>`;
-              }).join("\n");
-              navigator.clipboard.writeText(`<h1>${form.title}</h1>\n${html}`);
+              const plainText = `${form.title}\n\n${(form.body || "")
+                .replace(/^#{1,3}\s+/gm, "")
+                .replace(/\*\*(.*?)\*\*/g, "$1")
+                .replace(/\*(.*?)\*/g, "$1")
+                .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+                .trim()}`;
+              navigator.clipboard.writeText(plainText);
             }}
               style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
-              📋 Copy as HTML
+              📋 Copy Post Text
             </button>
             <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
               style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
@@ -6943,7 +7099,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
             </button>
           </div>
           <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"8px 0 0", lineHeight:1.5 }}>
-            Copy post as HTML → Open Wix Blog → click HTML view → paste. Takes about 30 seconds.
+            Copy plain text → Open Wix Blog → paste into the editor. Wix handles formatting automatically.
           </p>
         </div>
 
@@ -7173,9 +7329,28 @@ export default function Dashboard({ user, workspace, onLogout }) {
       if (cloudCompetitors && Array.isArray(cloudCompetitors)) {
         setCompetitors(cloudCompetitors);
       }
+      // Pull social posts — scheduler may have updated them (scheduled → published)
+      const cloudSocialPosts = await cloudGet("social_posts", userId);
+      if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
+        setSocialPosts(cloudSocialPosts);
+        saveSocialPostsToStorage(cloudSocialPosts);
+      }
       setCloudSynced(true);
     })();
   }, []);
+
+  // Re-pull social posts from cloud whenever Marketing tab is opened
+  // (catches any auto-publishes that happened while the tab was closed)
+  useEffect(() => {
+    if (activeTab !== "social") return;
+    (async () => {
+      const cloudSocialPosts = await cloudGet("social_posts", userId);
+      if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
+        setSocialPosts(cloudSocialPosts);
+        saveSocialPostsToStorage(cloudSocialPosts);
+      }
+    })();
+  }, [activeTab]);
 
   // Push to cloud whenever posts/inspiration/competitors change (debounced)
   useEffect(() => { if (cloudSynced) cloudSaveDebounced("posts", userId, posts); }, [posts, cloudSynced]);
@@ -7231,6 +7406,15 @@ export default function Dashboard({ user, workspace, onLogout }) {
       const idx = all.findIndex(p => p.id === post.id);
       const next = idx >= 0 ? all.map(p => p.id===post.id ? post : p) : [post, ...all];
       saveSocialPostsToStorage(next);
+      // Sync to Blobs — strips blob: image URLs (can't serialize) but keeps data: URLs
+      const forCloud = next.map(p => ({
+        ...p,
+        imageUrl: p.imageUrl?.startsWith("blob:") ? null : p.imageUrl,
+      }));
+      cloudSet("social_posts", userId, forCloud);
+      // Also sync Meta credentials alongside so the scheduler can publish
+      const meta = loadMetaConfig();
+      if (meta?.connected) cloudSet("meta_config", userId, meta);
       return next;
     });
   };
@@ -7239,6 +7423,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
     setSocialPosts(all => {
       const next = all.filter(p => p.id !== id);
       saveSocialPostsToStorage(next);
+      cloudSet("social_posts", userId, next);
       return next;
     });
   };
