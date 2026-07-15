@@ -540,32 +540,66 @@ async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
 }
 
 function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", style: extraStyle = {} }) {
-  const [saved,  setSaved]  = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [saved,    setSaved]    = useState(false);
+  const [saving,   setSaving]   = useState(false);
+  const [saveErr,  setSaveErr]  = useState("");
+
   const handle = async () => {
     if (!imageUrl) return;
-    setSaving(true);
+    setSaving(true); setSaveErr("");
     try {
-      // Convert to JPEG via canvas
-      const jpeg = await new Promise((resolve, reject) => {
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = () => {
-          const c = document.createElement("canvas");
-          c.width = img.naturalWidth || img.width;
-          c.height = img.naturalHeight || img.height;
-          c.getContext("2d").drawImage(img, 0, 0);
-          resolve(c.toDataURL("image/jpeg", 0.92));
-        };
-        img.onerror = () => reject(new Error("Image load failed"));
-        img.src = imageUrl;
-      });
+      let dataUrl;
+
+      if (imageUrl.startsWith("blob:")) {
+        // Fetch the blob directly — no canvas needed, avoids taint issues
+        const res = await fetch(imageUrl);
+        if (!res.ok) throw new Error(`Could not read image (${res.status})`);
+        const blob = await res.blob();
+        dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("FileReader failed"));
+          reader.readAsDataURL(blob);
+        });
+      } else if (imageUrl.startsWith("data:")) {
+        dataUrl = imageUrl; // already base64
+      } else {
+        // https:// URL — fetch it
+        const res = await fetch(imageUrl);
+        if (!res.ok) throw new Error(`Could not fetch image (${res.status})`);
+        const blob = await res.blob();
+        dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("FileReader failed"));
+          reader.readAsDataURL(blob);
+        });
+      }
+
+      // Compress via canvas if over 4MB
+      if (dataUrl.length > 4_000_000) {
+        dataUrl = await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement("canvas");
+            const scale = Math.sqrt(4_000_000 / dataUrl.length) * 0.9;
+            c.width  = Math.round(img.width  * scale);
+            c.height = Math.round(img.height * scale);
+            c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+            resolve(c.toDataURL("image/jpeg", 0.85));
+          };
+          img.onerror = () => reject(new Error("Compression failed"));
+          img.src = dataUrl;
+        });
+      }
+
+      const mimeMatch = dataUrl.match(/^data:(image\/\w+);/);
       const item = {
         id:        Date.now() + Math.random(),
-        dataUrl:   jpeg,
+        dataUrl,
         name:      `${name}-${Date.now()}`,
-        type:      "image/jpeg",
-        size:      Math.round(jpeg.length * 0.75),
+        type:      mimeMatch?.[1] || "image/jpeg",
+        size:      Math.round(dataUrl.length * 0.75),
         tags,
         notes:     "",
         source:    "generated",
@@ -574,14 +608,22 @@ function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated
       saveMediaLibraryToStorage([item, ...loadMediaLibrary()]);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
-    } catch(e) { console.error("Save to library failed:", e); }
+    } catch(e) {
+      console.error("Save to library failed:", e);
+      setSaveErr(e.message);
+      setTimeout(() => setSaveErr(""), 4000);
+    }
     setSaving(false);
   };
+
   return (
-    <button onClick={handle} disabled={saving}
-      style={{ padding:"6px 14px", borderRadius:6, border:"none", background:saved?"rgba(92,186,108,0.85)":saving?"rgba(0,0,0,0.5)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:saving?"not-allowed":"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)", ...extraStyle }}>
-      {saved ? "✓ Saved" : saving ? "◌" : "🖼 Save"}
-    </button>
+    <div style={{ display:"inline-flex", flexDirection:"column", gap:3 }}>
+      <button onClick={handle} disabled={saving}
+        style={{ padding:"6px 14px", borderRadius:6, border:"none", background:saved?"rgba(92,186,108,0.85)":saving?"rgba(0,0,0,0.5)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:saving?"not-allowed":"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)", ...extraStyle }}>
+        {saved ? "✓ Saved" : saving ? "◌ Saving…" : "🖼 Save"}
+      </button>
+      {saveErr && <div style={{ fontSize:10, color:"var(--red)", maxWidth:120, lineHeight:1.3 }}>{saveErr.slice(0,60)}</div>}
+    </div>
   );
 }
 
