@@ -11,6 +11,26 @@ export const config = {
   schedule: "*/15 * * * *",
 };
 
+// Convert a data: URL to a public https:// URL via Netlify Blobs
+async function ensurePublicImageUrl(imageUrl) {
+  if (!imageUrl) return null;
+  if (imageUrl.startsWith("https://")) return imageUrl;
+  if (!imageUrl.startsWith("data:")) return null;
+
+  const match = imageUrl.match(/^data:(image\/\w+);base64,(.+)$/);
+  if (!match) return null;
+
+  const mimeType = match[1];
+  const base64   = match[2];
+  const bytes    = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  const id       = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const imgStore = getStore("blog-bunker-images");
+  await imgStore.set(id, bytes, { metadata: { mimeType } });
+
+  return `https://blogbunker.netlify.app/api/get-image?id=${id}`;
+}
+
 export default async () => {
   const now = new Date();
   console.log(`[social-scheduler] Running at ${now.toISOString()}`);
@@ -79,9 +99,17 @@ export default async () => {
             const captionRaw = post.captions?.[platId];
             const caption = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
             const fullMessage = [caption, post.hashtags].filter(Boolean).join("\n\n").trim();
-            const imageUrl = post.imageUrl?.startsWith("https://") ? post.imageUrl : null;
 
-            console.log(`[social-scheduler] Posting to ${platId}: hasImage=${!!imageUrl}, messageLen=${fullMessage.length}`);
+            // Convert data: URLs to public https:// before sending to Meta
+            let imageUrl = null;
+            if (post.imageUrl) {
+              try {
+                imageUrl = await ensurePublicImageUrl(post.imageUrl);
+                console.log(`[social-scheduler] Image URL resolved: ${imageUrl?.slice(0, 80)}`);
+              } catch(e) {
+                console.error(`[social-scheduler] Image conversion failed:`, e.message);
+              }
+            }
 
             if (platId === "facebook" && metaConfig?.pages?.length > 0) {
               const page = metaConfig.pages[0];
