@@ -3421,33 +3421,38 @@ function saveMetaConfig(d) { try { localStorage.setItem(META_STORAGE, JSON.strin
 // Required for Instagram, which needs a real https:// URL it can fetch server-side.
 async function ensurePublicImageUrl(imageUrl) {
   if (!imageUrl) return null;
-  if (!imageUrl.startsWith("blob:")) return imageUrl; // already public (e.g. http url)
+  if (imageUrl.startsWith("https://")) return imageUrl; // already public
 
-  // Fetch the blob and convert to base64 data URL, compressing if needed
-  const blobRes = await fetch(imageUrl);
-  if (!blobRes.ok) throw new Error(`Could not read generated image (${blobRes.status})`);
-  const blob = await blobRes.blob();
+  let dataUrl;
 
-  let dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload  = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error("Failed to encode image"));
-    reader.readAsDataURL(blob);
-  });
+  if (imageUrl.startsWith("blob:")) {
+    // Fetch the blob from browser memory and convert to base64
+    const blobRes = await fetch(imageUrl);
+    if (!blobRes.ok) throw new Error(`Could not read generated image (${blobRes.status})`);
+    const blob = await blobRes.blob();
+    dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload  = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error("Failed to encode image"));
+      reader.readAsDataURL(blob);
+    });
+  } else if (imageUrl.startsWith("data:")) {
+    dataUrl = imageUrl; // already base64, use directly
+  } else {
+    throw new Error(`Cannot convert URL to public format: ${imageUrl.slice(0, 60)}`);
+  }
 
   // If too large for the function's request limit, recompress via canvas
-  const MAX_LEN = 4_000_000; // ~4MB base64 — safe margin under Netlify's 6MB cap
+  const MAX_LEN = 4_000_000;
   if (dataUrl.length > MAX_LEN) {
     dataUrl = await new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement("canvas");
-        // Scale down proportionally until under target size
         let scale = Math.sqrt(MAX_LEN / dataUrl.length) * 0.9;
         canvas.width  = Math.round(img.width * scale);
         canvas.height = Math.round(img.height * scale);
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
         resolve(canvas.toDataURL("image/jpeg", 0.85));
       };
       img.onerror = () => reject(new Error("Failed to load image for compression"));
@@ -3455,7 +3460,7 @@ async function ensurePublicImageUrl(imageUrl) {
     });
   }
 
-  // Upload to Netlify Blobs, get back a public URL
+  // Upload to Netlify Blobs → get back a public https:// URL
   let res;
   try {
     res = await fetch("/api/upload-image", {
@@ -3470,7 +3475,7 @@ async function ensurePublicImageUrl(imageUrl) {
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); }
-  catch { throw new Error(`Image upload failed (${res.status}): server returned non-JSON — ${text.slice(0,150) || "(empty response — likely a gateway/size error)"}`); }
+  catch { throw new Error(`Image upload failed (${res.status}): ${text.slice(0,150) || "(empty response)"}`); }
 
   if (!res.ok || data.error) throw new Error(`Image upload failed: ${data.error || res.status}`);
   if (!data.url) throw new Error("Image upload succeeded but no URL was returned");
@@ -3479,8 +3484,9 @@ async function ensurePublicImageUrl(imageUrl) {
 
 async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, link, platforms }) {
   let finalImageUrl = imageUrl;
-  // Instagram requires a publicly fetchable URL — convert blob: URLs
-  if (platforms.includes("instagram") && imageUrl?.startsWith("blob:")) {
+  // Any blob: or data: URL must be uploaded to get a public https:// URL
+  // before sending to meta-post.js (server can't fetch browser-local URLs)
+  if (imageUrl && (imageUrl.startsWith("blob:") || imageUrl.startsWith("data:"))) {
     finalImageUrl = await ensurePublicImageUrl(imageUrl);
   }
   const res = await fetch("/api/meta-post", {
