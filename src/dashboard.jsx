@@ -6025,7 +6025,11 @@ function loadMediaLibrary() {
 }
 
 function saveMediaLibraryToStorage(items) {
-  try { localStorage.setItem(MEDIA_STORAGE, JSON.stringify(items)); } catch(e) {
+  try {
+    localStorage.setItem(MEDIA_STORAGE, JSON.stringify(items));
+    // Notify any mounted MediaLibrary components to re-sync
+    window.dispatchEvent(new CustomEvent("bb-media-updated"));
+  } catch(e) {
     console.error("Media library storage failed:", e);
   }
 }
@@ -6074,6 +6078,13 @@ function MediaLibrary() {
   const [copied,   setCopied]   = useState("");
   const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef(null);
+
+  // Re-sync whenever SaveToLibraryButton or HeadlineImagePanel saves externally
+  useEffect(() => {
+    const sync = () => setItems(loadMediaLibrary());
+    window.addEventListener("bb-media-updated", sync);
+    return () => window.removeEventListener("bb-media-updated", sync);
+  }, []);
 
   const TAGS = ["blog headline","instagram","facebook","pinterest","tiktok","brand","product","landscape","portrait","other"];
 
