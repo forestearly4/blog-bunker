@@ -7,52 +7,69 @@
 
 import { getStore } from "@netlify/blobs";
 
-// Cron: runs every 15 minutes
 export const config = {
   schedule: "*/15 * * * *",
 };
 
 export default async () => {
-  console.log(`[social-scheduler] Running at ${new Date().toISOString()}`);
+  const now = new Date();
+  console.log(`[social-scheduler] Running at ${now.toISOString()}`);
 
   const store = getStore("blog-bunker-data");
   let published = 0;
   let errors = 0;
+  let checked = 0;
 
   try {
     // List all keys to find users with social posts
-    const { keys } = await store.list();
-    const socialPostKeys = keys.filter(k => k.includes(":social_posts"));
+    const listResult = await store.list();
+    const allKeys = listResult?.blobs?.map(b => b.key) || listResult?.keys || [];
+    console.log(`[social-scheduler] Found ${allKeys.length} total keys`);
+
+    const socialPostKeys = allKeys.filter(k => k.endsWith(":social_posts") || k.includes(":social_posts"));
+    console.log(`[social-scheduler] Found ${socialPostKeys.length} social post key(s):`, socialPostKeys);
 
     for (const key of socialPostKeys) {
-      const userId = key.replace(":social_posts", "");
+      const userId = key.replace(/:social_posts$/, "");
       let posts;
 
       try {
+        // Use get() with type:"json" — matches how data.js writes with setJSON()
         posts = await store.get(key, { type: "json" });
-        if (!posts || !Array.isArray(posts)) continue;
+        if (!posts || !Array.isArray(posts)) {
+          console.log(`[social-scheduler] No valid posts array for key ${key}`);
+          continue;
+        }
+        console.log(`[social-scheduler] User ${userId} has ${posts.length} post(s)`);
       } catch(e) {
-        console.error(`[social-scheduler] Failed to load posts for ${userId}:`, e.message);
+        console.error(`[social-scheduler] Failed to load posts for ${key}:`, e.message);
         continue;
       }
 
       // Get Meta credentials for this user
-      let metaConfig;
+      let metaConfig = null;
       try {
         metaConfig = await store.get(`${userId}:meta_config`, { type: "json" });
-      } catch { metaConfig = null; }
+        console.log(`[social-scheduler] Meta config for ${userId}: connected=${metaConfig?.connected}, pages=${metaConfig?.pages?.length || 0}`);
+      } catch {
+        console.log(`[social-scheduler] No meta config for ${userId}`);
+      }
 
-      const now = new Date();
-      let updated = false;
+      const updatedPosts = [...posts];
+      let anyUpdated = false;
 
-      for (const post of posts) {
+      for (let i = 0; i < updatedPosts.length; i++) {
+        const post = updatedPosts[i];
         if (post.status !== "scheduled") continue;
         if (!post.scheduledAt) continue;
 
         const scheduledAt = new Date(post.scheduledAt);
-        if (scheduledAt > now) continue; // not due yet
+        checked++;
+        console.log(`[social-scheduler] Post ${post.id}: scheduledAt=${post.scheduledAt}, due=${scheduledAt <= now}`);
 
-        console.log(`[social-scheduler] Publishing post ${post.id} for user ${userId}`);
+        if (scheduledAt > now) continue;
+
+        console.log(`[social-scheduler] Publishing post ${post.id} to platforms: ${post.platforms?.join(", ")}`);
 
         const results = {};
         const platforms = post.platforms || [];
@@ -61,8 +78,10 @@ export default async () => {
           try {
             const captionRaw = post.captions?.[platId];
             const caption = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
-            const fullMessage = `${caption}\n\n${post.hashtags || ""}`.trim();
+            const fullMessage = [caption, post.hashtags].filter(Boolean).join("\n\n").trim();
             const imageUrl = post.imageUrl?.startsWith("https://") ? post.imageUrl : null;
+
+            console.log(`[social-scheduler] Posting to ${platId}: hasImage=${!!imageUrl}, messageLen=${fullMessage.length}`);
 
             if (platId === "facebook" && metaConfig?.pages?.length > 0) {
               const page = metaConfig.pages[0];
@@ -74,32 +93,37 @@ export default async () => {
                 : { message: fullMessage, access_token: page.access_token };
               const res = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
               const data = await res.json();
-              if (data.error) throw new Error(data.error.message);
+              if (data.error) throw new Error(`${data.error.message} (code ${data.error.code})`);
               results[platId] = { success: true, id: data.id };
               published++;
+              console.log(`[social-scheduler] ✓ Posted to Facebook: ${data.id}`);
 
             } else if (platId === "instagram" && metaConfig?.pages?.some(p=>p.instagram_id)) {
-              if (!imageUrl) { results[platId] = { success: false, error: "No public image URL — skipped" }; continue; }
+              if (!imageUrl) {
+                console.log(`[social-scheduler] Skipping Instagram — no public image URL`);
+                results[platId] = { success: false, error: "No public https:// image URL" };
+                continue;
+              }
               const page = metaConfig.pages.find(p => p.instagram_id);
-              // Create container
               const cRes = await fetch(`https://graph.facebook.com/v19.0/${page.instagram_id}/media`, {
                 method:"POST", headers:{"Content-Type":"application/json"},
                 body: JSON.stringify({ image_url: imageUrl, caption: fullMessage, access_token: page.access_token })
               });
               const cData = await cRes.json();
-              if (cData.error) throw new Error(cData.error.message);
-              // Publish
+              if (cData.error) throw new Error(`Container: ${cData.error.message} (${cData.error.code})`);
               const pRes = await fetch(`https://graph.facebook.com/v19.0/${page.instagram_id}/media_publish`, {
                 method:"POST", headers:{"Content-Type":"application/json"},
                 body: JSON.stringify({ creation_id: cData.id, access_token: page.access_token })
               });
               const pData = await pRes.json();
-              if (pData.error) throw new Error(pData.error.message);
+              if (pData.error) throw new Error(`Publish: ${pData.error.message} (${pData.error.code})`);
               results[platId] = { success: true, id: pData.id };
               published++;
+              console.log(`[social-scheduler] ✓ Posted to Instagram: ${pData.id}`);
 
             } else {
-              results[platId] = { success: false, error: "Platform not connected" };
+              console.log(`[social-scheduler] Platform ${platId} not connected — skipping`);
+              results[platId] = { success: false, error: "Not connected" };
             }
           } catch(e) {
             console.error(`[social-scheduler] Error posting to ${platId}:`, e.message);
@@ -108,27 +132,32 @@ export default async () => {
           }
         }
 
-        // Update post status
-        const allOk = Object.values(results).some(r => r.success === true);
-        post.status = allOk ? "published" : "scheduled"; // keep scheduled if all failed
-        post.publishedAt = allOk ? new Date().toISOString() : null;
-        post.results = { ...post.results, ...results };
-        if (!allOk) {
-          // Reschedule 15 min ahead to avoid hammering on persistent errors
-          post.scheduledAt = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
-        }
-        updated = true;
+        // Determine new status
+        const anySuccess = Object.values(results).some(r => r.success === true);
+        const allFailed  = Object.values(results).every(r => r.success === false);
+
+        updatedPosts[i] = {
+          ...post,
+          status:      anySuccess ? "published" : allFailed ? "failed" : "scheduled",
+          publishedAt: anySuccess ? now.toISOString() : post.publishedAt,
+          results:     { ...(post.results || {}), ...results },
+          // Reschedule 30 min ahead if all platforms failed (avoid immediate retry loop)
+          scheduledAt: allFailed && !anySuccess
+            ? new Date(now.getTime() + 30 * 60 * 1000).toISOString()
+            : post.scheduledAt,
+        };
+        anyUpdated = true;
       }
 
-      // Write updated posts back to Blobs
-      if (updated) {
-        await store.setJSON(key, posts);
-        console.log(`[social-scheduler] Updated posts for user ${userId}`);
+      // Write updated posts back
+      if (anyUpdated) {
+        await store.setJSON(key, updatedPosts);
+        console.log(`[social-scheduler] Updated ${key} in Blobs`);
       }
     }
   } catch(e) {
-    console.error("[social-scheduler] Fatal error:", e.message);
+    console.error("[social-scheduler] Fatal error:", e.message, e.stack?.slice(0,500));
   }
 
-  console.log(`[social-scheduler] Done — published: ${published}, errors: ${errors}`);
+  console.log(`[social-scheduler] Done — checked: ${checked}, published: ${published}, errors: ${errors}`);
 };
