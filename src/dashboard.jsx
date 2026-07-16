@@ -539,20 +539,18 @@ async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
   throw new Error("Unknown image provider");
 }
 
-function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", style: extraStyle = {} }) {
-  const [saved,    setSaved]    = useState(false);
-  const [saving,   setSaving]   = useState(false);
-  const [saveErr,  setSaveErr]  = useState("");
+function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", userId = "anonymous", style: extraStyle = {} }) {
+  const [saved,   setSaved]   = useState(false);
+  const [saving,  setSaving]  = useState(false);
+  const [saveErr, setSaveErr] = useState("");
 
   const handle = async () => {
     if (!imageUrl) return;
     setSaving(true); setSaveErr("");
     try {
       let dataUrl;
-
       if (imageUrl.startsWith("blob:")) {
-        // Fetch the blob directly — no canvas needed, avoids taint issues
-        const res = await fetch(imageUrl);
+        const res  = await fetch(imageUrl);
         if (!res.ok) throw new Error(`Could not read image (${res.status})`);
         const blob = await res.blob();
         dataUrl = await new Promise((resolve, reject) => {
@@ -562,11 +560,9 @@ function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated
           reader.readAsDataURL(blob);
         });
       } else if (imageUrl.startsWith("data:")) {
-        dataUrl = imageUrl; // already base64
+        dataUrl = imageUrl;
       } else {
-        // https:// URL — fetch it
-        const res = await fetch(imageUrl);
-        if (!res.ok) throw new Error(`Could not fetch image (${res.status})`);
+        const res  = await fetch(imageUrl);
         const blob = await res.blob();
         dataUrl = await new Promise((resolve, reject) => {
           const reader = new FileReader();
@@ -575,8 +571,7 @@ function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated
           reader.readAsDataURL(blob);
         });
       }
-
-      // Compress via canvas if over 4MB
+      // Compress if over 4MB
       if (dataUrl.length > 4_000_000) {
         dataUrl = await new Promise((resolve, reject) => {
           const img = new Image();
@@ -592,25 +587,22 @@ function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated
           img.src = dataUrl;
         });
       }
-
-      const mimeMatch = dataUrl.match(/^data:(image\/\w+);/);
-      const item = {
-        id:        Date.now() + Math.random(),
-        dataUrl,
-        name:      `${name}-${Date.now()}`,
-        type:      mimeMatch?.[1] || "image/jpeg",
-        size:      Math.round(dataUrl.length * 0.75),
-        tags,
-        notes:     "",
-        source:    "generated",
-        createdAt: new Date().toISOString(),
-      };
-      saveMediaLibraryToStorage([item, ...loadMediaLibrary()]);
+      // Upload to cloud
+      const res = await fetch("/api/media", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId, dataUrl, name: `${name}-${Date.now()}`, tags, source: "generated" }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Upload failed (${res.status})`);
+      }
+      window.dispatchEvent(new CustomEvent("bb-media-updated"));
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch(e) {
       console.error("Save to library failed:", e);
-      setSaveErr(e.message);
+      setSaveErr(e.message.slice(0, 60));
       setTimeout(() => setSaveErr(""), 4000);
     }
     setSaving(false);
@@ -622,7 +614,7 @@ function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated
         style={{ padding:"6px 14px", borderRadius:6, border:"none", background:saved?"rgba(92,186,108,0.85)":saving?"rgba(0,0,0,0.5)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:saving?"not-allowed":"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)", ...extraStyle }}>
         {saved ? "✓ Saved" : saving ? "◌ Saving…" : "🖼 Save"}
       </button>
-      {saveErr && <div style={{ fontSize:10, color:"var(--red)", maxWidth:120, lineHeight:1.3 }}>{saveErr.slice(0,60)}</div>}
+      {saveErr && <div style={{ fontSize:10, color:"var(--red)", maxWidth:130, lineHeight:1.3 }}>{saveErr}</div>}
     </div>
   );
 }
@@ -3701,7 +3693,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
 
       {/* ── MEDIA LIBRARY ── */}
       {tab === "media" && (
-        <MediaLibrary />
+        <MediaLibrary userId={userId} />
       )}
 
       {/* ── SCHEDULED POSTS ── */}
@@ -6014,120 +6006,135 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
 }
 
 // ─── MEDIA LIBRARY ────────────────────────────────────────────────────────────
-// Local image store — upload files or save generated images.
-// Images are stored as base64 in localStorage (up to ~5MB each).
+// Images stored in Netlify Blobs — works across all devices.
+// localStorage used only as a cache for offline display.
 
-const MEDIA_STORAGE = "bb_media_library";
+const MEDIA_STORAGE = "bb_media_library_cache";
 
-function loadMediaLibrary() {
+function loadMediaLibraryCache() {
   try { return JSON.parse(localStorage.getItem(MEDIA_STORAGE) || "[]"); }
   catch { return []; }
 }
 
-function saveMediaLibraryToStorage(items) {
+function saveMediaLibraryCache(items) {
   try {
-    localStorage.setItem(MEDIA_STORAGE, JSON.stringify(items));
-    // Notify any mounted MediaLibrary components to re-sync
+    // Strip dataUrl before caching to save localStorage space
+    const lite = items.map(({ dataUrl, ...rest }) => rest);
+    localStorage.setItem(MEDIA_STORAGE, JSON.stringify(lite));
     window.dispatchEvent(new CustomEvent("bb-media-updated"));
-  } catch(e) {
-    console.error("Media library storage failed:", e);
-  }
+  } catch(e) { /* cache full — ignore */ }
 }
 
-// Global helper — save a blob: URL or data URL into the media library
-async function saveToMediaLibrary(url, name = "generated", tags = ["generated"]) {
-  try {
-    let dataUrl = url;
-    if (url.startsWith("blob:")) {
-      const res  = await fetch(url);
-      const blob = await res.blob();
-      dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload  = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    }
-    const item = {
-      id:        Date.now() + Math.random(),
-      dataUrl,
-      name,
-      type:      dataUrl.match(/data:([^;]+)/)?.[1] || "image/png",
-      size:      Math.round(dataUrl.length * 0.75), // approx base64 decoded size
-      tags,
-      notes:     "",
-      source:    "generated",
-      createdAt: new Date().toISOString(),
-    };
-    const current = loadMediaLibrary();
-    saveMediaLibraryToStorage([item, ...current]);
-    return item;
-  } catch(e) {
-    console.error("saveToMediaLibrary failed:", e);
-    throw e;
+// Upload image to Blobs and return the item record with a public URL
+async function saveToMediaLibrary(url, name = "generated", tags = ["generated"], userId = "anonymous") {
+  let dataUrl = url;
+
+  if (url.startsWith("blob:")) {
+    const res  = await fetch(url);
+    const blob = await res.blob();
+    dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload  = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
   }
+
+  const res = await fetch("/api/media", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ userId, dataUrl, name, tags, source: "generated" }),
+  });
+  if (!res.ok) throw new Error(`Media save failed: ${res.status}`);
+  const data = await res.json();
+  window.dispatchEvent(new CustomEvent("bb-media-updated"));
+  return data.item;
 }
 
-function MediaLibrary() {
-  const [items,    setItems]    = useState(loadMediaLibrary);
-  const [filter,   setFilter]   = useState("all");
-  const [selected, setSelected] = useState(null);
-  const [uploading,setUploading]= useState(false);
-  const [search,   setSearch]   = useState("");
-  const [editTag,  setEditTag]  = useState("");
-  const [copied,   setCopied]   = useState("");
-  const [dragOver, setDragOver] = useState(false);
+// localStorage write shim — kept for SaveToLibraryButton compatibility
+function saveMediaLibraryToStorage(items) {
+  saveMediaLibraryCache(items);
+}
+
+function MediaLibrary({ userId = "anonymous" }) {
+  const [items,     setItems]     = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [filter,    setFilter]    = useState("all");
+  const [selected,  setSelected]  = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [search,    setSearch]    = useState("");
+  const [copied,    setCopied]    = useState("");
+  const [dragOver,  setDragOver]  = useState(false);
   const fileInput = useRef(null);
-
-  // Re-sync whenever SaveToLibraryButton or HeadlineImagePanel saves externally
-  useEffect(() => {
-    const sync = () => setItems(loadMediaLibrary());
-    window.addEventListener("bb-media-updated", sync);
-    return () => window.removeEventListener("bb-media-updated", sync);
-  }, []);
 
   const TAGS = ["blog headline","instagram","facebook","pinterest","tiktok","brand","product","landscape","portrait","other"];
 
-  const save = (next) => { setItems(next); saveMediaLibraryToStorage(next); };
+  // Load from cloud on mount
+  const fetchItems = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/media?userId=${encodeURIComponent(userId)}`);
+      const data = await res.json();
+      if (data.items) {
+        setItems(data.items);
+        saveMediaLibraryCache(data.items);
+      }
+    } catch(e) {
+      // Fall back to cache
+      setItems(loadMediaLibraryCache());
+    }
+    setLoading(false);
+  };
 
-  const addItem = (item) => save([item, ...items]);
+  useEffect(() => { fetchItems(); }, [userId]);
 
-  const deleteItem = (id) => {
+  // Re-sync when SaveToLibraryButton saves
+  useEffect(() => {
+    const sync = () => fetchItems();
+    window.addEventListener("bb-media-updated", sync);
+    return () => window.removeEventListener("bb-media-updated", sync);
+  }, [userId]);
+
+  // Delete from cloud + local state
+  const deleteItem = async (id) => {
     if (!window.confirm("Delete this image?")) return;
-    const next = items.filter(i => i.id !== id);
-    save(next);
+    try {
+      await fetch(`/api/media?userId=${encodeURIComponent(userId)}&id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    } catch {}
+    setItems(prev => prev.filter(i => i.id !== id));
     if (selected?.id === id) setSelected(null);
   };
 
-  const updateItem = (id, patch) => {
-    const next = items.map(i => i.id === id ? { ...i, ...patch } : i);
-    save(next);
+  // Update metadata (name, tags, notes)
+  const updateItem = async (id, patch) => {
+    setItems(prev => prev.map(i => i.id === id ? { ...i, ...patch } : i));
     if (selected?.id === id) setSelected(s => ({ ...s, ...patch }));
+    try {
+      await fetch("/api/media", {
+        method:  "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId, id, ...patch }),
+      });
+    } catch {}
   };
 
-  // Convert file to base64 and add to library
+  // Upload file to cloud
   const processFile = async (file) => {
     if (!file.type.startsWith("image/")) { alert("Only image files are supported."); return; }
     if (file.size > 8 * 1024 * 1024) { alert("File too large — max 8MB."); return; }
-    return new Promise((resolve) => {
+    const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = (e) => {
-        const item = {
-          id:        Date.now() + Math.random(),
-          dataUrl:   e.target.result,
-          name:      file.name.replace(/\.[^.]+$/, ""),
-          type:      file.type,
-          size:      file.size,
-          tags:      [],
-          notes:     "",
-          source:    "upload",
-          createdAt: new Date().toISOString(),
-        };
-        addItem(item);
-        resolve(item);
-      };
+      reader.onload  = e => resolve(e.target.result);
+      reader.onerror = reject;
       reader.readAsDataURL(file);
     });
+    const res = await fetch("/api/media", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ userId, dataUrl, name: file.name.replace(/\.[^.]+$/, ""), tags: ["upload"], source: "upload" }),
+    });
+    const data = await res.json();
+    if (data.item) setItems(prev => [data.item, ...prev]);
   };
 
   const handleFiles = async (files) => {
@@ -6136,45 +6143,19 @@ function MediaLibrary() {
     setUploading(false);
   };
 
-  const handleDrop = (e) => {
-    e.preventDefault(); setDragOver(false);
-    handleFiles(e.dataTransfer.files);
-  };
-
-  // Save a generated image (blob URL) to the library
-  const saveFromBlobUrl = async (blobUrl, name = "generated") => {
-    try {
-      const res = await fetch(blobUrl);
-      const blob = await res.blob();
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        addItem({
-          id:        Date.now() + Math.random(),
-          dataUrl:   e.target.result,
-          name,
-          type:      blob.type || "image/png",
-          size:      blob.size,
-          tags:      ["generated"],
-          notes:     "",
-          source:    "generated",
-          createdAt: new Date().toISOString(),
-        });
-      };
-      reader.readAsDataURL(blob);
-    } catch(e) { console.error("Failed to save image:", e); }
-  };
-
-  const copyUrl = (item) => {
-    navigator.clipboard.writeText(item.dataUrl);
-    setCopied(item.id);
-    setTimeout(() => setCopied(""), 2000);
-  };
+  const handleDrop = (e) => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); };
 
   const download = (item) => {
     const a = document.createElement("a");
-    a.href = item.dataUrl;
-    a.download = `${item.name || "image"}.${item.type?.split("/")[1] || "png"}`;
+    a.href     = item.url || item.dataUrl;
+    a.download = `${item.name || "image"}.${item.type?.split("/")[1] || "jpg"}`;
     a.click();
+  };
+
+  const copyUrl = (item) => {
+    navigator.clipboard.writeText(item.url || item.dataUrl || "");
+    setCopied(item.id);
+    setTimeout(() => setCopied(""), 2000);
   };
 
   const filteredItems = items.filter(item => {
@@ -6183,24 +6164,22 @@ function MediaLibrary() {
     return true;
   });
 
-  const formatSize = (bytes) => bytes > 1024*1024 ? `${(bytes/1024/1024).toFixed(1)}MB` : `${Math.round(bytes/1024)}KB`;
-
   const iS = { padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", width:"100%" };
+  const formatSize = (b) => b > 1024*1024 ? `${(b/1024/1024).toFixed(1)}MB` : `${Math.round(b/1024)}KB`;
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
-      {/* Header */}
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
         <div>
           <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Media Library</h2>
           <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>
-            Upload images or save generated visuals — {items.length} image{items.length!==1?"s":""} stored
+            {loading ? "Loading…" : `${items.length} image${items.length!==1?"s":""} · synced across all devices`}
           </p>
         </div>
-        <button onClick={() => fileInput.current?.click()}
-          style={{ padding:"9px 20px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
-          + Upload Images
-        </button>
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={fetchItems} style={{ padding:"7px 14px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>↻ Refresh</button>
+          <button onClick={() => fileInput.current?.click()} style={{ padding:"9px 20px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>+ Upload Images</button>
+        </div>
         <input ref={fileInput} type="file" accept="image/*" multiple style={{ display:"none" }} onChange={e=>handleFiles(e.target.files)} />
       </div>
 
@@ -6210,25 +6189,22 @@ function MediaLibrary() {
         onDragLeave={()=>setDragOver(false)}
         onDrop={handleDrop}
         onClick={() => fileInput.current?.click()}
-        style={{ border:`2px dashed ${dragOver?"var(--amber)":"var(--border)"}`, borderRadius:12, padding:"28px 20px", textAlign:"center", cursor:"pointer", background:dragOver?"var(--amber-glow)":"transparent", transition:"all 0.2s" }}>
+        style={{ border:`2px dashed ${dragOver?"var(--amber)":"var(--border)"}`, borderRadius:12, padding:"24px 20px", textAlign:"center", cursor:"pointer", background:dragOver?"var(--amber-glow)":"transparent", transition:"all 0.2s" }}>
         {uploading ? (
-          <div style={{ fontSize:13, color:"var(--amber)" }}>
-            <span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>Processing…
-          </div>
+          <div style={{ fontSize:13, color:"var(--amber)" }}><span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>Uploading to cloud…</div>
         ) : (
           <>
-            <div style={{ fontSize:28, marginBottom:8 }}>🖼</div>
-            <div style={{ fontSize:13, fontWeight:600, color:"var(--text-secondary)", marginBottom:4 }}>
-              {dragOver ? "Drop to upload" : "Drag & drop images here or click to browse"}
-            </div>
-            <div style={{ fontSize:11, color:"var(--muted)" }}>PNG, JPG, WEBP, GIF · Max 8MB each</div>
+            <div style={{ fontSize:24, marginBottom:6 }}>🖼</div>
+            <div style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:3 }}>{dragOver ? "Drop to upload" : "Drag & drop images or click to browse"}</div>
+            <div style={{ fontSize:11, color:"var(--muted)" }}>PNG, JPG, WEBP, GIF · Max 8MB · Saved to cloud</div>
           </>
         )}
       </div>
 
-      {items.length > 0 && (
+      {loading && <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13 }}><span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>Loading from cloud…</div>}
+
+      {!loading && items.length > 0 && (
         <>
-          {/* Search & filter */}
           <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
             <input style={{ ...iS, flex:1, minWidth:200 }} placeholder="Search by name or tag…" value={search} onChange={e=>setSearch(e.target.value)}
               onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
@@ -6236,43 +6212,41 @@ function MediaLibrary() {
               {["all","generated","upload","blog headline","instagram","facebook","pinterest"].map(tag => (
                 <button key={tag} onClick={() => setFilter(tag)}
                   style={{ padding:"5px 12px", borderRadius:99, border:filter===tag?"1px solid var(--amber)":"1px solid var(--border)", background:filter===tag?"var(--amber-glow)":"transparent", color:filter===tag?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
-                  {tag}{tag!=="all"?" ▾":""}
+                  {tag}
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Grid */}
           {filteredItems.length === 0 ? (
-            <div style={{ textAlign:"center", padding:"40px 20px", color:"var(--muted)", fontSize:13 }}>No images match your filter.</div>
+            <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13 }}>No images match your filter.</div>
           ) : (
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:12 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:12 }}>
               {filteredItems.map(item => (
                 <div key={item.id}
                   onClick={() => setSelected(selected?.id===item.id ? null : item)}
                   style={{ position:"relative", borderRadius:10, overflow:"hidden", border:`2px solid ${selected?.id===item.id?"var(--amber)":"var(--border)"}`, cursor:"pointer", background:"var(--bg-elevated)", transition:"border-color 0.2s" }}>
-                  <img src={item.dataUrl} alt={item.name} style={{ width:"100%", aspectRatio:"1", objectFit:"cover", display:"block" }} />
-                  <div style={{ padding:"8px 10px", background:"var(--bg-surface)" }}>
-                    <div style={{ fontSize:11, fontWeight:600, color:"var(--text)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginBottom:3 }}>{item.name || "Untitled"}</div>
-                    <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+                  <img src={item.url || item.dataUrl} alt={item.name} style={{ width:"100%", aspectRatio:"1", objectFit:"cover", display:"block" }}
+                    onError={e => { e.target.style.opacity="0.3"; }} />
+                  <div style={{ padding:"6px 8px", background:"var(--bg-surface)" }}>
+                    <div style={{ fontSize:10, fontWeight:600, color:"var(--text)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{item.name || "Untitled"}</div>
+                    <div style={{ display:"flex", gap:3, flexWrap:"wrap", marginTop:3 }}>
                       {(item.tags||[]).slice(0,2).map(tag => (
                         <span key={tag} style={{ fontSize:9, padding:"1px 5px", borderRadius:99, background:"var(--amber-glow)", color:"var(--amber)", border:"1px solid var(--amber)33" }}>{tag}</span>
                       ))}
                     </div>
                   </div>
-                  {/* Quick action overlay */}
-                  <div style={{ position:"absolute", top:6, right:6, display:"flex", gap:4 }}
-                    onClick={e=>e.stopPropagation()}>
-                    <button onClick={() => copyUrl(item)} title="Copy data URL"
-                      style={{ width:26, height:26, borderRadius:6, border:"none", background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:11, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                  <div style={{ position:"absolute", top:4, right:4, display:"flex", gap:3 }} onClick={e=>e.stopPropagation()}>
+                    <button onClick={() => copyUrl(item)} title="Copy URL"
+                      style={{ width:24, height:24, borderRadius:5, border:"none", background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:10, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
                       {copied===item.id ? "✓" : "⎘"}
                     </button>
                     <button onClick={() => download(item)} title="Download"
-                      style={{ width:26, height:26, borderRadius:6, border:"none", background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:11, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      style={{ width:24, height:24, borderRadius:5, border:"none", background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:10, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
                       ↓
                     </button>
                     <button onClick={() => deleteItem(item.id)} title="Delete"
-                      style={{ width:26, height:26, borderRadius:6, border:"none", background:"rgba(180,20,20,0.75)", color:"#fff", fontSize:11, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      style={{ width:24, height:24, borderRadius:5, border:"none", background:"rgba(160,20,20,0.75)", color:"#fff", fontSize:10, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
                       ✕
                     </button>
                   </div>
@@ -6281,24 +6255,22 @@ function MediaLibrary() {
             </div>
           )}
 
-          {/* Detail panel for selected image */}
           {selected && (
-            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20, display:"grid", gridTemplateColumns:"240px 1fr", gap:20 }}>
-              <img src={selected.dataUrl} alt={selected.name} style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", objectFit:"contain", maxHeight:220 }} />
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20, display:"grid", gridTemplateColumns:"220px 1fr", gap:20 }}>
+              <img src={selected.url || selected.dataUrl} alt={selected.name} style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", objectFit:"contain", maxHeight:200 }} />
               <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
                 <div>
                   <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Name</label>
-                  <input value={selected.name} onChange={e=>{ setSelected(s=>({...s,name:e.target.value})); updateItem(selected.id,{name:e.target.value}); }}
-                    style={iS} />
+                  <input value={selected.name || ""} onChange={e=>updateItem(selected.id,{name:e.target.value})}
+                    style={iS} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
                 </div>
-
                 <div>
                   <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Tags</label>
-                  <div style={{ display:"flex", gap:5, flexWrap:"wrap", marginBottom:8 }}>
+                  <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
                     {TAGS.map(tag => {
                       const has = selected.tags?.includes(tag);
                       return (
-                        <button key={tag} onClick={() => { const next = has ? selected.tags.filter(t=>t!==tag) : [...(selected.tags||[]),tag]; updateItem(selected.id,{tags:next}); setSelected(s=>({...s,tags:next})); }}
+                        <button key={tag} onClick={() => { const next = has ? selected.tags.filter(t=>t!==tag) : [...(selected.tags||[]),tag]; updateItem(selected.id,{tags:next}); }}
                           style={{ padding:"3px 10px", borderRadius:99, border:has?"1px solid var(--amber)":"1px solid var(--border)", background:has?"var(--amber-glow)":"transparent", color:has?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                           {tag}
                         </button>
@@ -6306,27 +6278,22 @@ function MediaLibrary() {
                     })}
                   </div>
                 </div>
-
                 <div>
                   <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Notes</label>
-                  <textarea value={selected.notes||""} onChange={e=>{ setSelected(s=>({...s,notes:e.target.value})); updateItem(selected.id,{notes:e.target.value}); }}
-                    rows={2} style={{ ...iS, resize:"none", lineHeight:1.5, fontSize:12 }} placeholder="e.g. Used for Spring Hatch post, River Stone palette…" />
+                  <textarea value={selected.notes||""} onChange={e=>updateItem(selected.id,{notes:e.target.value})}
+                    rows={2} style={{ ...iS, resize:"none", lineHeight:1.5, fontSize:12 }} placeholder="e.g. Used for Spring Hatch post…" />
                 </div>
-
-                <div style={{ fontSize:11, color:"var(--muted)", display:"flex", gap:16 }}>
-                  <span>📐 {selected.type?.split("/")[1]?.toUpperCase()}</span>
+                <div style={{ fontSize:11, color:"var(--muted)", display:"flex", gap:12, flexWrap:"wrap" }}>
+                  {selected.type && <span>📐 {selected.type.split("/")[1]?.toUpperCase()}</span>}
                   {selected.size && <span>💾 {formatSize(selected.size)}</span>}
                   <span>🗓 {new Date(selected.createdAt).toLocaleDateString()}</span>
                   <span style={{ textTransform:"capitalize" }}>📥 {selected.source}</span>
                 </div>
-
                 <div style={{ display:"flex", gap:8 }}>
-                  <button onClick={() => copyUrl(selected)}
-                    style={{ padding:"7px 16px", borderRadius:7, border:"none", background:copied===selected.id?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  <button onClick={() => copyUrl(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"none", background:copied===selected.id?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                     {copied===selected.id ? "✓ Copied!" : "⎘ Copy Image URL"}
                   </button>
-                  <button onClick={() => download(selected)}
-                    style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  <button onClick={() => download(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                     ↓ Download
                   </button>
                 </div>
@@ -6334,6 +6301,13 @@ function MediaLibrary() {
             </div>
           )}
         </>
+      )}
+
+      {!loading && items.length === 0 && (
+        <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13, lineHeight:1.7 }}>
+          <div style={{ fontSize:32, marginBottom:12 }}>🖼</div>
+          No images yet. Upload files above or click <strong>🖼 Save</strong> on any generated image.
+        </div>
       )}
     </div>
   );
@@ -6343,11 +6317,31 @@ function MediaLibrary() {
 // Inline picker for selecting an image from the Media Library.
 // Used in Social Pipeline image stage, HeadlineImagePanel, etc.
 
-function LibraryImagePicker({ onSelect, compact = false }) {
+function LibraryImagePicker({ onSelect, compact = false, userId = "anonymous" }) {
   const [open,    setOpen]   = useState(false);
   const [filter,  setFilter] = useState("all");
   const [search,  setSearch] = useState("");
-  const items = loadMediaLibrary();
+  const [items,   setItems]  = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchItems = async () => {
+    setLoading(true);
+    try {
+      const res  = await fetch(`/api/media?userId=${encodeURIComponent(userId)}`);
+      const data = await res.json();
+      setItems(data.items || []);
+    } catch {
+      setItems(loadMediaLibraryCache());
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchItems(); }, [userId]);
+  useEffect(() => {
+    const sync = () => fetchItems();
+    window.addEventListener("bb-media-updated", sync);
+    return () => window.removeEventListener("bb-media-updated", sync);
+  }, [userId]);
 
   const filtered = items.filter(item => {
     const typeMatch  = filter === "all" || item.tags?.includes(filter);
@@ -6395,11 +6389,11 @@ function LibraryImagePicker({ onSelect, compact = false }) {
       ) : (
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(90px,1fr))", gap:8, maxHeight:260, overflow:"auto" }}>
           {filtered.map(item => (
-            <div key={item.id} onClick={() => { onSelect(item.dataUrl); setOpen(false); }}
+            <div key={item.id} onClick={() => { onSelect(item.url || item.dataUrl); setOpen(false); }}
               style={{ position:"relative", borderRadius:8, overflow:"hidden", border:"1px solid var(--border)", cursor:"pointer", aspectRatio:"1" }}
               onMouseEnter={e=>{ e.currentTarget.style.borderColor="var(--amber)"; e.currentTarget.querySelector(".overlay").style.opacity="1"; }}
               onMouseLeave={e=>{ e.currentTarget.style.borderColor="var(--border)"; e.currentTarget.querySelector(".overlay").style.opacity="0"; }}>
-              <img src={item.dataUrl} alt={item.name} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+              <img src={item.url || item.dataUrl} alt={item.name} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
               <div className="overlay" style={{ position:"absolute", inset:0, background:"rgba(196,124,43,0.8)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"#0e0f11", opacity:0, transition:"opacity 0.15s" }}>
                 Use This
               </div>
@@ -6598,22 +6592,43 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
     if (!imageUrl) return;
     setSavedToLib(false); setSaveError("");
     try {
-      // Convert to JPEG via canvas (works for blob:, data:, and https: URLs)
-      const jpegDataUrl = await toJpegDataUrl(imageUrl);
-      const safeName = `headline-${(title || "image").toLowerCase().replace(/\s+/g, "-").slice(0, 30)}-${Date.now()}`;
-      const item = {
-        id:        Date.now() + Math.random(),
-        dataUrl:   jpegDataUrl,
-        name:      safeName,
-        type:      "image/jpeg",
-        size:      Math.round(jpegDataUrl.length * 0.75),
-        tags:      ["blog headline", "generated"],
-        notes:     prompt ? `Prompt: ${prompt.slice(0, 100)}` : "",
-        source:    "generated",
-        createdAt: new Date().toISOString(),
-      };
-      const current = loadMediaLibrary();
-      saveMediaLibraryToStorage([item, ...current]);
+      let dataUrl = imageUrl;
+      if (imageUrl.startsWith("blob:")) {
+        const res  = await fetch(imageUrl);
+        const blob = await res.blob();
+        dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+      // Compress if needed
+      if (dataUrl.length > 4_000_000) {
+        dataUrl = await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement("canvas");
+            const scale = Math.sqrt(4_000_000 / dataUrl.length) * 0.9;
+            c.width  = Math.round(img.width  * scale);
+            c.height = Math.round(img.height * scale);
+            c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+            resolve(c.toDataURL("image/jpeg", 0.85));
+          };
+          img.onerror = () => reject(new Error("Compression failed"));
+          img.src = dataUrl;
+        });
+      }
+      // Get userId from window (set by Dashboard on mount)
+      const userId = window.__bbUserId || "anonymous";
+      const safeName = `headline-${(title || "image").toLowerCase().replace(/\s+/g, "-").slice(0, 30)}`;
+      const res = await fetch("/api/media", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId, dataUrl, name: safeName, tags: ["blog headline", "generated"], notes: prompt ? `Prompt: ${prompt.slice(0, 100)}` : "", source: "generated" }),
+      });
+      if (!res.ok) throw new Error(`Upload failed (${res.status})`);
+      window.dispatchEvent(new CustomEvent("bb-media-updated"));
       setSavedToLib(true);
       setTimeout(() => setSavedToLib(false), 3000);
     } catch(e) {
@@ -7444,6 +7459,8 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
   // ── Cloud sync (Netlify Blobs) — survives localStorage clearing ──────────
   const userId = user?.id || user?.email || "anonymous";
+  // Make userId available to components deep in tree (HeadlineImagePanel etc.)
+  window.__bbUserId = userId;
   const [cloudSynced, setCloudSynced] = useState(false);
 
   // Pull from cloud once on mount — cloud wins if it has data
@@ -7466,6 +7483,12 @@ export default function Dashboard({ user, workspace, onLogout }) {
       if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
         setSocialPosts(cloudSocialPosts);
         saveSocialPostsToStorage(cloudSocialPosts);
+      }
+      // Pull brand guide
+      const cloudBrandGuide = await cloudGet("brand_guide", userId);
+      if (cloudBrandGuide && typeof cloudBrandGuide === "object") {
+        setBrandGuide(cloudBrandGuide);
+        saveBrandGuide(cloudBrandGuide);
       }
       setCloudSynced(true);
     })();
@@ -8011,6 +8034,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
                 socialPosts={socialPosts}
                 onSaveSocialPost={saveSocialPost}
                 onDeleteSocialPost={deleteSocialPost}
+                userId={userId}
               />
             </MarketingErrorBoundary>
           )}
@@ -8049,7 +8073,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
                 )}
 
                 {settingsSection==="brand"&&(
-                  <BrandGuidePanel onSave={(g) => setBrandGuide(g)} />
+                  <BrandGuidePanel onSave={(g) => { setBrandGuide(g); cloudSet("brand_guide", userId, g); }} />
                 )}
 
                 {settingsSection==="gsc"&&(
