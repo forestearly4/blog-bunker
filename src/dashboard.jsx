@@ -6526,6 +6526,481 @@ function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, bt
   );
 }
 
+// ─── ANALYTICS DASHBOARD ─────────────────────────────────────────────────────
+
+function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onConnectMeta }) {
+  const [tab, setTab] = useState("overview");
+  const [socialInsights, setSocialInsights] = useState(null);
+  const [loadingInsights, setLoadingInsights] = useState(false);
+  const [insightError, setInsightError] = useState("");
+
+  const TABS = [
+    { id:"overview", label:"Overview",       icon:"◈" },
+    { id:"search",   label:"Search (GSC)",   icon:"◎" },
+    { id:"social",   label:"Social",         icon:"▣" },
+    { id:"content",  label:"Content",        icon:"▤" },
+  ];
+
+  // ── FETCH META SOCIAL INSIGHTS ─────────────────────────────────────────────
+  const fetchSocialInsights = async () => {
+    if (!metaConfig?.connected || !metaConfig?.pages?.length) return;
+    setLoadingInsights(true); setInsightError("");
+    try {
+      const page    = metaConfig.pages[0];
+      const token   = page.access_token;
+      const pageId  = page.id;
+      const igId    = page.instagram_id;
+      const results = {};
+
+      // Facebook Page insights
+      const fbRes = await fetch(
+        `https://graph.facebook.com/v19.0/${pageId}/insights?metric=page_impressions,page_post_engagements,page_fans,page_views_total&period=week&access_token=${token}`
+      );
+      const fbData = await fbRes.json();
+      if (!fbData.error) {
+        results.facebook = {};
+        (fbData.data || []).forEach(m => {
+          const latest = m.values?.[m.values.length - 1]?.value;
+          results.facebook[m.name] = latest;
+        });
+      }
+
+      // Instagram insights
+      if (igId) {
+        const igRes = await fetch(
+          `https://graph.facebook.com/v19.0/${igId}/insights?metric=impressions,reach,profile_views,follower_count&period=week&access_token=${token}`
+        );
+        const igData = await igRes.json();
+        if (!igData.error) {
+          results.instagram = {};
+          (igData.data || []).forEach(m => {
+            const latest = m.values?.[m.values.length - 1]?.value;
+            results.instagram[m.name] = latest;
+          });
+        }
+      }
+
+      setSocialInsights(results);
+    } catch(e) { setInsightError(e.message); }
+    setLoadingInsights(false);
+  };
+
+  useEffect(() => {
+    if (tab === "social" && !socialInsights && metaConfig?.connected) {
+      fetchSocialInsights();
+    }
+  }, [tab, metaConfig]);
+
+  // ── DERIVED STATS ──────────────────────────────────────────────────────────
+  const publishedPosts    = posts.filter(p => p.status === "published").length;
+  const draftPosts        = posts.filter(p => p.status === "draft").length;
+  const scheduledPosts    = socialPosts.filter(p => p.status === "scheduled").length;
+  const publishedSocial   = socialPosts.filter(p => p.status === "published").length;
+  const gscClicks         = gscData?.totalClicks || 0;
+  const gscImpressions    = gscData?.totalImpressions || 0;
+  const avgPosition       = gscData?.keywords?.length
+    ? (gscData.keywords.reduce((s,k) => s + k.position, 0) / gscData.keywords.length).toFixed(1)
+    : "—";
+
+  const StatCard = ({ label, value, sub, color = "var(--amber)", icon }) => (
+    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+      <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8, display:"flex", alignItems:"center", gap:6 }}>
+        {icon && <span>{icon}</span>}{label}
+      </div>
+      <div style={{ fontFamily:"var(--font-display)", fontSize:28, fontWeight:700, color }}>{value}</div>
+      {sub && <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:4 }}>{sub}</div>}
+    </div>
+  );
+
+  const ConnectPrompt = ({ icon, title, desc, action, onAction }) => (
+    <div style={{ textAlign:"center", padding:"48px 20px", background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12 }}>
+      <div style={{ fontSize:40, marginBottom:16 }}>{icon}</div>
+      <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8 }}>{title}</h3>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24, maxWidth:400, margin:"0 auto 24px", lineHeight:1.6 }}>{desc}</p>
+      <button onClick={onAction}
+        style={{ padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+        {action} →
+      </button>
+    </div>
+  );
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, margin:"0 0 4px" }}>Analytics</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Search performance, social reach, and content insights in one place.</p>
+        </div>
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          {gscData && <span style={{ fontSize:11, color:"#5cba6c", padding:"3px 10px", borderRadius:99, background:"#5cba6c11", border:"1px solid #5cba6c33" }}>● GSC Connected</span>}
+          {metaConfig?.connected && <span style={{ fontSize:11, color:"#1877f2", padding:"3px 10px", borderRadius:99, background:"#1877f211", border:"1px solid #1877f233" }}>● Meta Connected</span>}
+        </div>
+      </div>
+
+      {/* Sub-tabs */}
+      <div style={{ display:"flex", gap:4 }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            style={{ padding:"7px 18px", borderRadius:8, border:tab===t.id?"1px solid var(--amber)":"1px solid var(--border)", background:tab===t.id?"var(--amber-glow)":"transparent", color:tab===t.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            <span>{t.icon}</span>{t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── OVERVIEW ── */}
+      {tab === "overview" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Key numbers */}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
+            <StatCard label="Blog Posts Published" value={publishedPosts} sub={`${draftPosts} drafts`} icon="📄" />
+            <StatCard label="GSC Clicks" value={gscClicks.toLocaleString()} sub={gscData ? `Last ${gscData.days} days` : "Connect GSC"} color={gscData?"var(--amber)":"var(--muted)"} icon="◎" />
+            <StatCard label="GSC Impressions" value={gscImpressions.toLocaleString()} sub="Search appearances" color={gscData?"var(--amber)":"var(--muted)"} icon="👁" />
+            <StatCard label="Social Posts" value={publishedSocial} sub={`${scheduledPosts} scheduled`} icon="📸" />
+          </div>
+
+          {/* Quick status of connected sources */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+            {/* GSC quick view */}
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"var(--text)" }}>◎ Search Console</div>
+                {gscData ? (
+                  <button onClick={onConnectGSC} style={{ fontSize:11, color:"var(--amber)", background:"none", border:"none", cursor:"pointer", fontFamily:"var(--font-body)" }}>Refresh ↻</button>
+                ) : (
+                  <button onClick={onConnectGSC} style={{ fontSize:11, color:"var(--amber)", background:"none", border:"none", cursor:"pointer", fontFamily:"var(--font-body)" }}>Connect →</button>
+                )}
+              </div>
+              {gscData ? (
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {gscData.keywords?.slice(0,5).map((k,i) => (
+                    <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:12 }}>
+                      <span style={{ color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"60%" }}>{k.query}</span>
+                      <div style={{ display:"flex", gap:10, flexShrink:0 }}>
+                        <span style={{ fontWeight:700, color:"var(--amber)" }}>{k.clicks}</span>
+                        <span style={{ color:"var(--muted)" }}>#{k.position.toFixed(0)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize:12, color:"var(--muted)", lineHeight:1.6 }}>Connect Google Search Console to see which keywords and pages are driving organic traffic to your blog.</div>
+              )}
+            </div>
+
+            {/* Social quick view */}
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"var(--text)" }}>▣ Social Performance</div>
+                {!metaConfig?.connected && (
+                  <button onClick={onConnectMeta} style={{ fontSize:11, color:"var(--amber)", background:"none", border:"none", cursor:"pointer", fontFamily:"var(--font-body)" }}>Connect →</button>
+                )}
+              </div>
+              {socialPosts.length > 0 ? (
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {socialPosts.filter(p=>p.status==="published").slice(0,4).map((post,i) => {
+                    const caption = Object.values(post.captions||{})[0];
+                    const text = typeof caption === "string" ? caption : caption?.text || "Post";
+                    return (
+                      <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:12 }}>
+                        <span style={{ color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"70%" }}>{text.slice(0,50)}…</span>
+                        <span style={{ fontSize:10, color:"#5cba6c", flexShrink:0, marginLeft:8 }}>✓ Published</span>
+                      </div>
+                    );
+                  })}
+                  {socialPosts.filter(p=>p.status==="published").length === 0 && (
+                    <div style={{ fontSize:12, color:"var(--muted)" }}>No published social posts yet. Use the Marketing → Social Pipeline to create and publish posts.</div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ fontSize:12, color:"var(--muted)", lineHeight:1.6 }}>No social posts yet. Create posts in Marketing → Social Pipeline to track performance here.</div>
+              )}
+            </div>
+          </div>
+
+          {/* Top content */}
+          {posts.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Your Blog Posts</div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))", gap:10 }}>
+                {posts.slice(0,6).map(post => {
+                  const gscPage = gscData?.topPages?.find(p => p.page.includes(post.title?.toLowerCase().replace(/\s+/g,"-")));
+                  return (
+                    <div key={post.id} style={{ padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                      <div style={{ fontSize:12, fontWeight:600, marginBottom:6, lineHeight:1.4 }}>{post.title}</div>
+                      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+                        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-surface)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                        {gscPage && <span style={{ fontSize:11, color:"var(--amber)" }}>◎ {gscPage.clicks} clicks</span>}
+                        <span style={{ fontSize:10, color:"var(--muted)", marginLeft:"auto" }}>{post.date || post.createdAt?.slice(0,10)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── SEARCH (GSC) ── */}
+      {tab === "search" && (
+        <div>
+          {!gscData ? (
+            <ConnectPrompt
+              icon="◎"
+              title="Connect Google Search Console"
+              desc="See which keywords drive traffic to your blog, your average search position, click-through rates, and which posts perform best in Google."
+              action="Connect Search Console"
+              onAction={onConnectGSC}
+            />
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+              {/* Summary */}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
+                <StatCard label="Total Clicks"      value={gscData.totalClicks.toLocaleString()}       sub={`Last ${gscData.days} days`} />
+                <StatCard label="Impressions"        value={gscData.totalImpressions.toLocaleString()} sub="Search appearances" />
+                <StatCard label="Avg CTR"            value={`${(gscData.totalClicks/Math.max(gscData.totalImpressions,1)*100).toFixed(1)}%`} sub="Click-through rate" color="#5cba6c" />
+                <StatCard label="Avg Position"       value={avgPosition} sub="Google rank" color="#7c3aed" />
+              </div>
+
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+                {/* Top Keywords */}
+                <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                  <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Top Keywords</div>
+                  <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                    <thead>
+                      <tr style={{ borderBottom:"1px solid var(--border)" }}>
+                        {["Query","Clicks","Impr.","Pos.","CTR"].map(h=>(
+                          <th key={h} style={{ textAlign:"left", padding:"6px 8px", fontSize:9, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {gscData.keywords.slice(0,15).map((k,i) => (
+                        <tr key={i} style={{ borderBottom:"1px solid var(--border)11" }}>
+                          <td style={{ padding:"7px 8px", fontSize:12 }}>{k.query}</td>
+                          <td style={{ padding:"7px 8px", fontSize:12, fontWeight:700, color:"var(--amber)" }}>{k.clicks}</td>
+                          <td style={{ padding:"7px 8px", fontSize:11, color:"var(--text-secondary)" }}>{k.impressions}</td>
+                          <td style={{ padding:"7px 8px", fontSize:11, color:"var(--text-secondary)" }}>#{k.position.toFixed(1)}</td>
+                          <td style={{ padding:"7px 8px", fontSize:11, color:"#5cba6c" }}>{k.impressions>0?(k.clicks/k.impressions*100).toFixed(1):0}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Top Pages */}
+                <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                  <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Top Pages by Clicks</div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                    {gscData.topPages.slice(0,10).map((p,i) => {
+                      const slug = p.page.replace(/https?:\/\/[^/]+/, "").replace(/\/$/, "") || "/";
+                      const max  = gscData.topPages[0]?.clicks || 1;
+                      return (
+                        <div key={i}>
+                          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                            <span style={{ fontSize:11, color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"75%" }} title={p.page}>{slug}</span>
+                            <div style={{ flexShrink:0, marginLeft:8, display:"flex", gap:10 }}>
+                              <span style={{ fontSize:12, fontWeight:700, color:"var(--amber)" }}>{p.clicks}</span>
+                              {p.impressions && <span style={{ fontSize:11, color:"var(--muted)" }}>{p.impressions} impr</span>}
+                            </div>
+                          </div>
+                          <div style={{ height:4, borderRadius:99, background:"var(--bg-elevated)" }}>
+                            <div style={{ height:"100%", width:`${(p.clicks/max)*100}%`, background:"var(--amber)", borderRadius:99 }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ fontSize:11, color:"var(--muted)", padding:"8px 0", display:"flex", justifyContent:"space-between" }}>
+                <span>Data from Google Search Console · Last {gscData.days} days · Fetched {new Date(gscData.fetchedAt).toLocaleString()}</span>
+                <button onClick={onConnectGSC} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--amber)", fontSize:11, fontFamily:"var(--font-body)" }}>↻ Refresh</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── SOCIAL ── */}
+      {tab === "social" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {!metaConfig?.connected ? (
+            <ConnectPrompt
+              icon="📊"
+              title="Connect Facebook & Instagram"
+              desc="See your page impressions, engagement, follower growth, and which posts performed best — pulled directly from Meta's API."
+              action="Connect Facebook & Instagram"
+              onAction={onConnectMeta}
+            />
+          ) : (
+            <>
+              {loadingInsights && (
+                <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13 }}>
+                  <span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>
+                  Fetching insights from Meta…
+                </div>
+              )}
+
+              {insightError && (
+                <div style={{ padding:"12px 16px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>
+                  {insightError} — Meta Page Insights require a Business or Creator account with sufficient activity.
+                </div>
+              )}
+
+              {socialInsights && (
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+                  {/* Facebook */}
+                  {socialInsights.facebook && (
+                    <div style={{ background:"var(--bg-surface)", border:"1px solid #1877f233", borderRadius:12, padding:20 }}>
+                      <div style={{ fontSize:12, fontWeight:700, color:"#1877f2", marginBottom:14 }}>👍 Facebook Page</div>
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                        {[
+                          { key:"page_fans",              label:"Page Fans" },
+                          { key:"page_impressions",       label:"Impressions" },
+                          { key:"page_post_engagements",  label:"Engagements" },
+                          { key:"page_views_total",       label:"Page Views" },
+                        ].map(({ key, label }) => socialInsights.facebook[key] != null && (
+                          <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)" }}>
+                            <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>{label}</div>
+                            <div style={{ fontSize:22, fontWeight:700, color:"#1877f2" }}>{socialInsights.facebook[key]?.toLocaleString()}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Instagram */}
+                  {socialInsights.instagram && (
+                    <div style={{ background:"var(--bg-surface)", border:"1px solid #e1306c33", borderRadius:12, padding:20 }}>
+                      <div style={{ fontSize:12, fontWeight:700, color:"#e1306c", marginBottom:14 }}>📸 Instagram</div>
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                        {[
+                          { key:"follower_count", label:"Followers" },
+                          { key:"impressions",    label:"Impressions" },
+                          { key:"reach",          label:"Reach" },
+                          { key:"profile_views",  label:"Profile Views" },
+                        ].map(({ key, label }) => socialInsights.instagram[key] != null && (
+                          <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)" }}>
+                            <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>{label}</div>
+                            <div style={{ fontSize:22, fontWeight:700, color:"#e1306c" }}>{socialInsights.instagram[key]?.toLocaleString()}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!loadingInsights && !socialInsights && !insightError && (
+                <button onClick={fetchSocialInsights}
+                  style={{ padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start" }}>
+                  Load Social Insights
+                </button>
+              )}
+
+              {/* Published social posts list */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Published Social Posts</div>
+                {socialPosts.filter(p=>p.status==="published").length === 0 ? (
+                  <div style={{ fontSize:13, color:"var(--muted)" }}>No published posts yet.</div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                    {socialPosts.filter(p=>p.status==="published").slice(0,8).map((post,i) => {
+                      const caption = Object.values(post.captions||{})[0];
+                      const text = typeof caption === "string" ? caption : caption?.text || "";
+                      return (
+                        <div key={i} style={{ display:"flex", gap:12, alignItems:"flex-start", padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)" }}>
+                          {post.imageUrl && <img src={post.imageUrl} alt="" style={{ width:48, height:48, borderRadius:6, objectFit:"cover", flexShrink:0 }} />}
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:12, color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{text.slice(0,80)}…</div>
+                            <div style={{ display:"flex", gap:8, marginTop:4 }}>
+                              {post.platforms?.map(p => <span key={p} style={{ fontSize:10, color:"var(--muted)" }}>{p}</span>)}
+                              <span style={{ fontSize:10, color:"#5cba6c", marginLeft:"auto" }}>{post.publishedAt ? new Date(post.publishedAt).toLocaleDateString() : "Published"}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── CONTENT ── */}
+      {tab === "content" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Blog post performance */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:16 }}>Blog Post Performance</div>
+            {posts.length === 0 ? (
+              <div style={{ fontSize:13, color:"var(--muted)" }}>No posts yet — create your first post in the Pipeline.</div>
+            ) : (
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom:"1px solid var(--border)" }}>
+                    {["Title","Status","Date","GSC Clicks","GSC Position"].map(h=>(
+                      <th key={h} style={{ textAlign:"left", padding:"8px 10px", fontSize:9, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {posts.map((post,i) => {
+                    const slug = post.title?.toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9-]/g,"");
+                    const gscPage = gscData?.topPages?.find(p => p.page.includes(slug));
+                    const gscKw   = gscData?.keywords?.filter(k => k.query.includes(post.title?.split(" ")[0]?.toLowerCase() || ""))[0];
+                    return (
+                      <tr key={post.id} style={{ borderBottom:"1px solid var(--border)11" }}>
+                        <td style={{ padding:"10px 10px", fontSize:12, fontWeight:500, maxWidth:240, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{post.title}</td>
+                        <td style={{ padding:"10px 10px" }}>
+                          <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-elevated)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                        </td>
+                        <td style={{ padding:"10px 10px", fontSize:11, color:"var(--text-secondary)" }}>{post.date || post.createdAt?.slice(0,10) || "—"}</td>
+                        <td style={{ padding:"10px 10px", fontSize:12, fontWeight:700, color:gscPage?"var(--amber)":"var(--muted)" }}>{gscPage ? gscPage.clicks : "—"}</td>
+                        <td style={{ padding:"10px 10px", fontSize:12, color:gscKw?"#7c3aed":"var(--muted)" }}>{gscKw ? `#${gscKw.position.toFixed(0)}` : "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Content gap — posts without GSC data */}
+          {gscData && posts.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Ranking Keywords Without Posts</div>
+              <p style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:14, lineHeight:1.6 }}>
+                These keywords are already sending you traffic but you don't have dedicated posts for them yet — quick wins for new content.
+              </p>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                {gscData.keywords
+                  .filter(k => k.clicks > 0 && k.position < 20)
+                  .filter(k => !posts.some(p => p.title?.toLowerCase().includes(k.query.split(" ")[0]?.toLowerCase())))
+                  .slice(0, 8)
+                  .map((k,i) => (
+                    <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 12px", borderRadius:7, background:"var(--bg-elevated)" }}>
+                      <span style={{ fontSize:12 }}>{k.query}</span>
+                      <div style={{ display:"flex", gap:12, flexShrink:0 }}>
+                        <span style={{ fontSize:11, color:"var(--amber)", fontWeight:700 }}>{k.clicks} clicks</span>
+                        <span style={{ fontSize:11, color:"#7c3aed" }}>#{k.position.toFixed(0)}</span>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -7837,51 +8312,16 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
           {/* ══ ANALYTICS ══ */}
           {activeTab==="analytics"&&(
-            <div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}}>
-                {[
-                  {label:"Total Views",   value:DEFAULT_ANALYTICS.totalViews.toLocaleString(), trend:DEFAULT_ANALYTICS.viewsTrend, spark:DEFAULT_ANALYTICS.weeklyViews},
-                  {label:"Subscribers",   value:DEFAULT_ANALYTICS.subscribers,                 trend:DEFAULT_ANALYTICS.subsTrend,  spark:[95,105,112,118,128,136,142]},
-                  {label:"Avg Read Time", value:DEFAULT_ANALYTICS.avgReadTime},
-                  {label:"Bounce Rate",   value:`${DEFAULT_ANALYTICS.bounceRate}%`,            trend:-3.1},
-                ].map((s,i)=>(
-                  <div key={i} style={card}>
-                    <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:8}}>{s.label}</div>
-                    <div style={{fontFamily:"var(--font-display)",fontSize:28,fontWeight:700}}>{s.value}</div>
-                    {s.trend!=null&&<span style={{fontSize:12,color:s.trend>0?fixedGreen:"var(--red)",fontWeight:600}}>{s.trend>0?"↑":"↓"} {Math.abs(s.trend)}% <span style={{color:"var(--text-secondary)",fontWeight:400}}>vs last week</span></span>}
-                    {s.spark&&<div style={{marginTop:12}}><Sparkline data={s.spark} color={dark?"#d4a054":"#b8862e"}/></div>}
-                  </div>
-                ))}
-              </div>
-
-              <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16,marginBottom:24}}>
-                <div style={card}>
-                  <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:16}}>Weekly Traffic</div>
-                  <BarChart data={DEFAULT_ANALYTICS.weeklyViews} labels={DEFAULT_ANALYTICS.weekLabels} color={dark?"#d4a054":"#b8862e"}/>
-                </div>
-                <div style={card}>
-                  <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:16}}>Top Posts</div>
-                  {posts.filter(p=>p.views>0).sort((a,b)=>b.views-a.views).slice(0,4).map((p,i)=>(
-                    <div key={p.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:i<3?"1px solid var(--border)":"none"}}>
-                      <div style={{fontSize:12,fontWeight:500,maxWidth:"70%",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.title}</div>
-                      <div style={{fontSize:12,fontWeight:700,color:"var(--amber)"}}>{p.views.toLocaleString()}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Google Search Console */}
-              <div style={{marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                <div style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700}}>Search Console</div>
-                {!gscData && (
-                  <button onClick={()=>{setActiveTab("settings");setSettingsSection("gsc");}}
-                    style={{padding:"6px 14px",borderRadius:7,border:"1px solid var(--amber)44",background:"var(--amber-glow)",color:"var(--amber)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)"}}>
-                    Connect Search Console →
-                  </button>
-                )}
-              </div>
-              <GSCAnalyticsView data={gscData} onRefresh={()=>{setActiveTab("settings");setSettingsSection("gsc");}} />
-            </div>
+            <AnalyticsDashboard
+              posts={posts}
+              gscData={gscData}
+              metaConfig={metaConfig}
+              socialPosts={socialPosts}
+              dark={dark}
+              userId={userId}
+              onConnectGSC={()=>{ setActiveTab("settings"); setSettingsSection("gsc"); }}
+              onConnectMeta={()=>{ setActiveTab("settings"); setSettingsSection("meta"); }}
+            />
           )}
 
           {/* ══ CALENDAR ══ */}
