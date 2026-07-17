@@ -3102,7 +3102,7 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
 
 // ─── GOOGLE SEARCH CONSOLE INTEGRATION ───────────────────────────────────────
 
-const GSC_STORAGE = "bb_gsc_config";
+const GSC_STORAGE      = "bb_gsc_config";
 const GSC_DATA_STORAGE = "bb_gsc_data";
 
 function loadGSCConfig() { try { return JSON.parse(localStorage.getItem(GSC_STORAGE) || "{}"); } catch { return {}; } }
@@ -3110,144 +3110,193 @@ function saveGSCConfig(d) { try { localStorage.setItem(GSC_STORAGE, JSON.stringi
 function loadGSCData()   { try { return JSON.parse(localStorage.getItem(GSC_DATA_STORAGE) || "null"); } catch { return null; } }
 function saveGSCData(d)  { try { localStorage.setItem(GSC_DATA_STORAGE, JSON.stringify(d)); } catch {} }
 
-// Fetch GSC data via the Netlify edge function (CORS proxy)
+// Get a valid access token — auto-refreshes if expired
+async function getGSCAccessToken(cfg) {
+  if (!cfg?.refreshToken) throw new Error("Not connected — please reconnect Search Console.");
+
+  // If token still valid (>5 min left), use it
+  if (cfg.accessToken && cfg.expiry && Date.now() < cfg.expiry - 300_000) {
+    return cfg.accessToken;
+  }
+
+  // Refresh it
+  const res  = await fetch("/api/gsc-refresh", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ refreshToken: cfg.refreshToken }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(`Token refresh failed: ${data.error}`);
+
+  // Save updated token
+  const updated = { ...cfg, accessToken: data.access_token, expiry: data.expiry };
+  saveGSCConfig(updated);
+  return data.access_token;
+}
+
+// Fetch GSC data using a valid access token
 async function fetchGSCData(accessToken, siteUrl, days = 28) {
   const endDate   = new Date().toISOString().split("T")[0];
   const startDate = new Date(Date.now() - days * 86400000).toISOString().split("T")[0];
-
-  const body = {
-    startDate,
-    endDate,
-    dimensions: ["query", "page"],
-    rowLimit: 100,
-    startRow: 0,
-  };
-
   const res = await fetch(
     `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
     {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
+      headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ startDate, endDate, dimensions: ["query","page"], rowLimit: 100 }),
     }
   );
-
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err?.error?.message || `GSC error ${res.status}`);
   }
-
   return await res.json();
 }
 
 function GSCPanel({ onDataLoaded }) {
-  const [cfg,       setCfg]       = useState(loadGSCConfig);
-  const [token,     setToken]     = useState(cfg.accessToken || "");
-  const [siteUrl,   setSiteUrl]   = useState(cfg.siteUrl || "https://caskandstream.com/");
-  const [loading,   setLoading]   = useState(false);
-  const [error,     setError]     = useState("");
-  const [lastFetch, setLastFetch] = useState(cfg.lastFetch || null);
+  const [cfg,      setCfg]      = useState(loadGSCConfig);
+  const [siteUrl,  setSiteUrl]  = useState(() => loadGSCConfig().siteUrl || "https://caskandstream.com/");
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState("");
+  const [success,  setSuccess]  = useState("");
 
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
 
+  const connectGSC = () => {
+    if (!cfg.clientId?.trim()) { setError("Enter your Google OAuth Client ID first."); return; }
+    const params = new URLSearchParams({
+      client_id:     cfg.clientId.trim(),
+      redirect_uri:  "https://blogbunker.netlify.app/api/gsc-callback",
+      response_type: "code",
+      scope:         "https://www.googleapis.com/auth/webmasters.readonly",
+      access_type:   "offline",
+      prompt:        "consent",
+    });
+    window.open(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, "gsc_auth", "width=500,height=650,scrollbars=yes");
+    const handler = (e) => {
+      if (e.data?.type === "gsc-auth-success") {
+        window.removeEventListener("message", handler);
+        const tokens = e.data.tokens;
+        const newCfg = { ...cfg, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiry: tokens.expiry, siteUrl: siteUrl.trim(), connected: true };
+        saveGSCConfig(newCfg); setCfg(newCfg);
+        setSuccess("✓ Connected! Click Fetch Data to load your Search Console analytics.");
+        setError("");
+      }
+      if (e.data?.type === "gsc-auth-error") {
+        window.removeEventListener("message", handler);
+        setError(e.data.error);
+      }
+    };
+    window.addEventListener("message", handler);
+  };
+
   const fetchData = async () => {
-    if (!token.trim() || !siteUrl.trim()) return;
+    if (!siteUrl.trim()) return;
     setLoading(true); setError("");
     try {
-      const raw   = await fetchGSCData(token.trim(), siteUrl.trim());
-      const rows  = raw.rows || [];
-
-      // Aggregate by query
-      const queryMap = {};
-      const pageMap  = {};
+      const accessToken = await getGSCAccessToken(cfg);
+      const raw  = await fetchGSCData(accessToken, siteUrl.trim());
+      const rows = raw.rows || [];
+      const queryMap = {}, pageMap = {};
       let totalClicks = 0, totalImpressions = 0;
-
       for (const row of rows) {
         const [query, page] = row.keys;
-        totalClicks      += row.clicks;
-        totalImpressions += row.impressions;
-
-        if (!queryMap[query]) queryMap[query] = { query, clicks:0, impressions:0, ctr:0, position:0, count:0 };
-        queryMap[query].clicks      += row.clicks;
-        queryMap[query].impressions += row.impressions;
-        queryMap[query].position    += row.position;
-        queryMap[query].count++;
-
+        totalClicks += row.clicks; totalImpressions += row.impressions;
+        if (!queryMap[query]) queryMap[query] = { query, clicks:0, impressions:0, position:0, count:0 };
+        queryMap[query].clicks += row.clicks; queryMap[query].impressions += row.impressions;
+        queryMap[query].position += row.position; queryMap[query].count++;
         if (!pageMap[page]) pageMap[page] = { page, clicks:0, impressions:0 };
-        pageMap[page].clicks      += row.clicks;
-        pageMap[page].impressions += row.impressions;
+        pageMap[page].clicks += row.clicks; pageMap[page].impressions += row.impressions;
       }
-
       const keywords = Object.values(queryMap)
-        .map(k => ({ ...k, ctr: k.impressions > 0 ? k.clicks/k.impressions*100 : 0, position: k.count > 0 ? k.position/k.count : 0 }))
-        .sort((a,b) => b.clicks - a.clicks)
-        .slice(0, 20);
-
-      const topPages = Object.values(pageMap)
-        .sort((a,b) => b.clicks - a.clicks)
-        .slice(0, 10);
-
-      const data = { keywords, topPages, totalClicks, totalImpressions, fetchedAt: new Date().toISOString(), siteUrl, days:28 };
+        .map(k => ({ ...k, ctr: k.impressions>0?k.clicks/k.impressions*100:0, position: k.count>0?k.position/k.count:0 }))
+        .sort((a,b) => b.clicks - a.clicks).slice(0,20);
+      const topPages = Object.values(pageMap).sort((a,b) => b.clicks - a.clicks).slice(0,10);
+      const data = { keywords, topPages, totalClicks, totalImpressions, fetchedAt: new Date().toISOString(), siteUrl: siteUrl.trim(), days: 28 };
       saveGSCData(data);
-      const newCfg = { accessToken: token.trim(), siteUrl: siteUrl.trim(), lastFetch: data.fetchedAt };
-      saveGSCConfig(newCfg);
-      setCfg(newCfg);
-      setLastFetch(data.fetchedAt);
+      const newCfg = { ...cfg, siteUrl: siteUrl.trim(), lastFetch: data.fetchedAt };
+      saveGSCConfig(newCfg); setCfg(newCfg);
       onDataLoaded(data);
-    } catch(e) { setError(e.message); }
+      setSuccess(`✓ Fetched ${rows.length} rows of data.`);
+    } catch(e) {
+      setError(e.message);
+      if (e.message.includes("refresh") || e.message.includes("401")) {
+        const newCfg = { ...cfg, connected: false, accessToken: null, refreshToken: null };
+        saveGSCConfig(newCfg); setCfg(newCfg);
+      }
+    }
     setLoading(false);
   };
+
+  const disconnect = () => { const empty = { siteUrl, clientId: cfg.clientId }; saveGSCConfig(empty); setCfg(empty); setSuccess(""); setError(""); };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
       <div>
         <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Google Search Console</h3>
         <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
-          Connect to see real keyword rankings, clicks, and impressions for caskandstream.com.
+          See which keywords drive traffic, your Google rankings, and which posts perform best in search.
         </p>
       </div>
 
-      {lastFetch && (
-        <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c0a", border:"1px solid #5cba6c44", fontSize:12, color:"#5cba6c" }}>
-          ✓ Last synced: {new Date(lastFetch).toLocaleString()}
-        </div>
-      )}
+      {success && <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c0a", border:"1px solid #5cba6c44", fontSize:12, color:"#5cba6c" }}>{success}</div>}
+      {error   && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)0a", border:"1px solid var(--red)44", fontSize:12, color:"var(--red)" }}>{error}</div>}
 
+      {/* OAuth Client ID input */}
       <div>
         <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-          Access Token
+          Google OAuth Client ID
         </label>
-        <input type="password" style={iS} placeholder="Paste your Google OAuth access token…" value={token} onChange={e=>setToken(e.target.value)}
+        <input style={iS} placeholder="123456789-abc.apps.googleusercontent.com" value={cfg.clientId || ""}
+          onChange={e => { const n = {...cfg, clientId: e.target.value}; setCfg(n); saveGSCConfig(n); }}
           onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
-        <div style={{ marginTop:8, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
-          <strong style={{color:"var(--text)"}}>How to get your token:</strong><br/>
-          1. Go to <a href="https://developers.google.com/oauthplayground" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>Google OAuth Playground</a><br/>
-          2. In Step 1, find and select <strong style={{color:"var(--text)"}}>Search Console API v3</strong> → check <code>https://www.googleapis.com/auth/webmasters.readonly</code><br/>
-          3. Click <strong style={{color:"var(--text)"}}>Authorize APIs</strong> → sign in with your Google account<br/>
-          4. Click <strong style={{color:"var(--text)"}}>Exchange authorization code for tokens</strong><br/>
-          5. Copy the <strong style={{color:"var(--text)"}}>Access token</strong> and paste it above<br/>
-          <span style={{color:"var(--amber)"}}>⚠ Tokens expire after 1 hour — re-fetch when needed.</span>
-        </div>
+        <p style={{ fontSize:11, color:"var(--muted)", marginTop:4, lineHeight:1.6 }}>
+          From Google Cloud Console → APIs & Services → Credentials → your OAuth 2.0 Client ID.
+          Make sure <code>https://blogbunker.netlify.app/api/gsc-callback</code> is added as an Authorized Redirect URI.
+        </p>
       </div>
 
       <div>
         <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-          Site URL (exactly as it appears in Search Console)
+          Site URL (exactly as in Search Console)
         </label>
-        <input style={iS} placeholder="https://caskandstream.com/" value={siteUrl} onChange={e=>setSiteUrl(e.target.value)}
+        <input style={iS} placeholder="https://caskandstream.com/" value={siteUrl}
+          onChange={e => setSiteUrl(e.target.value)}
           onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
-        <p style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>Must match exactly — try both with and without trailing slash if it fails.</p>
       </div>
 
-      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-        <button onClick={fetchData} disabled={!token.trim() || !siteUrl.trim() || loading}
-          style={{ padding:"10px 24px", borderRadius:8, border:"none", background:token.trim()&&siteUrl.trim()&&!loading?"var(--amber)":"var(--bg-elevated)", color:token.trim()&&siteUrl.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:token.trim()&&siteUrl.trim()&&!loading?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
-          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Fetching…</> : "↓ Fetch Analytics Data"}
-        </button>
-        {error && <span style={{ fontSize:12, color:"var(--red)" }}>{error}</span>}
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+        {!cfg.connected ? (
+          <button onClick={connectGSC} disabled={!cfg.clientId?.trim()}
+            style={{ padding:"10px 24px", borderRadius:8, border:"none", background:cfg.clientId?.trim()?"#4285f4":"var(--bg-elevated)", color:cfg.clientId?.trim()?"#fff":"var(--muted)", fontSize:13, fontWeight:700, cursor:cfg.clientId?.trim()?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
+            <svg width="16" height="16" viewBox="0 0 18 18"><path fill="#fff" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/><path fill="#ffffffaa" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/><path fill="#ffffffaa" d="M3.97 10.72A5.41 5.41 0 0 1 3.69 9c0-.6.1-1.18.28-1.72V4.95H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.05l3.01-2.33z"/><path fill="#ffffffaa" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg>
+            Sign in with Google
+          </button>
+        ) : (
+          <>
+            <button onClick={fetchData} disabled={loading}
+              style={{ padding:"10px 24px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":"var(--amber)", color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
+              {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Fetching…</> : "↓ Fetch Analytics Data"}
+            </button>
+            <button onClick={disconnect}
+              style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+              Disconnect
+            </button>
+            <span style={{ fontSize:12, color:"#5cba6c", alignSelf:"center" }}>● Connected{cfg.lastFetch ? ` · Last synced ${new Date(cfg.lastFetch).toLocaleString()}` : ""}</span>
+          </>
+        )}
+      </div>
+
+      {/* Setup instructions */}
+      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.8 }}>
+        <div style={{ fontWeight:700, color:"var(--text)", marginBottom:8 }}>Setup (one-time, 5 minutes):</div>
+        1. <a href="https://console.cloud.google.com" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>Google Cloud Console</a> → select your project → <strong>APIs & Services → Library</strong> → enable <strong>Google Search Console API</strong><br/>
+        2. <strong>APIs & Services → Credentials → Create Credentials → OAuth Client ID</strong><br/>
+        3. Application type: <strong>Web application</strong><br/>
+        4. Add Authorized Redirect URI: <code style={{background:"var(--bg-surface)",padding:"1px 4px",borderRadius:3}}>https://blogbunker.netlify.app/api/gsc-callback</code><br/>
+        5. Copy the <strong>Client ID</strong> → paste above<br/>
+        6. In <strong>Netlify → Environment Variables</strong> add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code><br/>
+        7. Redeploy → click <strong>Sign in with Google</strong> above
       </div>
     </div>
   );
