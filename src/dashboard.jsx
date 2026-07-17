@@ -539,7 +539,8 @@ async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
   throw new Error("Unknown image provider");
 }
 
-function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", userId = "anonymous", style: extraStyle = {} }) {
+function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", userId, style: extraStyle = {} }) {
+  const resolvedUserId = userId || window.__bbUserId || "anonymous";
   const [saved,   setSaved]   = useState(false);
   const [saving,  setSaving]  = useState(false);
   const [saveErr, setSaveErr] = useState("");
@@ -591,7 +592,7 @@ function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated
       const res = await fetch("/api/media", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userId, dataUrl, name: `${name}-${Date.now()}`, tags, source: "generated" }),
+        body:    JSON.stringify({ userId: resolvedUserId, dataUrl, name: `${name}-${Date.now()}`, tags, source: "generated" }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -4237,7 +4238,7 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↻ New
             </button>
-            <SaveToLibraryButton imageUrl={imageUrl} tags={[platform, "generated"]} name={`${platform}-${topic.slice(0,20)}`} />
+            <SaveToLibraryButton imageUrl={imageUrl} tags={[platform, "generated"]} name={`${platform}-${topic.slice(0,20)}`} userId={window.__bbUserId || "anonymous"} />
           </div>
         </div>
       )}
@@ -5010,7 +5011,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                       style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                       ✕ Remove
                     </button>
-                    <SaveToLibraryButton imageUrl={imageData.url} tags={[...idea.platforms, "generated"]} name={idea.topic?.slice(0,30) || "social-post"} />
+                    <SaveToLibraryButton imageUrl={imageData.url} tags={[...idea.platforms, "generated"]} name={idea.topic?.slice(0,30) || "social-post"} userId={window.__bbUserId || "anonymous"} />
                   </div>
                 </div>
                 {/* Allow swapping even with image selected */}
