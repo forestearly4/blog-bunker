@@ -620,6 +620,109 @@ function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated
   );
 }
 
+// ─── IMAGE SAVE PANEL ────────────────────────────────────────────────────────
+// Shows the generated image with download + save controls and visible status
+
+function ImageSavePanel({ imageUrl, tags = ["generated"], name = "generated" }) {
+  const [saving,  setSaving]  = useState(false);
+  const [saved,   setSaved]   = useState(false);
+  const [status,  setStatus]  = useState("");
+
+  const saveToLibrary = async () => {
+    const userId = window.__bbUserId || "anonymous";
+    setSaving(true); setSaved(false);
+    setStatus(`Saving… (user: ${userId})`);
+
+    try {
+      // Convert blob: URL to base64
+      let dataUrl = imageUrl;
+      if (imageUrl.startsWith("blob:")) {
+        setStatus("Reading image…");
+        const res  = await fetch(imageUrl);
+        if (!res.ok) throw new Error(`Could not read image blob (${res.status})`);
+        const blob = await res.blob();
+        setStatus(`Encoding ${Math.round(blob.size/1024)}KB image…`);
+        dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("FileReader failed"));
+          reader.readAsDataURL(blob);
+        });
+      }
+
+      // Compress if over 4MB
+      if (dataUrl.length > 4_000_000) {
+        setStatus(`Compressing large image (${Math.round(dataUrl.length/1024)}KB)…`);
+        dataUrl = await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement("canvas");
+            const scale = Math.sqrt(4_000_000 / dataUrl.length) * 0.9;
+            c.width  = Math.round(img.width  * scale);
+            c.height = Math.round(img.height * scale);
+            c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+            resolve(c.toDataURL("image/jpeg", 0.85));
+          };
+          img.onerror = () => reject(new Error("Canvas compression failed"));
+          img.src = dataUrl;
+        });
+      }
+
+      setStatus(`Uploading to cloud (${Math.round(dataUrl.length/1024)}KB)…`);
+      const res = await fetch("/api/media", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          userId,
+          dataUrl,
+          name:   `${name}-${Date.now()}`,
+          tags,
+          source: "generated",
+        }),
+      });
+
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); }
+      catch { throw new Error(`Server returned non-JSON (${res.status}): ${text.slice(0,100)}`); }
+
+      if (!res.ok || data.error) throw new Error(data.error || `Upload failed (${res.status})`);
+
+      window.dispatchEvent(new CustomEvent("bb-media-updated"));
+      setSaved(true);
+      setStatus(`✓ Saved to library!`);
+      setTimeout(() => setStatus(""), 4000);
+
+    } catch(e) {
+      setStatus(`✗ ${e.message}`);
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div style={{ borderRadius:12, overflow:"hidden", border:"1px solid var(--border)" }}>
+      <div style={{ position:"relative" }}>
+        <img src={imageUrl} alt="Generated" style={{ width:"100%", display:"block" }} />
+        <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
+          <button onClick={() => { const a=document.createElement("a"); a.href=imageUrl; a.download=`${name}-${Date.now()}.jpg`; a.click(); }}
+            style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+            ↓ Download
+          </button>
+          <button onClick={saveToLibrary} disabled={saving}
+            style={{ padding:"6px 14px", borderRadius:6, border:"none", background:saved?"rgba(92,186,108,0.9)":saving?"rgba(0,0,0,0.5)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:saving?"not-allowed":"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+            {saving ? "◌" : saved ? "✓ Saved" : "🖼 Save to Library"}
+          </button>
+        </div>
+      </div>
+      {status && (
+        <div style={{ padding:"8px 12px", background:status.startsWith("✗")?"var(--red)11":status.startsWith("✓")?"#5cba6c11":"var(--bg-elevated)", fontSize:11, color:status.startsWith("✗")?"var(--red)":status.startsWith("✓")?"#5cba6c":"var(--text-secondary)", borderTop:"1px solid var(--border)" }}>
+          {status}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── IMAGE PROVIDER PREFERENCE ───────────────────────────────────────────────
 
 const IMAGE_PROVIDER_STORAGE = "bb_image_provider";
@@ -4227,20 +4330,7 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
 
       {/* Image output */}
       {imageUrl && (
-        <div style={{ position:"relative", borderRadius:12, overflow:"hidden", border:"1px solid var(--border)" }}>
-          <img src={imageUrl} alt="Generated" style={{ width:"100%", display:"block" }} />
-          <div style={{ position:"absolute", bottom:12, right:12, display:"flex", gap:6 }}>
-            <button onClick={() => { const a=document.createElement("a"); a.href=imageUrl; a.download=`social-${platform}-${Date.now()}.jpg`; a.click(); }}
-              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
-              ↓ Download
-            </button>
-            <button onClick={openPromptPreview}
-              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
-              ↻ New
-            </button>
-            <SaveToLibraryButton imageUrl={imageUrl} tags={[platform, "generated"]} name={`${platform}-${topic.slice(0,20)}`} userId={window.__bbUserId || "anonymous"} />
-          </div>
-        </div>
+        <ImageSavePanel imageUrl={imageUrl} tags={[platform, "generated"]} name={`${platform}-${topic.slice(0,20)}`} />
       )}
 
       {previewOpen && (
