@@ -3697,7 +3697,7 @@ class MarketingErrorBoundary extends React.Component {
   }
 }
 
-function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost }) {
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous" }) {
   const [tab, setTab] = useState("pipeline");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const scheduledCount = socialPosts.filter(p => p.status === "scheduled").length;
@@ -6105,7 +6105,8 @@ function saveMediaLibraryToStorage(items) {
   saveMediaLibraryCache(items);
 }
 
-function MediaLibrary({ userId = "anonymous" }) {
+function MediaLibrary({ userId }) {
+  const resolvedUserId = userId || window.__bbUserId || "anonymous";
   const [items,     setItems]     = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [filter,    setFilter]    = useState("all");
@@ -6122,7 +6123,7 @@ function MediaLibrary({ userId = "anonymous" }) {
   const fetchItems = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/media?userId=${encodeURIComponent(userId)}`);
+      const res = await fetch(`/api/media?userId=${encodeURIComponent(resolvedUserId)}`);
       const data = await res.json();
       if (data.items) {
         setItems(data.items);
@@ -6148,7 +6149,7 @@ function MediaLibrary({ userId = "anonymous" }) {
   const deleteItem = async (id) => {
     if (!window.confirm("Delete this image?")) return;
     try {
-      await fetch(`/api/media?userId=${encodeURIComponent(userId)}&id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      await fetch(`/api/media?userId=${encodeURIComponent(resolvedUserId)}&id=${encodeURIComponent(id)}`, { method: "DELETE" });
     } catch {}
     setItems(prev => prev.filter(i => i.id !== id));
     if (selected?.id === id) setSelected(null);
@@ -6180,7 +6181,7 @@ function MediaLibrary({ userId = "anonymous" }) {
     const res = await fetch("/api/media", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ userId, dataUrl, name: file.name.replace(/\.[^.]+$/, ""), tags: ["upload"], source: "upload" }),
+      body:    JSON.stringify({ userId: resolvedUserId, dataUrl, name: file.name.replace(/\.[^.]+$/, ""), tags: ["upload"], source: "upload" }),
     });
     const data = await res.json();
     if (data.item) setItems(prev => [data.item, ...prev]);
@@ -6366,7 +6367,8 @@ function MediaLibrary({ userId = "anonymous" }) {
 // Inline picker for selecting an image from the Media Library.
 // Used in Social Pipeline image stage, HeadlineImagePanel, etc.
 
-function LibraryImagePicker({ onSelect, compact = false, userId = "anonymous" }) {
+function LibraryImagePicker({ onSelect, compact = false, userId }) {
+  const resolvedUserId = userId || window.__bbUserId || "anonymous";
   const [open,    setOpen]   = useState(false);
   const [filter,  setFilter] = useState("all");
   const [search,  setSearch] = useState("");
@@ -6376,7 +6378,7 @@ function LibraryImagePicker({ onSelect, compact = false, userId = "anonymous" })
   const fetchItems = async () => {
     setLoading(true);
     try {
-      const res  = await fetch(`/api/media?userId=${encodeURIComponent(userId)}`);
+      const res  = await fetch(`/api/media?userId=${encodeURIComponent(resolvedUserId)}`);
       const data = await res.json();
       setItems(data.items || []);
     } catch {
@@ -6385,12 +6387,12 @@ function LibraryImagePicker({ onSelect, compact = false, userId = "anonymous" })
     setLoading(false);
   };
 
-  useEffect(() => { fetchItems(); }, [userId]);
+  useEffect(() => { fetchItems(); }, [resolvedUserId]);
   useEffect(() => {
     const sync = () => fetchItems();
     window.addEventListener("bb-media-updated", sync);
     return () => window.removeEventListener("bb-media-updated", sync);
-  }, [userId]);
+  }, [resolvedUserId]);
 
   const filtered = items.filter(item => {
     const typeMatch  = filter === "all" || item.tags?.includes(filter);
