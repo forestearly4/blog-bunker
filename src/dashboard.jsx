@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { useAuth } from "./auth";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
@@ -589,7 +590,7 @@ function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated
         });
       }
       // Upload to cloud
-      const res = await fetch("/api/media", {
+      const res = await fetch("/api/gcs", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ userId: resolvedUserId, dataUrl, name: `${name}-${Date.now()}`, tags, source: "generated" }),
@@ -669,7 +670,7 @@ function ImageSavePanel({ imageUrl, tags = ["generated"], name = "generated" }) 
       }
 
       setStatus(`Uploading to cloud (${Math.round(dataUrl.length/1024)}KB)…`);
-      const res = await fetch("/api/media", {
+      const res = await fetch("/api/gcs", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
@@ -6180,7 +6181,7 @@ async function saveToMediaLibrary(url, name = "generated", tags = ["generated"],
     });
   }
 
-  const res = await fetch("/api/media", {
+  const res = await fetch("/api/gcs", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify({ userId, dataUrl, name, tags, source: "generated" }),
@@ -6214,7 +6215,7 @@ function MediaLibrary({ userId }) {
   const fetchItems = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/media?userId=${encodeURIComponent(resolvedUserId)}`);
+      const res = await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}`);
       const data = await res.json();
       if (data.items) {
         setItems(data.items);
@@ -6240,7 +6241,7 @@ function MediaLibrary({ userId }) {
   const deleteItem = async (id) => {
     if (!window.confirm("Delete this image?")) return;
     try {
-      await fetch(`/api/media?userId=${encodeURIComponent(resolvedUserId)}&id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}&id=${encodeURIComponent(id)}`, { method: "DELETE" });
     } catch {}
     setItems(prev => prev.filter(i => i.id !== id));
     if (selected?.id === id) setSelected(null);
@@ -6251,7 +6252,7 @@ function MediaLibrary({ userId }) {
     setItems(prev => prev.map(i => i.id === id ? { ...i, ...patch } : i));
     if (selected?.id === id) setSelected(s => ({ ...s, ...patch }));
     try {
-      await fetch("/api/media", {
+      await fetch("/api/gcs", {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ userId, id, ...patch }),
@@ -6269,7 +6270,7 @@ function MediaLibrary({ userId }) {
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
-    const res = await fetch("/api/media", {
+    const res = await fetch("/api/gcs", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ userId: resolvedUserId, dataUrl, name: file.name.replace(/\.[^.]+$/, ""), tags: ["upload"], source: "upload" }),
@@ -6469,7 +6470,7 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
   const fetchItems = async () => {
     setLoading(true);
     try {
-      const res  = await fetch(`/api/media?userId=${encodeURIComponent(resolvedUserId)}`);
+      const res  = await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}`);
       const data = await res.json();
       setItems(data.items || []);
     } catch {
@@ -7239,7 +7240,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
       // Get userId from window (set by Dashboard on mount)
       const userId = window.__bbUserId || "anonymous";
       const safeName = `headline-${(title || "image").toLowerCase().replace(/\s+/g, "-").slice(0, 30)}`;
-      const res = await fetch("/api/media", {
+      const res = await fetch("/api/gcs", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ userId, dataUrl, name: safeName, tags: ["blog headline", "generated"], notes: prompt ? `Prompt: ${prompt.slice(0, 100)}` : "", source: "generated" }),
@@ -8055,7 +8056,8 @@ function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
 
 // ─── MAIN DASHBOARD ───────────────────────────────────────────────────────────
 
-export default function Dashboard({ user, workspace, onLogout }) {
+export default function Dashboard({ user, workspace }) {
+  const { logout: onLogout } = useAuth();
   const [dark,            setDark]           = useState(true);
   const [activeTab,       setActiveTab]      = useState("posts");
   const [postFilter,      setPostFilter]     = useState("all");

@@ -67,6 +67,21 @@
   status = 200
 
 [[redirects]]
+  from   = "/api/gcs"
+  to     = "/.netlify/functions/gcs"
+  status = 200
+
+[[redirects]]
+  from   = "/api/google-callback"
+  to     = "/.netlify/functions/google-auth-callback"
+  status = 200
+
+[[redirects]]
+  from   = "/api/google-refresh"
+  to     = "/.netlify/functions/google-refresh"
+  status = 200
+
+[[redirects]]
   from   = "/api/upload-image"
   to     = "/.netlify/functions/upload-image"
   status = 200

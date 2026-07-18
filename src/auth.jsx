@@ -1,298 +1,230 @@
-import { useState, useEffect, useContext, createContext, useCallback } from "react";
-
-const DARK = { "--bg":"#0e0f11","--bg-surface":"#16171b","--bg-elevated":"#1c1d22","--border":"#2a2b33","--text":"#e8e6e1","--text-secondary":"#8a8880","--amber":"#d4a054","--amber-glow":"rgba(212,160,84,0.12)","--green":"#5cba6c","--red":"#c75454","--muted":"#5c5b56" };
-
-function getIdentity() { return typeof window !== "undefined" ? window.netlifyIdentity : null; }
+/**
+ * src/auth.jsx
+ * Google OAuth authentication — replaces Netlify Identity.
+ * One sign-in gives access to GCS, Search Console, and eventually Gmail.
+ */
+import { createContext, useContext, useState, useEffect, useCallback } from "react";
 
 const AuthContext = createContext(null);
+const STORAGE_KEY = "bb_google_auth";
+
+function loadAuth() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "null"); }
+  catch { return null; }
+}
+
+function saveAuth(data) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
+  catch {}
+}
+
+function clearAuth() {
+  try { localStorage.removeItem(STORAGE_KEY); } catch {}
+}
+
+const SCOPES = [
+  "openid", "email", "profile",
+  "https://www.googleapis.com/auth/devstorage.read_write",
+  "https://www.googleapis.com/auth/webmasters.readonly",
+].join(" ");
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [authData, setAuthData] = useState(loadAuth);
+  const [loading,  setLoading]  = useState(false);
 
+  // Auto-refresh token before expiry
   useEffect(() => {
-    const id = getIdentity();
-    if (!id) {
-      const iv = setInterval(() => { const i = getIdentity(); if (i) { clearInterval(iv); init(i); } }, 100);
-      return () => clearInterval(iv);
-    }
-    init(id);
+    if (!authData?.refreshToken || !authData?.expiry) return;
+    const msLeft  = authData.expiry - Date.now() - 60_000;
+    if (msLeft <= 0) { refreshToken(); return; }
+    const timer = setTimeout(refreshToken, msLeft);
+    return () => clearTimeout(timer);
+  }, [authData?.expiry]);
+
+  const refreshToken = useCallback(async () => {
+    const current = loadAuth();
+    if (!current?.refreshToken) return;
+    try {
+      const res  = await fetch("/api/google-refresh", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ refreshToken: current.refreshToken }),
+      });
+      const data = await res.json();
+      if (data.error) { logout(); return; }
+      const updated = { ...current, accessToken: data.accessToken, expiry: data.expiry };
+      saveAuth(updated);
+      setAuthData(updated);
+    } catch { /* network error — keep existing token */ }
   }, []);
 
-  function init(id) {
-    id.on("init", u => { setUser(u || null); setLoading(false); });
-    id.on("login", u => { setUser(u); id.close(); });
-    id.on("logout", () => setUser(null));
-    id.on("error", e => console.error("Identity:", e));
-    id.init();
-  }
-
-  const login  = useCallback((email, pw) => { const id = getIdentity(); if (!id) return Promise.reject("not loaded"); return id.gotrue.login(email, pw, true); }, []);
-  const signup = useCallback((email, pw) => { const id = getIdentity(); if (!id) return Promise.reject("not loaded"); return id.gotrue.signup(email, pw, {}); }, []);
-  const logout = useCallback(() => { const id = getIdentity(); if (id) id.logout(); }, []);
-  const requestPasswordRecovery = useCallback((email) => { const id = getIdentity(); if (!id) return Promise.reject("not loaded"); return id.gotrue.requestPasswordRecovery(email); }, []);
   const loginWithGoogle = useCallback(() => {
-    const id = getIdentity();
-    if (!id) return;
-    // Netlify Identity widget has a built-in Google button when the provider
-    // is enabled server-side — just open the widget's login modal.
-    id.open("login");
+    const clientId = process.env.VITE_GOOGLE_CLIENT_ID || window.__GOOGLE_CLIENT_ID;
+    if (!clientId) {
+      alert("VITE_GOOGLE_CLIENT_ID not configured. Add it to Netlify environment variables.");
+      return;
+    }
+    const params = new URLSearchParams({
+      client_id:     clientId,
+      redirect_uri:  `${window.location.origin}/api/google-callback`,
+      response_type: "code",
+      scope:         SCOPES,
+      access_type:   "offline",
+      prompt:        "consent",
+    });
+    const popup = window.open(
+      `https://accounts.google.com/o/oauth2/v2/auth?${params}`,
+      "google_auth",
+      "width=500,height=650,scrollbars=yes"
+    );
+    setLoading(true);
+
+    const handler = (e) => {
+      if (e.data?.type === "google-auth-success") {
+        window.removeEventListener("message", handler);
+        const d = e.data.data;
+        saveAuth(d);
+        setAuthData(d);
+        setLoading(false);
+        // Set userId globally for components that need it
+        window.__bbUserId = d.user?.email || d.user?.id || "anonymous";
+      }
+      if (e.data?.type === "google-auth-error") {
+        window.removeEventListener("message", handler);
+        setLoading(false);
+      }
+    };
+    window.addEventListener("message", handler);
+
+    // Cleanup if popup closed without completing
+    const check = setInterval(() => {
+      if (popup?.closed) { clearInterval(check); setLoading(false); window.removeEventListener("message", handler); }
+    }, 500);
   }, []);
 
-  return <AuthContext.Provider value={{ user, loading, login, signup, logout, requestPasswordRecovery, loginWithGoogle }}>{children}</AuthContext.Provider>;
+  const logout = useCallback(() => {
+    clearAuth();
+    setAuthData(null);
+    window.__bbUserId = null;
+  }, []);
+
+  // Set global userId on mount if already logged in
+  useEffect(() => {
+    if (authData?.user) {
+      window.__bbUserId = authData.user.email || authData.user.id || "anonymous";
+    }
+  }, [authData]);
+
+  // Expose accessToken getter (auto-refreshes if needed)
+  const getAccessToken = useCallback(async () => {
+    const current = loadAuth();
+    if (!current?.accessToken) return null;
+    if (current.expiry && Date.now() > current.expiry - 60_000) {
+      await refreshToken();
+      return loadAuth()?.accessToken;
+    }
+    return current.accessToken;
+  }, [refreshToken]);
+
+  return (
+    <AuthContext.Provider value={{
+      user:       authData?.user || null,
+      authData,
+      loading,
+      loginWithGoogle,
+      logout,
+      getAccessToken,
+      isAuthenticated: !!authData?.user,
+    }}>
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
 export function useAuth() {
   const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth outside AuthProvider");
+  if (!ctx) throw new Error("useAuth must be used inside AuthProvider");
   return ctx;
 }
 
-function Shell({ children }) {
-  return (
-    <div style={{ ...DARK, minHeight:"100vh", background:"var(--bg)", fontFamily:"'DM Sans',system-ui,sans-serif", color:"var(--text)", display:"flex", alignItems:"center", justifyContent:"center", padding:24 }}>
-      <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;700;900&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-      <div style={{ position:"fixed", inset:0, pointerEvents:"none", backgroundImage:"radial-gradient(circle at 1px 1px, #2a2b3318 1px, transparent 0)", backgroundSize:"32px 32px" }} />
-      <div style={{ position:"relative", zIndex:1, width:"100%", maxWidth:420 }}>{children}</div>
-      <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
-    </div>
-  );
-}
+// ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
 
-function Logo() {
-  return (
-    <div style={{ textAlign:"center", marginBottom:32 }}>
-      <div style={{ width:52, height:52, borderRadius:14, background:"var(--amber)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:24, fontWeight:900, color:"#0e0f11", fontFamily:"'Fraunces',serif", margin:"0 auto 12px", boxShadow:"0 0 32px rgba(212,160,84,0.2)" }}>B</div>
-      <div style={{ fontFamily:"'Fraunces',serif", fontSize:22, fontWeight:700 }}>Blog Bunker</div>
-      <div style={{ fontSize:11, color:"var(--muted)", letterSpacing:"0.1em", textTransform:"uppercase", marginTop:4 }}>Command Center</div>
-    </div>
-  );
-}
-
-function Card({ children }) {
-  return <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:16, padding:"32px 36px", boxShadow:"0 24px 64px rgba(0,0,0,0.4)" }}>{children}</div>;
-}
-
-const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:14, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box", transition:"border-color 0.2s" };
-
-function Field({ label, type="text", placeholder, value, onChange, autoFocus, error }) {
-  const [show, setShow] = useState(false);
-  const isP = type === "password";
-  return (
-    <div style={{ marginBottom:16 }}>
-      <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{label}</label>
-      <div style={{ position:"relative" }}>
-        <input type={isP && show ? "text" : type} placeholder={placeholder} value={value} onChange={onChange} autoFocus={autoFocus}
-          style={{ ...iS, paddingRight: isP ? 52 : 14, borderColor: error ? "var(--red)" : "var(--border)" }}
-          onFocus={e => e.target.style.borderColor = error ? "var(--red)" : "var(--amber)"}
-          onBlur={e => e.target.style.borderColor = error ? "var(--red)" : "var(--border)"} />
-        {isP && <button type="button" onClick={() => setShow(s => !s)} style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", color:"var(--muted)", fontSize:11 }}>{show ? "Hide" : "Show"}</button>}
-      </div>
-      {error && <div style={{ fontSize:11, color:"var(--red)", marginTop:4 }}>{error}</div>}
-    </div>
-  );
-}
-
-function StrengthBar({ pw }) {
-  const s = [pw.length>=8, pw.length>=12, /[A-Z]/.test(pw), /[0-9]/.test(pw), /[^A-Za-z0-9]/.test(pw)].filter(Boolean).length;
-  const c = ["","var(--red)","var(--red)","var(--amber)","var(--amber)","var(--green)"];
-  const l = ["","Weak","Weak","Fair","Good","Strong"];
-  if (!pw) return null;
-  return (
-    <div style={{ marginBottom:16, marginTop:-8 }}>
-      <div style={{ display:"flex", gap:4, marginBottom:4 }}>{[1,2,3,4,5].map(i => <div key={i} style={{ flex:1, height:3, borderRadius:99, background: i<=s ? c[s] : "var(--border)", transition:"background 0.3s" }} />)}</div>
-      <div style={{ fontSize:11, color:c[s], textAlign:"right" }}>{l[s]}</div>
-    </div>
-  );
-}
-
-function Btn({ loading, children, onClick, type="submit" }) {
-  return (
-    <button type={type} onClick={onClick} disabled={loading} style={{ width:"100%", padding:12, borderRadius:9, border:"none", background: loading ? "var(--bg-elevated)" : "var(--amber)", color: loading ? "var(--muted)" : "#0e0f11", fontSize:14, fontWeight:700, cursor: loading ? "not-allowed" : "pointer", fontFamily:"'DM Sans',sans-serif", marginTop:8, transition:"all 0.2s" }}>
-      {loading ? <span style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}><span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>Working…</span> : children}
-    </button>
-  );
-}
-
-function Err({ msg }) { if (!msg) return null; return <div style={{ padding:"10px 14px", borderRadius:8, background:"rgba(199,84,84,0.1)", border:"1px solid rgba(199,84,84,0.3)", color:"var(--red)", fontSize:13, marginBottom:16, lineHeight:1.5 }}>{msg}</div>; }
-function Ok({ msg })  { if (!msg) return null; return <div style={{ padding:"10px 14px", borderRadius:8, background:"rgba(92,186,108,0.1)", border:"1px solid rgba(92,186,108,0.3)", color:"var(--green)", fontSize:13, marginBottom:16, lineHeight:1.5 }}>{msg}</div>; }
-function Link({ children, onClick }) { return <button onClick={onClick} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--amber)", fontWeight:600, fontSize:13, fontFamily:"'DM Sans',sans-serif", padding:0 }}>{children}</button>; }
-function Divider() { return <div style={{ display:"flex", alignItems:"center", gap:12, margin:"20px 0" }}><div style={{ flex:1, height:1, background:"var(--border)" }} /><span style={{ fontSize:11, color:"var(--muted)" }}>or</span><div style={{ flex:1, height:1, background:"var(--border)" }} /></div>; }
-
-function GoogleButton() {
-  const { loginWithGoogle } = useAuth();
-  return (
-    <button type="button" onClick={loginWithGoogle}
-      style={{ width:"100%", padding:"12px 16px", borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-surface)", color:"var(--text)", fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
-      <svg width="18" height="18" viewBox="0 0 18 18">
-        <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/>
-        <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/>
-        <path fill="#FBBC05" d="M3.97 10.72A5.41 5.41 0 0 1 3.69 9c0-.6.1-1.18.28-1.72V4.95H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.05l3.01-2.33z"/>
-        <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/>
-      </svg>
-      Continue with Google
-    </button>
-  );
-}
-
-function SignIn({ onSignUp, onForgot }) {
-  const { login } = useAuth();
-  const [email, setEmail] = useState(""); const [pass, setPass] = useState("");
-  const [err, setErr] = useState(""); const [fe, setFe] = useState({});
-  const [loading, setLoading] = useState(false);
-
-  const validate = () => {
-    const e = {};
-    if (!email.trim()) e.email = "Email is required";
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) e.email = "Enter a valid email";
-    if (!pass) e.pass = "Password is required";
-    setFe(e); return !Object.keys(e).length;
-  };
-
-  const submit = async (ev) => {
-    ev.preventDefault(); if (!validate()) return;
-    setLoading(true); setErr("");
-    try { await login(email.trim(), pass); }
-    catch (e) {
-      const m = (e?.message||"").toLowerCase();
-      setErr(m.includes("invalid")||m.includes("credential") ? "Incorrect email or password." : m.includes("confirm") ? "Please confirm your email before signing in." : "Sign in failed — please try again.");
-    }
-    setLoading(false);
-  };
-
-  return (
-    <Shell><Logo />
-      <Card>
-        <h2 style={{ fontFamily:"'Fraunces',serif", fontSize:20, fontWeight:700, marginBottom:4 }}>Welcome back</h2>
-        <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24 }}>Sign in to your Bunker</p>
-        <Err msg={err} />
-        <GoogleButton />
-        <Divider />
-        <form onSubmit={submit} noValidate>
-          <Field label="Email" type="email" placeholder="you@example.com" value={email} onChange={e=>{setEmail(e.target.value);setFe(f=>({...f,email:""}));}} autoFocus error={fe.email} />
-          <Field label="Password" type="password" placeholder="Your password" value={pass} onChange={e=>{setPass(e.target.value);setFe(f=>({...f,pass:""}));}} error={fe.pass} />
-          <div style={{ textAlign:"right", marginTop:-8, marginBottom:16 }}><Link onClick={onForgot}>Forgot password?</Link></div>
-          <Btn loading={loading}>Sign In</Btn>
-        </form>
-        <p style={{ textAlign:"center", fontSize:13, color:"var(--text-secondary)", marginTop:20 }}>Don't have an account? <Link onClick={onSignUp}>Create one free</Link></p>
-      </Card>
-      <p style={{ textAlign:"center", fontSize:11, color:"var(--muted)", marginTop:20 }}>Scout plan is always free · No credit card required</p>
-    </Shell>
-  );
-}
-
-function SignUp({ onSignIn }) {
-  const { signup } = useAuth();
-  const [email, setEmail] = useState(""); const [pass, setPass] = useState(""); const [confirm, setConfirm] = useState("");
-  const [err, setErr] = useState(""); const [ok, setOk] = useState(""); const [fe, setFe] = useState({});
-  const [loading, setLoading] = useState(false);
-
-  const validate = () => {
-    const e = {};
-    if (!email.trim()) e.email = "Email is required";
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) e.email = "Enter a valid email";
-    if (!pass) e.pass = "Password is required";
-    else if (pass.length < 8) e.pass = "Must be at least 8 characters";
-    if (!confirm) e.confirm = "Please confirm your password";
-    else if (confirm !== pass) e.confirm = "Passwords don't match";
-    setFe(e); return !Object.keys(e).length;
-  };
-
-  const submit = async (ev) => {
-    ev.preventDefault(); if (!validate()) return;
-    setLoading(true); setErr("");
-    try { await signup(email.trim(), pass); setOk("Account created! Check your email to confirm, then sign in."); }
-    catch (e) { const m=(e?.message||"").toLowerCase(); setErr(m.includes("already") ? "An account with this email already exists." : "Sign up failed — please try again."); }
-    setLoading(false);
-  };
-
-  return (
-    <Shell><Logo />
-      <Card>
-        <h2 style={{ fontFamily:"'Fraunces',serif", fontSize:20, fontWeight:700, marginBottom:4 }}>Create your account</h2>
-        <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24 }}>Free forever on Scout · Upgrade when you're ready</p>
-        <Ok msg={ok} /><Err msg={err} />
-        {!ok && <GoogleButton />}
-        {!ok && <Divider />}
-        {!ok && <form onSubmit={submit} noValidate>
-          <Field label="Email" type="email" placeholder="you@example.com" value={email} onChange={e=>{setEmail(e.target.value);setFe(f=>({...f,email:""}));}} autoFocus error={fe.email} />
-          <Field label="Password" type="password" placeholder="Min. 8 characters" value={pass} onChange={e=>{setPass(e.target.value);setFe(f=>({...f,pass:""}));}} error={fe.pass} />
-          <StrengthBar pw={pass} />
-          <Field label="Confirm Password" type="password" placeholder="Repeat your password" value={confirm} onChange={e=>{setConfirm(e.target.value);setFe(f=>({...f,confirm:""}));}} error={fe.confirm} />
-          <Btn loading={loading}>Create Account</Btn>
-          <p style={{ fontSize:11, color:"var(--muted)", textAlign:"center", marginTop:12, lineHeight:1.5 }}>By creating an account you agree to our Terms and Privacy Policy</p>
-        </form>}
-        {ok && <Btn type="button" onClick={onSignIn}>Go to Sign In</Btn>}
-        <Divider />
-        <p style={{ textAlign:"center", fontSize:13, color:"var(--text-secondary)" }}><Link onClick={onSignIn}>Sign in instead</Link></p>
-      </Card>
-    </Shell>
-  );
-}
-
-function ForgotPassword({ onSignIn }) {
-  const { requestPasswordRecovery } = useAuth();
-  const [email, setEmail] = useState(""); const [sent, setSent] = useState(false);
-  const [err, setErr] = useState(""); const [fe, setFe] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const submit = async (ev) => {
-    ev.preventDefault();
-    if (!email.trim()) { setFe("Email is required"); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setFe("Enter a valid email"); return; }
-    setLoading(true); setErr("");
-    try { await requestPasswordRecovery(email.trim()); setSent(true); }
-    catch { setErr("Couldn't send reset email. Check the address and try again."); }
-    setLoading(false);
-  };
-
-  return (
-    <Shell><Logo />
-      <Card>
-        {!sent ? <>
-          <h2 style={{ fontFamily:"'Fraunces',serif", fontSize:20, fontWeight:700, marginBottom:4 }}>Reset your password</h2>
-          <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24 }}>Enter your email and we'll send a reset link.</p>
-          <Err msg={err} />
-          <form onSubmit={submit} noValidate>
-            <Field label="Email" type="email" placeholder="you@example.com" value={email} onChange={e=>{setEmail(e.target.value);setFe("");}} autoFocus error={fe} />
-            <Btn loading={loading}>Send Reset Link</Btn>
-          </form>
-        </> : (
-          <div style={{ textAlign:"center", padding:"12px 0" }}>
-            <div style={{ width:52, height:52, borderRadius:99, background:"rgba(92,186,108,0.15)", border:"1px solid rgba(92,186,108,0.4)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, margin:"0 auto 16px" }}>✓</div>
-            <h2 style={{ fontFamily:"'Fraunces',serif", fontSize:18, fontWeight:700, marginBottom:8 }}>Check your inbox</h2>
-            <p style={{ fontSize:13, color:"var(--text-secondary)", lineHeight:1.7, marginBottom:16 }}>Reset link sent to <strong style={{ color:"var(--text)" }}>{email}</strong>. Expires in 1 hour.</p>
-            <p style={{ fontSize:12, color:"var(--muted)" }}>Didn't get it? <Link onClick={()=>setSent(false)}>Try again</Link></p>
-          </div>
-        )}
-        <div style={{ marginTop:24, paddingTop:20, borderTop:"1px solid var(--border)", textAlign:"center" }}>
-          <Link onClick={onSignIn}>← Back to sign in</Link>
-        </div>
-      </Card>
-    </Shell>
-  );
-}
-
-export function AuthGate({ children }) {
-  const { user, loading } = useAuth();
-  const [screen, setScreen] = useState("signin");
-
-  if (loading) return (
-    <div style={{ ...DARK, minHeight:"100vh", background:"var(--bg)", display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"'DM Sans',sans-serif" }}>
-      <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@700&family=DM+Sans:wght@400&display=swap" rel="stylesheet" />
-      <div style={{ textAlign:"center" }}>
-        <div style={{ width:44, height:44, borderRadius:10, background:"var(--amber)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, fontWeight:900, color:"#0e0f11", fontFamily:"'Fraunces',serif", margin:"0 auto 16px" }}>B</div>
-        <div style={{ fontSize:13, color:"var(--muted)", animation:"pulse 1.5s ease-in-out infinite" }}>Loading…</div>
-      </div>
-      <style>{`@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}`}</style>
-    </div>
-  );
-
-  if (!user) {
-    if (screen === "signup") return <SignUp onSignIn={() => setScreen("signin")} />;
-    if (screen === "forgot") return <ForgotPassword onSignIn={() => setScreen("signin")} />;
-    return <SignIn onSignUp={() => setScreen("signup")} onForgot={() => setScreen("forgot")} />;
+const css = `
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,700;1,400&family=DM+Sans:wght@400;500;600&display=swap');
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:     #0e0f11;
+    --card:   #161719;
+    --border: #2a2b2e;
+    --text:   #f0ece4;
+    --muted:  #888;
+    --amber:  #d4a054;
+    --green:  #5cba6c;
+    --red:    #e05555;
+    --font-display: 'Fraunces', Georgia, serif;
+    --font-body:    'DM Sans', system-ui, sans-serif;
   }
+  body { background: var(--bg); color: var(--text); font-family: var(--font-body); min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .shell { width: 100%; max-width: 400px; padding: 24px; display: flex; flex-direction: column; align-items: center; gap: 28px; }
+  .logo { font-family: var(--font-display); font-size: 28px; font-weight: 700; color: var(--amber); letter-spacing: -0.5px; text-align: center; }
+  .logo span { font-style: italic; font-weight: 400; color: var(--muted); font-size: 14px; display: block; margin-top: 4px; }
+  .card { width: 100%; background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 32px; display: flex; flex-direction: column; gap: 20px; }
+  .google-btn { width: 100%; padding: 13px 20px; border-radius: 10px; border: 1px solid var(--border); background: #fff; color: #3c4043; font-size: 15px; font-weight: 500; cursor: pointer; font-family: var(--font-body); display: flex; align-items: center; justify-content: center; gap: 10px; transition: box-shadow 0.15s; }
+  .google-btn:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
+  .google-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  .features { display: flex; flex-direction: column; gap: 8px; }
+  .feature { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  .feature-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); flex-shrink: 0; }
+  .footer { font-size: 11px; color: var(--muted); text-align: center; line-height: 1.6; }
+`;
 
-  return children;
+export function LoginScreen() {
+  const { loginWithGoogle, loading } = useAuth();
+  return (
+    <>
+      <style>{css}</style>
+      <div className="shell">
+        <div className="logo">
+          Blog Bunker
+          <span>Cast at Dawn. Sip at Dusk.</span>
+        </div>
+        <div className="card">
+          <div>
+            <div style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, marginBottom:6 }}>Welcome back</div>
+            <div style={{ fontSize:13, color:"var(--muted)" }}>Sign in to your Bunker</div>
+          </div>
+          <button className="google-btn" onClick={loginWithGoogle} disabled={loading}>
+            {loading ? (
+              <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 18 18">
+                <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/>
+                <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/>
+                <path fill="#FBBC05" d="M3.97 10.72A5.41 5.41 0 0 1 3.69 9c0-.6.1-1.18.28-1.72V4.95H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.05l3.01-2.33z"/>
+                <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/>
+              </svg>
+            )}
+            {loading ? "Signing in…" : "Continue with Google"}
+          </button>
+          <div className="features">
+            {[
+              "Blog pipeline, social scheduler, media library",
+              "Works on any device — everything synced",
+              "Images stored in Google Cloud Storage",
+              "Search Console auto-connected",
+            ].map((f, i) => (
+              <div key={i} className="feature">
+                <div className="feature-dot" />
+                {f}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="footer">
+          By signing in you agree to use Blog Bunker only for your own brand content.
+        </div>
+      </div>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </>
+  );
 }
