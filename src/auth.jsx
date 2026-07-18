@@ -59,9 +59,9 @@ export function AuthProvider({ children }) {
   }, []);
 
   const loginWithGoogle = useCallback(() => {
-    const clientId = process.env.VITE_GOOGLE_CLIENT_ID || window.__GOOGLE_CLIENT_ID;
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || window.__GOOGLE_CLIENT_ID;
     if (!clientId) {
-      alert("VITE_GOOGLE_CLIENT_ID not configured. Add it to Netlify environment variables.");
+      alert("VITE_GOOGLE_CLIENT_ID not configured. Add it to Netlify environment variables and redeploy.");
       return;
     }
     const params = new URLSearchParams({
