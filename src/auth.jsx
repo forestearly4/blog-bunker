@@ -23,8 +23,9 @@ function clearAuth() {
 }
 
 const SCOPES = [
-  "openid", "email", "profile",
-  "https://www.googleapis.com/auth/devstorage.read_write",
+  "openid",
+  "email",
+  "profile",
   "https://www.googleapis.com/auth/webmasters.readonly",
 ].join(" ");
 
