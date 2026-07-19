@@ -3421,7 +3421,7 @@ function GSCAnalyticsView({ data, onRefresh }) {
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
       {/* Summary cards */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:16 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:16 }}>
         {[
           { label:"Total Clicks",       value:totalClicks.toLocaleString(),       sub:`Last ${days} days` },
           { label:"Total Impressions",  value:totalImpressions.toLocaleString(),  sub:"Search appearances" },
@@ -4157,7 +4157,7 @@ primary = 5 high-volume (100k-1M posts), niche = 8 medium-volume (10k-100k), tre
       {results && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           {/* Tag groups */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:12 }}>
             {[
               { key:"primary",  label:"High Volume",  color:"var(--amber)" },
               { key:"niche",    label:"Niche Focus",  color:"#5cba6c"      },
@@ -6819,7 +6819,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
       {tab === "overview" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           {/* Key numbers */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12 }}>
             <StatCard label="Blog Posts Published" value={publishedPosts} sub={`${draftPosts} drafts`} icon="📄" />
             <StatCard label="GSC Clicks" value={gscClicks.toLocaleString()} sub={gscData ? `Last ${gscData.days} days` : "Connect GSC"} color={gscData?"var(--amber)":"var(--muted)"} icon="◎" />
             <StatCard label="GSC Impressions" value={gscImpressions.toLocaleString()} sub="Search appearances" color={gscData?"var(--amber)":"var(--muted)"} icon="👁" />
@@ -6923,7 +6923,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
           ) : (
             <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
               {/* Summary */}
-              <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12 }}>
                 <StatCard label="Total Clicks"      value={gscData.totalClicks.toLocaleString()}       sub={`Last ${gscData.days} days`} />
                 <StatCard label="Impressions"        value={gscData.totalImpressions.toLocaleString()} sub="Search appearances" />
                 <StatCard label="Avg CTR"            value={`${(gscData.totalClicks/Math.max(gscData.totalImpressions,1)*100).toFixed(1)}%`} sub="Click-through rate" color="#5cba6c" />
@@ -7534,7 +7534,7 @@ Page clicks: ${gscPage?.clicks || 0}`,
 
                   {activeCard === post.id && pa && (
                     <div style={{ padding:"16px 14px", display:"flex", flexDirection:"column", gap:12, borderTop:"1px solid var(--border)" }}>
-                      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10 }}>
+                      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:10 }}>
                         {[
                           { label:"SEO Score",   value:`${pa.seo_score}/100`,  color:scoreColor(pa.seo_score) },
                           { label:"Title Score", value:`${pa.title_score}/100`, color:scoreColor(pa.title_score) },
@@ -7588,6 +7588,86 @@ Page clicks: ${gscPage?.clicks || 0}`,
     </div>
   );
 }
+
+// ─── MOBILE RESPONSIVE ───────────────────────────────────────────────────────
+
+function useIsMobile() {
+  const [mobile, setMobile] = useState(() => window.innerWidth < 768);
+  useEffect(() => {
+    const handler = () => setMobile(window.innerWidth < 768);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
+  return mobile;
+}
+
+const MOBILE_CSS = `
+  /* ── RESPONSIVE GRID OVERRIDES ── */
+  @media (max-width: 767px) {
+    /* Collapse all multi-column grids to 1 or 2 cols */
+    [style*="repeat(4,1fr)"], [style*="repeat(3,1fr)"],
+    [style*="repeat(4, 1fr)"], [style*="repeat(3, 1fr)"] {
+      grid-template-columns: 1fr 1fr !important;
+    }
+    /* Two-column grids that are too tight */
+    [style*="gridTemplateColumns:\"1fr 1fr\""],
+    [style*="grid-template-columns: 1fr 1fr"] {
+      grid-template-columns: 1fr !important;
+    }
+    /* Horizontal tab bars — allow wrap */
+    [style*="display:\"flex\""][style*="gap:4"] {
+      flex-wrap: wrap;
+    }
+    /* Rich text editor min height */
+    .ProseMirror { min-height: 200px !important; }
+    /* Stage progress text smaller */
+    .stage-label { font-size: 9px !important; }
+  }
+
+  /* ── MOBILE NAV BAR (bottom) ── */
+  .bb-mobile-nav {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    z-index: 900;
+    background: var(--sidebar-bg);
+    border-top: 1px solid var(--border);
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-around;
+    padding: 0 4px;
+  }
+  .bb-mobile-nav button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 6px 8px;
+    border-radius: 8px;
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+  .bb-mobile-nav button.active {
+    background: var(--amber-glow);
+  }
+  .bb-mobile-nav .nav-icon { font-size: 18px; }
+  .bb-mobile-nav .nav-label { font-size: 9px; font-weight: 600; color: var(--text-secondary); letter-spacing: 0.04em; }
+  .bb-mobile-nav button.active .nav-label { color: var(--amber); }
+
+  @media (max-width: 767px) {
+    .bb-mobile-nav { display: flex; }
+    .bb-sidebar { display: none !important; }
+    .bb-main-content { padding: 16px 14px 72px !important; }
+    .bb-root { flex-direction: column !important; }
+  }
+`;
 
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
@@ -8503,6 +8583,7 @@ function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
 
 export default function Dashboard({ user, workspace }) {
   const { logout: onLogout } = useAuth();
+  const isMobile = useIsMobile();
   const [dark,            setDark]           = useState(true);
   const [activeTab,       setActiveTab]      = useState("posts");
   const [postFilter,      setPostFilter]     = useState("all");
@@ -8748,7 +8829,8 @@ export default function Dashboard({ user, workspace }) {
   ];
 
   return (
-    <div style={{...theme,fontFamily:"var(--font-body)",color:"var(--text)",background:"var(--bg)",minHeight:"100vh",display:"flex",fontSize:14,lineHeight:1.5}}>
+    <div className="bb-root" style={{...theme,fontFamily:"var(--font-body)",color:"var(--text)",background:"var(--bg)",minHeight:"100vh",display:"flex",fontSize:14,lineHeight:1.5}}>
+      <style>{MOBILE_CSS}</style>
       <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;700;900&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
 
@@ -8793,7 +8875,7 @@ export default function Dashboard({ user, workspace }) {
       )}
 
       {/* ── SIDEBAR ── */}
-      <aside style={{width:220,minWidth:220,background:"var(--sidebar-bg)",borderRight:"1px solid var(--border)",display:"flex",flexDirection:"column"}}>
+      <aside className="bb-sidebar" style={{width:220,minWidth:220,background:"var(--sidebar-bg)",borderRight:"1px solid var(--border)",display:"flex",flexDirection:"column"}}>
         <div style={{padding:"20px 20px 16px",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:10}}>
           <div style={{width:32,height:32,borderRadius:8,background:"var(--amber)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:900,color:dark?"#0e0f11":"#fff",fontFamily:"var(--font-display)",flexShrink:0}}>B</div>
           <div>
@@ -8860,7 +8942,23 @@ export default function Dashboard({ user, workspace }) {
           </div>
         </header>
 
-        <div style={{flex:1,overflow:"auto",padding:28}}>
+        {/* ── MOBILE BOTTOM NAV ── */}
+        <nav className="bb-mobile-nav">
+          {[
+            { id:"pipeline",  icon:"◈", label:"Pipeline" },
+            { id:"posts",     icon:"▤", label:"Posts"    },
+            { id:"social",    icon:"▣", label:"Market"   },
+            { id:"analytics", icon:"◔", label:"Analytics"},
+            { id:"settings",  icon:"⚙", label:"Settings" },
+          ].map(t => (
+            <button key={t.id} className={activeTab===t.id?"active":""} onClick={() => setActiveTab(t.id)}>
+              <span className="nav-icon">{t.icon}</span>
+              <span className="nav-label">{t.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="bb-main-content" style={{flex:1,overflow:"auto",padding:28}}>
 
           {/* ══ PIPELINE ══ */}
           {activeTab==="pipeline"&&(
@@ -8970,7 +9068,7 @@ export default function Dashboard({ user, workspace }) {
                       </tbody>
                     </table>
                   </div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginTop:16}}>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:16,marginTop:16}}>
                     {[
                       {title:"Content Gap",             value:"Whiskey + Fishing",    detail:"Zero competitors own this intersection — you do",                color:fixedGreen},
                       {title:"Avg Competitor Frequency", value:"3.0/wk",              detail:"You're at 2/wk — room to increase without diluting quality",    color:"var(--amber)"},
@@ -9139,7 +9237,7 @@ export default function Dashboard({ user, workspace }) {
                   <div>
                     <h3 style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700,margin:"0 0 8px"}}>Billing & Plan</h3>
                     <p style={{fontSize:13,color:"var(--text-secondary)",margin:"0 0 20px"}}>Current plan: <span style={{color:"var(--amber)",fontWeight:700}}>Operative</span></p>
-                    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
                       {PLANS.map(p=>(
                         <div key={p.name} style={{padding:20,borderRadius:10,border:planLabel===p.name?"2px solid var(--amber)":"1px solid var(--border)",background:planLabel===p.name?"var(--amber-glow)":"var(--bg-elevated)",textAlign:"center"}}>
                           <div style={{fontFamily:"var(--font-display)",fontSize:16,fontWeight:700,marginBottom:4}}>{p.name}</div>
