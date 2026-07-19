@@ -6671,17 +6671,18 @@ function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, bt
 
 // ─── ANALYTICS DASHBOARD ─────────────────────────────────────────────────────
 
-function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onConnectMeta }) {
+function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onConnectMeta, activeProvider, activeModel, apiKeys }) {
   const [tab, setTab] = useState("overview");
   const [socialInsights, setSocialInsights] = useState(null);
   const [loadingInsights, setLoadingInsights] = useState(false);
   const [insightError, setInsightError] = useState("");
 
   const TABS = [
-    { id:"overview", label:"Overview",       icon:"◈" },
-    { id:"search",   label:"Search (GSC)",   icon:"◎" },
-    { id:"social",   label:"Social",         icon:"▣" },
-    { id:"content",  label:"Content",        icon:"▤" },
+    { id:"overview", label:"Overview",    icon:"◈" },
+    { id:"seo",      label:"SEO",         icon:"◎", highlight:true },
+    { id:"search",   label:"Search Data", icon:"📊" },
+    { id:"social",   label:"Social",      icon:"▣" },
+    { id:"content",  label:"Content",     icon:"▤" },
   ];
 
   // ── FETCH META SOCIAL INSIGHTS ─────────────────────────────────────────────
@@ -6790,6 +6791,29 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
           </button>
         ))}
       </div>
+
+      {/* Sub-tabs */}
+      <div style={{ display:"flex", gap:4 }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            style={{ padding:"7px 18px", borderRadius:8, border:tab===t.id?"1px solid var(--amber)":"1px solid var(--border)", background:tab===t.id?"var(--amber-glow)":"transparent", color:tab===t.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            <span>{t.icon}</span>{t.label}
+            {t.highlight && tab!==t.id && <span style={{ fontSize:8, fontWeight:700, padding:"1px 5px", borderRadius:99, background:"var(--amber)", color:"#0e0f11" }}>AI</span>}
+          </button>
+        ))}
+      </div>
+
+      {/* ── SEO ── */}
+      {tab === "seo" && (
+        <SEODashboard
+          posts={posts}
+          gscData={gscData}
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          onConnectGSC={onConnectGSC}
+        />
+      )}
 
       {/* ── OVERVIEW ── */}
       {tab === "overview" && (
@@ -7138,6 +7162,427 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
               </div>
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SEO DASHBOARD ───────────────────────────────────────────────────────────
+
+function SEODashboard({ posts, gscData, activeProvider, activeModel, apiKeys, onConnectGSC }) {
+  const [analysis,     setAnalysis]     = useState(null);
+  const [loading,      setLoading]      = useState(false);
+  const [loadMsg,      setLoadMsg]      = useState("");
+  const [error,        setError]        = useState("");
+  const [activeCard,   setActiveCard]   = useState(null);
+  const [postAnalysis, setPostAnalysis] = useState({});
+  const [analyzingPost,setAnalyzingPost]= useState(null);
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  // ── DERIVE OPPORTUNITIES FROM GSC DATA ─────────────────────────────────────
+  const opportunities = gscData ? (() => {
+    const kws = gscData.keywords || [];
+
+    // Low-hanging fruit: ranking 5-20, decent impressions
+    const lowHanging = kws
+      .filter(k => k.position >= 4 && k.position <= 20 && k.impressions >= 10)
+      .sort((a,b) => (a.position - b.position))
+      .slice(0, 8);
+
+    // High impressions, low CTR (title needs work)
+    const lowCTR = kws
+      .filter(k => k.impressions >= 20 && (k.clicks / k.impressions) < 0.03 && k.position <= 15)
+      .sort((a,b) => b.impressions - a.impressions)
+      .slice(0, 6);
+
+    // Already ranking well (top 5)
+    const winning = kws
+      .filter(k => k.position < 5 && k.clicks > 0)
+      .sort((a,b) => b.clicks - a.clicks)
+      .slice(0, 6);
+
+    // Keywords with zero clicks despite impressions
+    const noClicks = kws
+      .filter(k => k.clicks === 0 && k.impressions >= 15 && k.position <= 20)
+      .sort((a,b) => b.impressions - a.impressions)
+      .slice(0, 6);
+
+    return { lowHanging, lowCTR, winning, noClicks };
+  })() : null;
+
+  // ── AI FULL-SITE ANALYSIS ──────────────────────────────────────────────────
+  const runFullAnalysis = async () => {
+    setLoading(true); setError(""); setLoadMsg("Analyzing your site…");
+    try {
+      const postTitles   = posts.map(p => p.title).join(", ");
+      const topKeywords  = (gscData?.keywords || []).slice(0, 15).map(k => `"${k.query}" (pos ${k.position.toFixed(0)}, ${k.clicks} clicks, ${k.impressions} impr)`).join("; ");
+      const topPages     = (gscData?.topPages || []).slice(0, 8).map(p => `${p.page} (${p.clicks} clicks)`).join("; ");
+      const totalClicks  = gscData?.totalClicks || 0;
+      const totalImpr    = gscData?.totalImpressions || 0;
+      const avgCTR       = totalImpr > 0 ? (totalClicks / totalImpr * 100).toFixed(1) : 0;
+
+      const text = await callAI(activeProvider, activeModel,
+        `You are an expert SEO consultant specializing in niche lifestyle blogs. Be specific, actionable, and honest. Return ONLY valid JSON (no fences):
+{
+  "health_score": 0-100,
+  "health_label": "one word: Excellent/Good/Fair/Needs Work",
+  "summary": "2-3 sentence overall assessment",
+  "quick_wins": [{"action":"specific action","impact":"High/Medium/Low","effort":"Easy/Medium/Hard","detail":"why this works"}],
+  "title_rewrites": [{"current":"...","suggested":"...","reason":"..."}],
+  "content_gaps": [{"topic":"...","why":"...","angle":"..."}],
+  "technical_tips": ["tip1","tip2","tip3"],
+  "biggest_opportunity": "single most impactful thing to do right now in 1-2 sentences"
+}
+quick_wins = 5 items. title_rewrites = 3 items using actual post titles provided. content_gaps = 4 items.`,
+        `Site: caskandstream.com — fly fishing and whiskey lifestyle blog.
+Published posts: ${postTitles || "none yet"}
+Top keywords: ${topKeywords || "no GSC data yet"}
+Top pages: ${topPages || "no data"}
+Total clicks (28 days): ${totalClicks}
+Total impressions: ${totalImpr}
+Avg CTR: ${avgCTR}%
+Site age: relatively new, building domain authority`,
+        apiKeys[activeProvider],
+        2000
+      );
+
+      setLoadMsg("Parsing recommendations…");
+      setAnalysis(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── AI PER-POST ANALYSIS ───────────────────────────────────────────────────
+  const analyzePost = async (post) => {
+    setAnalyzingPost(post.id);
+    try {
+      const gscKw = (gscData?.keywords || []).filter(k =>
+        k.query.includes(post.title?.split(" ")[0]?.toLowerCase() || "")
+      ).slice(0, 3);
+      const gscPage = (gscData?.topPages || []).find(p =>
+        p.page.includes(post.title?.toLowerCase().replace(/\s+/g, "-") || "")
+      );
+
+      const text = await callAI(activeProvider, activeModel,
+        `You are an SEO expert. Analyze this blog post and give specific, actionable recommendations. Return ONLY valid JSON (no fences):
+{
+  "seo_score": 0-100,
+  "title_score": 0-100,
+  "title_feedback": "specific feedback on the title for SEO",
+  "suggested_title": "improved SEO title under 60 chars",
+  "meta_description": "suggested meta description 150-160 chars with primary keyword",
+  "primary_keyword": "best target keyword for this post",
+  "secondary_keywords": ["kw1","kw2","kw3"],
+  "improvements": ["specific improvement 1","specific improvement 2","specific improvement 3"],
+  "internal_links": ["suggest a topic to link to from this post","another link opportunity"],
+  "verdict": "one sentence on the post's SEO potential"
+}`,
+        `Blog: caskandstream.com (fly fishing and whiskey lifestyle)
+Post title: "${post.title}"
+Post status: ${post.status}
+GSC data for this post: ${gscKw.length ? JSON.stringify(gscKw) : "no data yet"}
+Page clicks: ${gscPage?.clicks || 0}`,
+        apiKeys[activeProvider],
+        1000
+      );
+      const result = parseAIJson(text);
+      setPostAnalysis(prev => ({ ...prev, [post.id]: result }));
+    } catch(e) { console.error(e); }
+    setAnalyzingPost(null);
+  };
+
+  const scoreColor = (s) => s >= 80 ? "#5cba6c" : s >= 60 ? "var(--amber)" : "var(--red)";
+  const impactColor = { High:"#5cba6c", Medium:"var(--amber)", Low:"var(--text-secondary)" };
+  const effortColor = { Easy:"#5cba6c", Medium:"var(--amber)", Hard:"var(--red)" };
+
+  if (!gscData) return (
+    <div style={{ textAlign:"center", padding:"60px 20px", background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12 }}>
+      <div style={{ fontSize:40, marginBottom:16 }}>◎</div>
+      <h3 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, marginBottom:8 }}>SEO Analysis Requires Search Console</h3>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24, maxWidth:400, margin:"0 auto 24px", lineHeight:1.7 }}>
+        Connect Google Search Console to unlock AI-powered SEO recommendations, keyword opportunities, and content gap analysis.
+      </p>
+      <button onClick={onConnectGSC}
+        style={{ padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+        Connect Search Console →
+      </button>
+    </div>
+  );
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>SEO Dashboard</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>AI-powered recommendations to grow organic traffic on caskandstream.com</p>
+        </div>
+        <button onClick={runFullAnalysis} disabled={loading}
+          style={{ padding:"9px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Run Full SEO Analysis`}
+        </button>
+      </div>
+
+      {error && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>{error}</div>}
+
+      {/* ── AI ANALYSIS RESULTS ── */}
+      {analysis && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Health score + summary */}
+          <div style={{ background:"var(--bg-surface)", border:`1px solid ${scoreColor(analysis.health_score)}44`, borderRadius:12, padding:24, display:"grid", gridTemplateColumns:"140px 1fr", gap:24, alignItems:"center" }}>
+            <div style={{ textAlign:"center" }}>
+              <div style={{ fontSize:56, fontWeight:900, fontFamily:"var(--font-display)", color:scoreColor(analysis.health_score) }}>{analysis.health_score}</div>
+              <div style={{ fontSize:12, fontWeight:700, color:scoreColor(analysis.health_score), textTransform:"uppercase", letterSpacing:"0.08em" }}>{analysis.health_label}</div>
+              <div style={{ fontSize:10, color:"var(--muted)", marginTop:4 }}>SEO Health Score</div>
+            </div>
+            <div>
+              <div style={{ fontSize:15, lineHeight:1.7, color:"var(--text)", marginBottom:12 }}>{analysis.summary}</div>
+              <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)44", fontSize:13, fontWeight:500, color:"var(--amber)", lineHeight:1.6 }}>
+                ⚡ Biggest opportunity: {analysis.biggest_opportunity}
+              </div>
+            </div>
+          </div>
+
+          {/* Quick wins */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>⚡ Quick Wins</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+              {analysis.quick_wins?.map((w, i) => (
+                <div key={i} style={{ padding:"12px 16px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", display:"flex", gap:16, alignItems:"flex-start" }}>
+                  <div style={{ flexShrink:0, width:24, height:24, borderRadius:6, background:"var(--amber-glow)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"var(--amber)" }}>{i+1}</div>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontWeight:600, fontSize:13, marginBottom:4 }}>{w.action}</div>
+                    <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.5 }}>{w.detail}</div>
+                  </div>
+                  <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                    <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:impactColor[w.impact]+"15", color:impactColor[w.impact], border:`1px solid ${impactColor[w.impact]}33`, fontWeight:600 }}>{w.impact} impact</span>
+                    <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:effortColor[w.effort]+"15", color:effortColor[w.effort], border:`1px solid ${effortColor[w.effort]}33` }}>{w.effort}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+            {/* Title rewrites */}
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>✏ Title Rewrites</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                {analysis.title_rewrites?.map((t, i) => (
+                  <div key={i} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                    <div style={{ fontSize:11, color:"var(--red)", marginBottom:4, textDecoration:"line-through", opacity:0.7 }}>{t.current}</div>
+                    <div style={{ fontSize:12, fontWeight:600, color:"#5cba6c", marginBottom:4 }}>→ {t.suggested}</div>
+                    <div style={{ fontSize:11, color:"var(--muted)" }}>{t.reason}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Content gaps */}
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📝 Content Gaps</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                {analysis.content_gaps?.map((g, i) => (
+                  <div key={i} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                    <div style={{ fontSize:12, fontWeight:600, marginBottom:3 }}>{g.topic}</div>
+                    <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>{g.why}</div>
+                    <div style={{ fontSize:11, color:"var(--amber)" }}>Angle: {g.angle}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Technical tips */}
+          {analysis.technical_tips?.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>⚙ Technical Tips</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                {analysis.technical_tips.map((t, i) => (
+                  <div key={i} style={{ display:"flex", gap:10, padding:"6px 0", borderBottom:"1px solid var(--border)11", fontSize:12, color:"var(--text-secondary)" }}>
+                    <span style={{ color:"var(--amber)", flexShrink:0 }}>→</span>{t}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── KEYWORD OPPORTUNITIES (always shown if GSC connected) ── */}
+      {opportunities && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Keyword Opportunities</h3>
+
+          {/* Low-hanging fruit */}
+          {opportunities.lowHanging.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c33", borderRadius:12, padding:20 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c" }}>🎯 Low-Hanging Fruit</div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)" }}>— Ranking positions 5-20, one good update away from page 1</div>
+              </div>
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom:"1px solid var(--border)" }}>
+                    {["Keyword","Position","Impressions","Clicks","Action"].map(h => (
+                      <th key={h} style={{ textAlign:"left", padding:"6px 8px", fontSize:9, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {opportunities.lowHanging.map((k, i) => (
+                    <tr key={i} style={{ borderBottom:"1px solid var(--border)11" }}>
+                      <td style={{ padding:"8px 8px", fontSize:12 }}>{k.query}</td>
+                      <td style={{ padding:"8px 8px", fontSize:13, fontWeight:700, color:"var(--amber)" }}>#{k.position.toFixed(0)}</td>
+                      <td style={{ padding:"8px 8px", fontSize:12, color:"var(--text-secondary)" }}>{k.impressions}</td>
+                      <td style={{ padding:"8px 8px", fontSize:12 }}>{k.clicks}</td>
+                      <td style={{ padding:"8px 8px", fontSize:11, color:"#5cba6c" }}>Update &amp; expand post</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Low CTR */}
+          {opportunities.lowCTR.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)33", borderRadius:12, padding:20 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)" }}>✏ Low Click-Through Rate</div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)" }}>— Appearing in search but not getting clicks. Rewrite the title/description.</div>
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {opportunities.lowCTR.map((k, i) => (
+                  <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 10px", borderRadius:7, background:"var(--bg-elevated)" }}>
+                    <span style={{ fontSize:12 }}>{k.query}</span>
+                    <div style={{ display:"flex", gap:12, flexShrink:0 }}>
+                      <span style={{ fontSize:11, color:"var(--text-secondary)" }}>{k.impressions} impr</span>
+                      <span style={{ fontSize:11, fontWeight:700, color:"var(--red)" }}>{(k.clicks/k.impressions*100).toFixed(1)}% CTR</span>
+                      <span style={{ fontSize:11, color:"var(--muted)" }}>#{k.position.toFixed(0)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+            {/* Winning keywords */}
+            {opportunities.winning.length > 0 && (
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>✓ Already Winning</div>
+                {opportunities.winning.map((k, i) => (
+                  <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:"1px solid var(--border)11", fontSize:12 }}>
+                    <span style={{ color:"var(--text-secondary)" }}>{k.query}</span>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <span style={{ fontWeight:700, color:"#5cba6c" }}>#{k.position.toFixed(0)}</span>
+                      <span style={{ color:"var(--muted)" }}>{k.clicks} clicks</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Zero clicks */}
+            {opportunities.noClicks.length > 0 && (
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--red)", marginBottom:10 }}>⚠ Impressions, Zero Clicks</div>
+                {opportunities.noClicks.map((k, i) => (
+                  <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:"1px solid var(--border)11", fontSize:12 }}>
+                    <span style={{ color:"var(--text-secondary)" }}>{k.query}</span>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <span style={{ color:"var(--amber)" }}>{k.impressions} impr</span>
+                      <span style={{ color:"var(--muted)" }}>#{k.position.toFixed(0)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── PER-POST SEO ANALYSIS ── */}
+      {posts.length > 0 && (
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📄 Post-by-Post SEO Analysis</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            {posts.map(post => {
+              const pa = postAnalysis[post.id];
+              return (
+                <div key={post.id} style={{ borderRadius:8, border:"1px solid var(--border)", overflow:"hidden" }}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"12px 14px", background:"var(--bg-elevated)", cursor:"pointer" }}
+                    onClick={() => setActiveCard(activeCard===post.id ? null : post.id)}>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:13, fontWeight:600, marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{post.title}</div>
+                      <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                        <span style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-surface)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                        {pa && <span style={{ fontSize:11, color:scoreColor(pa.seo_score), fontWeight:700 }}>SEO: {pa.seo_score}/100</span>}
+                      </div>
+                    </div>
+                    <div style={{ display:"flex", gap:8, alignItems:"center", flexShrink:0, marginLeft:12 }}>
+                      {!pa && (
+                        <button onClick={e=>{ e.stopPropagation(); analyzePost(post); }} disabled={analyzingPost===post.id}
+                          style={{ padding:"5px 12px", borderRadius:7, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5 }}>
+                          {analyzingPost===post.id ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Analyzing…</> : `${provider.logo} Analyze`}
+                        </button>
+                      )}
+                      <span style={{ fontSize:14, color:"var(--muted)" }}>{activeCard===post.id?"▲":"▼"}</span>
+                    </div>
+                  </div>
+
+                  {activeCard === post.id && pa && (
+                    <div style={{ padding:"16px 14px", display:"flex", flexDirection:"column", gap:12, borderTop:"1px solid var(--border)" }}>
+                      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10 }}>
+                        {[
+                          { label:"SEO Score",   value:`${pa.seo_score}/100`,  color:scoreColor(pa.seo_score) },
+                          { label:"Title Score", value:`${pa.title_score}/100`, color:scoreColor(pa.title_score) },
+                          { label:"Target Keyword", value:pa.primary_keyword,   color:"var(--amber)" },
+                        ].map(s => (
+                          <div key={s.label} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", textAlign:"center" }}>
+                            <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>{s.label}</div>
+                            <div style={{ fontSize:16, fontWeight:700, color:s.color }}>{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--amber)22" }}>
+                        <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Title Feedback</div>
+                        <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:6 }}>{pa.title_feedback}</div>
+                        <div style={{ fontSize:12, fontWeight:600, color:"#5cba6c" }}>→ {pa.suggested_title}</div>
+                      </div>
+
+                      <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)" }}>
+                        <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Meta Description</div>
+                        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{pa.meta_description}</div>
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Improvements</div>
+                        {pa.improvements?.map((imp, i) => (
+                          <div key={i} style={{ fontSize:12, padding:"5px 0", borderBottom:"1px solid var(--border)11", color:"var(--text-secondary)", display:"flex", gap:8 }}>
+                            <span style={{ color:"var(--amber)", flexShrink:0 }}>→</span>{imp}
+                          </div>
+                        ))}
+                      </div>
+
+                      <div style={{ fontSize:11, fontStyle:"italic", color:"var(--amber)", lineHeight:1.6, padding:"8px 12px", borderRadius:7, background:"var(--amber-glow)" }}>
+                        {pa.verdict}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {!analysis && !opportunities?.lowHanging?.length && !opportunities?.lowCTR?.length && (
+        <div style={{ textAlign:"center", padding:"48px 20px", color:"var(--muted)", fontSize:13 }}>
+          <p style={{ marginBottom:16 }}>Click <strong style={{color:"var(--text)"}}>Run Full SEO Analysis</strong> above to get AI-powered recommendations for your site.</p>
+          <p>Or analyze individual posts using the <strong style={{color:"var(--text)"}}>Analyze</strong> button on each post below.</p>
         </div>
       )}
     </div>
@@ -8465,6 +8910,9 @@ export default function Dashboard({ user, workspace }) {
               userId={userId}
               onConnectGSC={()=>{ setActiveTab("settings"); setSettingsSection("gsc"); }}
               onConnectMeta={()=>{ setActiveTab("settings"); setSettingsSection("meta"); }}
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
             />
           )}
 
