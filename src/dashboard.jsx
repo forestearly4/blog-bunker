@@ -4575,7 +4575,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   // Auto-save draft
   useEffect(() => {
     if (!idea.topic && Object.keys(captions).length === 0) return;
-    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url:null }, schedule, savedAt:new Date().toISOString() };
+    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url: imageData.url?.startsWith("https://") ? imageData.url : null }, schedule, savedAt:new Date().toISOString() };
     saveSocialPipelineDraft(data);
     setSavedAt(data.savedAt);
   }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, schedule]);
@@ -5110,7 +5110,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               </div>
             )}
 
-            {imageData.prompt && imageData.prompt !== "from library" && (
+            {imageData.url && imageData.prompt && imageData.prompt !== "from library" && (
               <div>
                 <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Prompt (editable)</label>
                 <div style={{ display:"flex", gap:8 }}>
