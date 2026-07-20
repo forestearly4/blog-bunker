@@ -2,19 +2,45 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Blog Bunker" />
+    <meta name="theme-color" content="#d4a054" />
+    <meta name="description" content="AI-powered blogging and marketing platform for lifestyle bloggers" />
     <title>Blog Bunker</title>
-    <script src="https://identity.netlify.com/v1/netlify-identity-widget.js"></script>
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <style>
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
       html, body, #root { height: 100%; }
-      body { background: #0e0f11; color: #e8e6e1; font-family: system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+      body {
+        background: #0e0f11;
+        color: #e8e6e1;
+        font-family: system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        /* Safe area insets for notched phones */
+        padding-env: safe-area-inset-top safe-area-inset-right safe-area-inset-bottom safe-area-inset-left;
+      }
+      /* Prevent iOS bounce scroll */
+      html { overflow: hidden; height: 100%; }
+      body { overflow: auto; height: 100%; }
     </style>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then(reg => console.log('SW registered:', reg.scope))
+            .catch(err => console.log('SW failed:', err));
+        });
+      }
+    </script>
   </body>
 </html>
