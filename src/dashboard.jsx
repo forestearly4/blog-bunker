@@ -265,6 +265,9 @@ function loadKeys() {
 }
 function saveKeys(keys) {
   try { localStorage.setItem(KEYS_STORAGE, JSON.stringify(keys)); } catch {}
+  // Push to cloud
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("api_keys", uid, keys);
 }
 function loadModels() {
   try { return JSON.parse(localStorage.getItem(MODEL_STORAGE) || "{}"); } catch { return {}; }
@@ -3211,7 +3214,12 @@ const GSC_STORAGE      = "bb_gsc_config";
 const GSC_DATA_STORAGE = "bb_gsc_data";
 
 function loadGSCConfig() { try { return JSON.parse(localStorage.getItem(GSC_STORAGE) || "{}"); } catch { return {}; } }
-function saveGSCConfig(d) { try { localStorage.setItem(GSC_STORAGE, JSON.stringify(d)); } catch {} }
+function saveGSCConfig(d) {
+  try { localStorage.setItem(GSC_STORAGE, JSON.stringify(d)); } catch {}
+  // Also push to cloud if we have a userId
+  const uid = window.__bbUserId;
+  if (uid && d?.refreshToken) cloudSet("gsc_config", uid, d);
+}
 function loadGSCData()   { try { return JSON.parse(localStorage.getItem(GSC_DATA_STORAGE) || "null"); } catch { return null; } }
 function saveGSCData(d)  { try { localStorage.setItem(GSC_DATA_STORAGE, JSON.stringify(d)); } catch {} }
 
@@ -3603,7 +3611,12 @@ function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, s
 
 const META_STORAGE = "bb_meta_config";
 function loadMetaConfig() { try { return JSON.parse(localStorage.getItem(META_STORAGE) || "{}"); } catch { return {}; } }
-function saveMetaConfig(d) { try { localStorage.setItem(META_STORAGE, JSON.stringify(d)); } catch {} }
+function saveMetaConfig(d) {
+  try { localStorage.setItem(META_STORAGE, JSON.stringify(d)); } catch {}
+  // Also push to cloud if connected
+  const uid = window.__bbUserId;
+  if (uid && d?.connected) cloudSet("meta_config", uid, d);
+}
 
 // Converts a blob: URL (from generated images) into a publicly fetchable URL.
 // Required for Instagram, which needs a real https:// URL it can fetch server-side.
@@ -8623,7 +8636,7 @@ export default function Dashboard({ user, workspace }) {
       if (cloudCompetitors && Array.isArray(cloudCompetitors)) {
         setCompetitors(cloudCompetitors);
       }
-      // Pull social posts — scheduler may have updated them (scheduled → published)
+      // Pull social posts
       const cloudSocialPosts = await cloudGet("social_posts", userId);
       if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
         setSocialPosts(cloudSocialPosts);
@@ -8634,6 +8647,23 @@ export default function Dashboard({ user, workspace }) {
       if (cloudBrandGuide && typeof cloudBrandGuide === "object") {
         setBrandGuide(cloudBrandGuide);
         saveBrandGuide(cloudBrandGuide);
+      }
+      // Pull API keys
+      const cloudApiKeys = await cloudGet("api_keys", userId);
+      if (cloudApiKeys && typeof cloudApiKeys === "object") {
+        setApiKeys(cloudApiKeys);
+        try { localStorage.setItem(KEYS_STORAGE, JSON.stringify(cloudApiKeys)); } catch {}
+      }
+      // Pull GSC config (tokens)
+      const cloudGSC = await cloudGet("gsc_config", userId);
+      if (cloudGSC && typeof cloudGSC === "object" && cloudGSC.refreshToken) {
+        saveGSCConfig(cloudGSC);
+      }
+      // Pull Meta config
+      const cloudMeta = await cloudGet("meta_config", userId);
+      if (cloudMeta && typeof cloudMeta === "object" && cloudMeta.connected) {
+        saveMetaConfig(cloudMeta);
+        setMetaConfig(cloudMeta);
       }
       setCloudSynced(true);
     })();
@@ -8656,6 +8686,11 @@ export default function Dashboard({ user, workspace }) {
   useEffect(() => { if (cloudSynced) cloudSaveDebounced("posts", userId, posts); }, [posts, cloudSynced]);
   useEffect(() => { if (cloudSynced) cloudSaveDebounced("inspiration", userId, inspiration); }, [inspiration, cloudSynced]);
   useEffect(() => { if (cloudSynced) cloudSaveDebounced("competitors", userId, competitors); }, [competitors, cloudSynced]);
+  // Push API keys to cloud (debounced — they change when user adds a key in settings)
+  useEffect(() => { if (cloudSynced && Object.keys(apiKeys).length > 0) cloudSaveDebounced("api_keys", userId, apiKeys, 2000); }, [apiKeys, cloudSynced]);
+  // Push GSC + Meta configs whenever they change (triggered manually after connect/save)
+  const syncGSCToCloud  = (cfg)  => { if (cfg?.refreshToken) cloudSet("gsc_config",  userId, cfg);  };
+  const syncMetaToCloud = (cfg)  => { if (cfg?.connected)    cloudSet("meta_config",  userId, cfg);  };
 
   // Persist whenever data changes
   useEffect(() => { try { localStorage.setItem("bb_posts",       JSON.stringify(posts));       } catch {} }, [posts]);
