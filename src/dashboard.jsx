@@ -6264,48 +6264,16 @@ function MediaLibrary({ userId }) {
         });
       }
 
-      // Use Stability AI img2img
       const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
-      const stabilityKey = apiKeys.stability;
 
-      if (stabilityKey) {
-        // Stability AI image-to-image
-        const formData = new FormData();
-        // Convert base64 to blob
-        const byteChars = atob(base64Image);
-        const byteArr   = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
-        const imgBlob   = new Blob([byteArr], { type: "image/png" });
-        formData.append("init_image", imgBlob, "image.png");
-        formData.append("text_prompts[0][text]", restylePrompt + ", high quality, detailed");
-        formData.append("text_prompts[0][weight]", "1");
-        formData.append("text_prompts[1][text]", "blurry, low quality, distorted");
-        formData.append("text_prompts[1][weight]", "-1");
-        formData.append("image_strength", String(1 - restyleStrength));
-        formData.append("cfg_scale", "7");
-        formData.append("samples", "1");
-        formData.append("steps", "30");
-
-        const res = await fetch("https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image", {
-          method:  "POST",
-          headers: { "Authorization": `Bearer ${stabilityKey}`, "Accept": "application/json" },
-          body:    formData,
-        });
-        const data = await res.json();
-        if (!res.ok || data.message) throw new Error(data.message || `Stability error ${res.status}`);
-        const b64 = data.artifacts?.[0]?.base64;
-        if (!b64) throw new Error("No image returned from Stability AI");
-        setRestyleResult(`data:image/png;base64,${b64}`);
-
-      } else if (apiKeys.openai) {
-        // OpenAI DALL-E — generate a new image inspired by the style prompt
-        // (DALL-E 2 supports image editing with a mask; DALL-E 3 is text-only but we can describe the image)
+      if (apiKeys.openai) {
+        // OpenAI DALL-E — generate styled version
         const res = await fetch("https://api.openai.com/v1/images/generations", {
           method:  "POST",
           headers: { "Authorization": `Bearer ${apiKeys.openai}`, "Content-Type": "application/json" },
           body: JSON.stringify({
             model:   "dall-e-3",
-            prompt:  `${restylePrompt}. Recreate this type of scene: ${selected.name || "the uploaded photo"}. Fly fishing and nature lifestyle photography.`,
+            prompt:  `${restylePrompt}. Photo style for a fly fishing and whiskey lifestyle blog. High quality, professional photography.`,
             n:       1,
             size:    "1024x1024",
             quality: "standard",
@@ -6315,7 +6283,6 @@ function MediaLibrary({ userId }) {
         if (data.error) throw new Error(data.error.message);
         const imgUrl = data.data?.[0]?.url;
         if (!imgUrl) throw new Error("No image URL returned");
-        // Fetch and convert to data URL
         const imgRes  = await fetch(imgUrl);
         const imgBlob = await imgRes.blob();
         const reader  = new FileReader();
@@ -6325,8 +6292,52 @@ function MediaLibrary({ userId }) {
           reader.readAsDataURL(imgBlob);
         });
         setRestyleResult(dataUrl);
+
+      } else if (apiKeys.gemini) {
+        // Gemini image generation
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${apiKeys.gemini}`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            instances: [{ prompt: `${restylePrompt}. Fly fishing and whiskey lifestyle photography, high quality.` }],
+            parameters: { sampleCount: 1 },
+          }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        const b64 = data.predictions?.[0]?.bytesBase64Encoded;
+        if (!b64) throw new Error("No image returned from Gemini");
+        setRestyleResult(`data:image/png;base64,${b64}`);
+
+      } else if (apiKeys.stability) {
+        // Stability AI image-to-image
+        const formData = new FormData();
+        const byteChars = atob(base64Image);
+        const byteArr   = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+        const imgBlob = new Blob([byteArr], { type: "image/png" });
+        formData.append("init_image", imgBlob, "image.png");
+        formData.append("text_prompts[0][text]", restylePrompt + ", high quality");
+        formData.append("text_prompts[0][weight]", "1");
+        formData.append("text_prompts[1][text]", "blurry, low quality");
+        formData.append("text_prompts[1][weight]", "-1");
+        formData.append("image_strength", String(1 - restyleStrength));
+        formData.append("cfg_scale", "7");
+        formData.append("samples", "1");
+        formData.append("steps", "30");
+        const sRes = await fetch("https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image", {
+          method:  "POST",
+          headers: { "Authorization": `Bearer ${apiKeys.stability}`, "Accept": "application/json" },
+          body:    formData,
+        });
+        const sData = await sRes.json();
+        if (!sRes.ok) throw new Error(sData.message || `Stability error ${sRes.status}`);
+        const b64 = sData.artifacts?.[0]?.base64;
+        if (!b64) throw new Error("No image returned from Stability AI");
+        setRestyleResult(`data:image/png;base64,${b64}`);
+
       } else {
-        throw new Error("Add a Stability AI or OpenAI API key in Settings → API Keys to use AI Restyle.");
+        throw new Error("Add an OpenAI or Gemini API key in Settings → API Keys to use AI Restyle.");
       }
     } catch(e) {
       setRestyleError(e.message);
