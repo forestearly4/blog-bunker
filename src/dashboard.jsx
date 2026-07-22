@@ -440,107 +440,37 @@ async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
 
   if (!provider) {
-    throw new Error("No image provider connected. Add a Stability AI, OpenAI, or Gemini key in Settings → API Keys.");
-  }
-  if (forceProvider) {
-    const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
-    if (!apiKeys[keyMap[forceProvider]]) {
-      throw new Error(`${getImageProviderLabel(forceProvider)} key not set. Add it in Settings → API Keys.`);
-    }
+    throw new Error("No image provider connected. Add an OpenAI or Gemini key in Settings → API Keys.");
   }
 
-  if (provider === "stability") {
-    const formData = new FormData();
-    formData.append("prompt", prompt);
-    formData.append("output_format", "webp");
-    formData.append("aspect_ratio", spec.ratio);
-    const res = await fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${apiKeys["stability"]}`, "Accept": "image/*" },
-      body: formData,
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err?.message || `Stability AI error: ${res.status}`);
-    }
-    const blob = await res.blob();
-    return URL.createObjectURL(blob);
+  const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
+  const apiKey = apiKeys[keyMap[provider]];
+  if (!apiKey) {
+    throw new Error(`${getImageProviderLabel(provider)} key not set. Add it in Settings → API Keys.`);
   }
 
-  if (provider === "dalle") {
-    // gpt-image-2 is current OpenAI image model (dall-e-3 retired May 2026)
-    // gpt-image-2 returns base64 data
-    const sizeMap = { "1:1":"1024x1024", "3:2":"1536x1024", "2:3":"1024x1536", "16:9":"1536x1024" };
-    const size = sizeMap[spec.ratio] || "1024x1024";
-    const res = await fetch("https://api.openai.com/v1/images/generations", {
-      method: "POST",
-      headers: { "Content-Type":"application/json", "Authorization":`Bearer ${apiKeys["openai"]}` },
-      body: JSON.stringify({ model:"gpt-image-2", prompt, n:1, size, quality:"medium" }),
-    });
-    const data = await res.json();
-    if (data.error) throw new Error(`OpenAI image error: ${data.error.message}`);
-    // gpt-image-1 returns base64 JSON
-    const b64 = data.data?.[0]?.b64_json;
-    if (!b64) throw new Error("OpenAI returned no image data.");
-    const byteStr = atob(b64);
-    const bytes = new Uint8Array(byteStr.length);
-    for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
-    const blob = new Blob([bytes], { type:"image/png" });
-    return URL.createObjectURL(blob);
-  }
+  // Map provider name to proxy format
+  const proxyProvider = provider === "dalle" ? "openai" : provider === "gemini-image" ? "gemini" : "stability";
+  const sizeMap = { "1:1":"1024x1024", "3:2":"1536x1024", "2:3":"1024x1536", "16:9":"1536x1024" };
+  const size = sizeMap[spec.ratio] || "1024x1024";
 
-  if (provider === "gemini-image") {
-    // Gemini image generation — retry up to 3 times on overload errors
-    const GEMINI_IMAGE_MODELS = [
-      "gemini-3.1-flash-image-preview",
-      "gemini-2.5-flash-image",
-    ];
-    let lastErr = "";
-    for (const model of GEMINI_IMAGE_MODELS) {
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const res = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKeys["gemini"]}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
-                generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
-              }),
-            }
-          );
-          const data = await res.json();
-          if (data.error) {
-            const msg = data.error.message || "";
-            // On overload or rate limit, wait and retry
-            if (msg.includes("overloaded") || msg.includes("RESOURCE_EXHAUSTED") || res.status === 503 || res.status === 429) {
-              lastErr = `Gemini overloaded (attempt ${attempt}) — retrying…`;
-              await new Promise(r => setTimeout(r, 2000 * attempt));
-              continue;
-            }
-            lastErr = `Gemini Image error (${model}): ${msg}`;
-            break; // Try next model
-          }
-          const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-          if (!part?.inlineData) {
-            lastErr = `Gemini Image (${model}): no image data returned`;
-            break;
-          }
-          const byteStr = atob(part.inlineData.data);
-          const bytes = new Uint8Array(byteStr.length);
-          for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
-          const blob = new Blob([bytes], { type: part.inlineData.mimeType || "image/png" });
-          return URL.createObjectURL(blob);
-        } catch(e) {
-          lastErr = e.message;
-        }
-      }
-    }
-    throw new Error(`Gemini Image failed: ${lastErr}`);
-  }
+  // Route through Netlify function to avoid CORS
+  const res = await fetch("/api/image-generate", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: proxyProvider, prompt, apiKey, size, quality: "medium" }),
+  });
 
-  throw new Error("Unknown image provider");
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  if (!data.b64) throw new Error("No image data returned");
+
+  // Convert base64 → blob URL for display
+  const byteStr = atob(data.b64);
+  const bytes   = new Uint8Array(byteStr.length);
+  for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+  const blob = new Blob([bytes], { type: data.mimeType || "image/png" });
+  return URL.createObjectURL(blob);
 }
 
 function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", userId, style: extraStyle = {} }) {
@@ -6266,68 +6196,26 @@ function MediaLibrary({ userId }) {
 
       const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
 
-      if (apiKeys.openai) {
-        // OpenAI gpt-image-2 (dall-e-3 retired May 2026, returns b64_json)
-        const res = await fetch("https://api.openai.com/v1/images/generations", {
-          method:  "POST",
-          headers: { "Authorization": `Bearer ${apiKeys.openai}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model:           "gpt-image-2",
-            prompt:          `${restylePrompt}. Fly fishing and whiskey lifestyle photography, high quality, professional.`,
-            n:               1,
-            size:            "1024x1024",
-            response_format: "b64_json",
-          }),
-        });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error.message);
-        const b64 = data.data?.[0]?.b64_json;
-        if (!b64) throw new Error("No image data returned from OpenAI");
-        setRestyleResult(`data:image/png;base64,${b64}`);
-
-      } else if (apiKeys.gemini) {
-        // Gemini image generation
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-001:predict?key=${apiKeys.gemini}`, {
+      // Route through server-side proxy to avoid CORS
+      const callImageProxy = async (provider, extraBody = {}) => {
+        const key = provider === "openai" ? apiKeys.openai : provider === "gemini" ? apiKeys.gemini : apiKeys.stability;
+        if (!key) throw new Error(`No ${provider} API key — add it in Settings → API Keys`);
+        const res = await fetch("/api/image-generate", {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            instances: [{ prompt: `${restylePrompt}. Fly fishing and whiskey lifestyle photography, high quality.` }],
-            parameters: { sampleCount: 1 },
-          }),
+          body:    JSON.stringify({ provider, prompt: restylePrompt + ". Fly fishing and whiskey lifestyle photography, high quality, professional.", apiKey: key, ...extraBody }),
         });
         const data = await res.json();
-        if (data.error) throw new Error(data.error.message);
-        const b64 = data.predictions?.[0]?.bytesBase64Encoded;
-        if (!b64) throw new Error("No image returned from Gemini");
-        setRestyleResult(`data:image/png;base64,${b64}`);
+        if (data.error) throw new Error(data.error);
+        return `data:${data.mimeType || "image/png"};base64,${data.b64}`;
+      };
 
+      if (apiKeys.openai) {
+        setRestyleResult(await callImageProxy("openai"));
+      } else if (apiKeys.gemini) {
+        setRestyleResult(await callImageProxy("gemini"));
       } else if (apiKeys.stability) {
-        // Stability AI image-to-image
-        const formData = new FormData();
-        const byteChars = atob(base64Image);
-        const byteArr   = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
-        const imgBlob = new Blob([byteArr], { type: "image/png" });
-        formData.append("init_image", imgBlob, "image.png");
-        formData.append("text_prompts[0][text]", restylePrompt + ", high quality");
-        formData.append("text_prompts[0][weight]", "1");
-        formData.append("text_prompts[1][text]", "blurry, low quality");
-        formData.append("text_prompts[1][weight]", "-1");
-        formData.append("image_strength", String(1 - restyleStrength));
-        formData.append("cfg_scale", "7");
-        formData.append("samples", "1");
-        formData.append("steps", "30");
-        const sRes = await fetch("https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image", {
-          method:  "POST",
-          headers: { "Authorization": `Bearer ${apiKeys.stability}`, "Accept": "application/json" },
-          body:    formData,
-        });
-        const sData = await sRes.json();
-        if (!sRes.ok) throw new Error(sData.message || `Stability error ${sRes.status}`);
-        const b64 = sData.artifacts?.[0]?.base64;
-        if (!b64) throw new Error("No image returned from Stability AI");
-        setRestyleResult(`data:image/png;base64,${b64}`);
-
+        setRestyleResult(await callImageProxy("stability", { imageBase64: base64Image, strength: restyleStrength }));
       } else {
         throw new Error("Add an OpenAI or Gemini API key in Settings → API Keys to use AI Restyle.");
       }

@@ -82,6 +82,11 @@
   status = 200
 
 [[redirects]]
+  from   = "/api/image-generate"
+  to     = "/.netlify/functions/image-generate"
+  status = 200
+
+[[redirects]]
   from   = "/api/upload-image"
   to     = "/.netlify/functions/upload-image"
   status = 200
