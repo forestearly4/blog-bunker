@@ -2205,19 +2205,39 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
   const scanCompetitor = async (comp) => {
     setScanTarget(comp.name); setScanning(true); setError("");
     try {
-      const text = await callAI(
-        activeProvider, activeModel,
-        `You are a content intelligence analyst. When given a competitor blog, generate realistic recent post ideas they likely published recently based on their known style and focus. Return ONLY valid JSON array, no markdown fences: [{"title":"...","date":"...","angle":"...","opportunity":"..."}] where opportunity is how Cask & Stream could counter or complement this with their fly fishing + whiskey angle. Generate 5 recent posts. Use today's date context: May 2026.`,
-        `Competitor: ${comp.name} (${comp.url})\nKnown focus: ${comp.strengths}\nThreat level: ${comp.threat}\n\nGenerate 5 posts they likely published recently and the counter-opportunity for Cask & Stream.`,
-        apiKeys[activeProvider]
-      );
-      const posts = parseAIJson(text);
+      // Use Claude with web search to find REAL recent posts
+      const response = await fetch("/api/claude", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1500,
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          system: `You are a content intelligence analyst. Search the web to find REAL recent blog posts published by the competitor. Return ONLY a valid JSON array of actual posts you find — never make up or hallucinate posts. If you cannot find real posts, return an empty array []. Format: [{"title":"exact title","date":"YYYY-MM-DD or approximate","url":"post url if found","angle":"what angle they took","opportunity":"how Cask & Stream (fly fishing + whiskey lifestyle blog) could cover this topic differently"}]`,
+          messages: [{
+            role: "user",
+            content: `Search for the most recent blog posts published by ${comp.name} at ${comp.url}. Find their actual recent articles from the last 60 days. Return real posts only — no guesses.`,
+          }],
+        }),
+      });
+
+      const data = await response.json();
+      // Extract text from response (may include tool use blocks)
+      const textContent = (data.content || [])
+        .filter(b => b.type === "text")
+        .map(b => b.text)
+        .join("\n");
+
+      const posts = parseAIJson(textContent);
+      if (!Array.isArray(posts)) throw new Error("Could not parse scan results");
+
       const updated = {
         ...tracking,
         [comp.name]: {
-          posts,
+          posts: posts.slice(0, 8),
           scannedAt: new Date().toISOString(),
           url: comp.url,
+          realData: true,
         }
       };
       setTracking(updated);
@@ -2298,10 +2318,19 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
                 </div>
               </div>
               <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-                {data && <span style={{ fontSize:11, color:"var(--muted)" }}>Scanned {formatScanTime(data.scannedAt)}</span>}
+                {data && (
+                  <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                    {data.realData ? (
+                      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:"#5cba6c15", color:"#5cba6c", border:"1px solid #5cba6c33", fontWeight:600 }}>● Live data</span>
+                    ) : (
+                      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:"var(--red)11", color:"var(--red)", border:"1px solid var(--red)22" }}>⚠ Estimated</span>
+                    )}
+                    <span style={{ fontSize:11, color:"var(--muted)" }}>Scanned {formatScanTime(data.scannedAt)}</span>
+                  </div>
+                )}
                 <button onClick={() => scanCompetitor(comp)} disabled={scanning}
                   style={{ padding:"5px 14px", borderRadius:6, border:`1px solid ${threatColor}44`, background:"transparent", color:threatColor, fontSize:11, fontWeight:600, cursor:scanning?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5 }}>
-                  {isScanning ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Scanning</> : "↻ Scan"}
+                  {isScanning ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Searching web…</> : "↻ Scan"}
                 </button>
               </div>
             </div>
@@ -2312,7 +2341,14 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
                 {data.posts.map((post, i) => (
                   <div key={i} style={{ padding:"12px 20px", borderBottom: i < data.posts.length-1 ? "1px solid var(--border)" : "none", display:"flex", gap:12, alignItems:"flex-start" }}>
                     <div style={{ flex:1 }}>
-                      <div style={{ fontSize:13, fontWeight:600, marginBottom:3 }}>{post.title}</div>
+                      <div style={{ fontSize:13, fontWeight:600, marginBottom:3 }}>
+                        {post.url ? (
+                          <a href={post.url} target="_blank" rel="noopener" style={{ color:"var(--text)", textDecoration:"none" }}
+                            onMouseEnter={e=>e.target.style.color="var(--amber)"} onMouseLeave={e=>e.target.style.color="var(--text)"}>
+                            {post.title} ↗
+                          </a>
+                        ) : post.title}
+                      </div>
                       <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:4 }}>{post.date}</div>
                       {post.opportunity && (
                         <div style={{ fontSize:11, color:"var(--amber)", display:"flex", gap:4 }}>
@@ -2332,12 +2368,13 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
 
             {!data && !isScanning && (
               <div style={{ padding:"16px 20px", fontSize:12, color:"var(--muted)" }}>
-                Not scanned yet — click ↻ Scan to check recent posts.
+                Not scanned yet — click ↻ Scan to search for their recent posts using live web search.
               </div>
             )}
             {isScanning && (
               <div style={{ padding:"16px 20px", fontSize:12, color:"var(--muted)", display:"flex", alignItems:"center", gap:8 }}>
                 <span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>
+                Searching the web for recent posts on {comp.name}…
                 Analyzing {comp.name} with {provider.name}…
               </div>
             )}
@@ -2438,13 +2475,22 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const [error,   setError]     = useState("");
   const [success, setSuccess]   = useState("");
   const [savedAt, setSavedAt]   = useState(saved?.savedAt || null);
+  const [saveStatus, setSaveStatus] = useState(""); // "saving" | "saved" | ""
+  const autosaveTimer = useRef(null);
 
-  // Auto-save pipeline state to localStorage whenever it changes
+  // Debounced auto-save — waits 1.5s after last change before writing
   useEffect(() => {
-    if (!brief.topic && !draft.title) return; // don't save empty state
-    const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, savedAt: new Date().toISOString() };
-    savePipelineDraft(data);
-    setSavedAt(data.savedAt);
+    if (!brief.topic && !draft.title && !draft.body) return;
+    setSaveStatus("saving");
+    clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, savedAt: new Date().toISOString() };
+      savePipelineDraft(data);
+      setSavedAt(data.savedAt);
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus(""), 2500);
+    }, 1500);
+    return () => clearTimeout(autosaveTimer.current);
   }, [stage, completed, brief, draft, enhance, social.posts, schedule]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
@@ -2732,6 +2778,22 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
               <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Your Draft</h3>
               <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                {/* Autosave indicator */}
+                {saveStatus === "saving" && (
+                  <span style={{ fontSize:11, color:"var(--muted)", display:"flex", alignItems:"center", gap:4 }}>
+                    <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>Saving…
+                  </span>
+                )}
+                {saveStatus === "saved" && (
+                  <span style={{ fontSize:11, color:"#5cba6c", display:"flex", alignItems:"center", gap:4 }}>
+                    ✓ Saved
+                  </span>
+                )}
+                {!saveStatus && savedAt && (
+                  <span style={{ fontSize:11, color:"var(--muted)" }}>
+                    Saved {new Date(savedAt).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}
+                  </span>
+                )}
                 <span style={{ fontSize:11, color:"var(--muted)" }}>{draft.body.split(" ").filter(Boolean).length} words</span>
                 <button onClick={regenerateDraft} disabled={loading} style={{ padding:"5px 12px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
                   ↻ Regenerate
@@ -6312,47 +6374,78 @@ function MediaLibrary({ userId }) {
     } catch {}
   };
 
-  // Upload file to cloud — images as base64 JSON, videos as multipart
+  const [uploadProgress, setUploadProgress] = useState({}); // { fileName: 0-100 }
+
+  // Upload file directly to GCS — bypasses Netlify's 6MB body limit
   const processFile = async (file) => {
     const isVideo = file.type.startsWith("video/");
     const isImage = file.type.startsWith("image/");
     if (!isVideo && !isImage) { alert("Only image and video files are supported."); return; }
-    if (isImage && file.size > 8 * 1024 * 1024)  { alert("Image too large — max 8MB."); return; }
-    if (isVideo && file.size > 200 * 1024 * 1024) { alert("Video too large — max 200MB."); return; }
+    if (isImage && file.size > 20 * 1024 * 1024) { alert("Image too large — max 20MB."); return; }
+    if (isVideo && file.size > 500 * 1024 * 1024) { alert("Video too large — max 500MB."); return; }
 
-    if (isImage) {
-      // Images: convert to base64 and use JSON endpoint
-      const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload  = e => resolve(e.target.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      const res  = await fetch("/api/gcs-upload", {
+    const key = file.name + file.size;
+    setUploadProgress(prev => ({ ...prev, [key]: 0 }));
+
+    try {
+      // Step 1: get a resumable upload session URL from our server
+      const sessionRes = await fetch("/api/gcs-signed-url", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userId: resolvedUserId, dataUrl, name: file.name.replace(/\.[^.]+$/, ""), tags: ["upload"], source: "upload" }),
+        body:    JSON.stringify({
+          userId:   resolvedUserId,
+          fileName: file.name,
+          mimeType: file.type,
+          size:     file.size,
+          name:     file.name.replace(/\.[^.]+$/, ""),
+          tags:     isVideo ? ["video","upload"] : ["upload"],
+          source:   "upload",
+        }),
       });
-      const data = await res.json();
-      if (data.item) setItems(prev => [data.item, ...prev]);
-    } else {
-      // Videos: multipart form upload
-      const form = new FormData();
-      form.append("file",   file);
-      form.append("userId", resolvedUserId);
-      form.append("name",   file.name.replace(/\.[^.]+$/, ""));
-      form.append("tags",   JSON.stringify(["video", "upload"]));
-      form.append("source", "upload");
-      const res  = await fetch("/api/gcs-upload", { method:"POST", body: form });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      if (data.item) setItems(prev => [data.item, ...prev]);
+      const { uploadUrl, objectId, item, error: sessionErr } = await sessionRes.json();
+      if (sessionErr || !uploadUrl) throw new Error(sessionErr || "Failed to get upload URL");
+
+      // Step 2: upload directly from browser to GCS with progress tracking
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", uploadUrl);
+        xhr.setRequestHeader("Content-Type", file.type);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            setUploadProgress(prev => ({ ...prev, [key]: pct }));
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
+        };
+        xhr.onerror = () => reject(new Error("Network error during upload"));
+        xhr.send(file);
+      });
+
+      // Step 3: finalize (make public + update status)
+      await fetch("/api/gcs-finalize", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId: resolvedUserId, objectId }),
+      });
+
+      // Add to local state
+      setItems(prev => [{ ...item, status:"ready" }, ...prev.filter(i => i.id !== objectId)]);
+      setUploadProgress(prev => { const next = {...prev}; delete next[key]; return next; });
+
+    } catch(e) {
+      console.error("Upload failed:", e);
+      alert(`Upload failed: ${e.message}`);
+      setUploadProgress(prev => { const next = {...prev}; delete next[key]; return next; });
     }
   };
 
   const handleFiles = async (files) => {
     setUploading(true);
-    for (const file of Array.from(files)) await processFile(file);
+    // Upload all files in parallel
+    await Promise.all(Array.from(files).map(file => processFile(file)));
     setUploading(false);
   };
 
@@ -6403,8 +6496,25 @@ function MediaLibrary({ userId }) {
         onDrop={handleDrop}
         onClick={() => fileInput.current?.click()}
         style={{ border:`2px dashed ${dragOver?"var(--amber)":"var(--border)"}`, borderRadius:12, padding:"24px 20px", textAlign:"center", cursor:"pointer", background:dragOver?"var(--amber-glow)":"transparent", transition:"all 0.2s" }}>
-        {uploading ? (
-          <div style={{ fontSize:13, color:"var(--amber)" }}><span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>Uploading to Google Cloud…</div>
+        {uploading || Object.keys(uploadProgress).length > 0 ? (
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {Object.entries(uploadProgress).map(([name, pct]) => (
+              <div key={name}>
+                <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:4, display:"flex", justifyContent:"space-between" }}>
+                  <span>{name.length > 40 ? name.slice(0,37)+"…" : name}</span>
+                  <span style={{ color:"var(--amber)" }}>{pct}%</span>
+                </div>
+                <div style={{ height:4, borderRadius:99, background:"var(--bg-elevated)" }}>
+                  <div style={{ height:"100%", width:`${pct}%`, background:"var(--amber)", borderRadius:99, transition:"width 0.3s" }} />
+                </div>
+              </div>
+            ))}
+            {uploading && Object.keys(uploadProgress).length === 0 && (
+              <div style={{ fontSize:13, color:"var(--amber)", display:"flex", alignItems:"center", gap:8 }}>
+                <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>Preparing upload…
+              </div>
+            )}
+          </div>
         ) : (
           <>
             <div style={{ fontSize:24, marginBottom:6 }}>🖼</div>
@@ -7214,17 +7324,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
       </div>
 
       {/* Sub-tabs */}
-      <div style={{ display:"flex", gap:4 }}>
-        {TABS.map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)}
-            style={{ padding:"7px 18px", borderRadius:8, border:tab===t.id?"1px solid var(--amber)":"1px solid var(--border)", background:tab===t.id?"var(--amber-glow)":"transparent", color:tab===t.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-            <span>{t.icon}</span>{t.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Sub-tabs */}
-      <div style={{ display:"flex", gap:4 }}>
+      <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
         {TABS.map(t => (
           <button key={t.id} onClick={() => setTab(t.id)}
             style={{ padding:"7px 18px", borderRadius:8, border:tab===t.id?"1px solid var(--amber)":"1px solid var(--border)", background:tab===t.id?"var(--amber-glow)":"transparent", color:tab===t.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
@@ -8722,17 +8822,44 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
     date:     post?.date     || new Date().toISOString().split("T")[0],
   });
   const [saved,        setSaved]        = useState(false);
+  const [saveStatus,   setSaveStatus]   = useState(""); // "saving" | "saved" | ""
+  const [lastSaved,    setLastSaved]    = useState(null);
   const [wixStatus,    setWixStatus]    = useState("");
   const [wixLoading,   setWixLoading]   = useState(false);
   const [wixError,     setWixError]     = useState("");
+  const autosaveTimer = useRef(null);
+
+  // Autosave — debounced 2s after last change
+  useEffect(() => {
+    if (!form.title && !form.body) return;
+    setSaveStatus("saving");
+    clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      // Save to localStorage as a backup
+      try {
+        const key = `bb_post_autosave_${post?.id || "new"}`;
+        localStorage.setItem(key, JSON.stringify({ ...form, autosavedAt: new Date().toISOString() }));
+      } catch {}
+      // Also call onSave to persist to cloud if editing an existing post
+      if (post?.id) {
+        onSave({ ...post, ...form }, true); // true = silent (no close)
+      }
+      setLastSaved(new Date());
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus(""), 2500);
+    }, 2000);
+    return () => clearTimeout(autosaveTimer.current);
+  }, [form.title, form.body, form.category, form.status]);
 
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
 
-  const handleSave = () => {
+  const handleSave = (silent = false) => {
     if (!form.title.trim()) return;
     onSave({ ...post, ...form, id: post?.id || Date.now() });
-    setSaved(true);
-    setTimeout(() => { setSaved(false); onClose(); }, 600);
+    if (!silent) {
+      setSaved(true);
+      setTimeout(() => { setSaved(false); onClose(); }, 600);
+    }
   };
 
   const handlePublishToWix = async (asDraft = false) => {
@@ -8758,6 +8885,22 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
   return (
     <Modal title={isNew ? "New Post" : "Edit Post"} onClose={onClose} wide>
       <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        {/* Autosave indicator */}
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", height:18 }}>
+          {saveStatus === "saving" && (
+            <span style={{ fontSize:11, color:"var(--muted)", display:"flex", alignItems:"center", gap:4 }}>
+              <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>Saving…
+            </span>
+          )}
+          {saveStatus === "saved" && (
+            <span style={{ fontSize:11, color:"#5cba6c" }}>✓ Autosaved</span>
+          )}
+          {!saveStatus && lastSaved && (
+            <span style={{ fontSize:11, color:"var(--muted)" }}>
+              Last saved {lastSaved.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}
+            </span>
+          )}
+        </div>
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Title *</label>
           <input style={iS} placeholder="Post title…" value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} autoFocus />
@@ -9086,6 +9229,20 @@ export default function Dashboard({ user, workspace }) {
       setCloudSynced(true);
     })();
   }, []);
+
+  // Refresh social posts when tab becomes visible again (catches scheduler updates)
+  useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== "visible") return;
+      const cloudSocialPosts = await cloudGet("social_posts", userId);
+      if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
+        setSocialPosts(cloudSocialPosts);
+        saveSocialPostsToStorage(cloudSocialPosts);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [userId]);
 
   // Re-pull social posts from cloud whenever Marketing tab is opened
   // (catches any auto-publishes that happened while the tab was closed)
