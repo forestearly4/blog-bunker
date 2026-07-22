@@ -468,14 +468,14 @@ async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
   }
 
   if (provider === "dalle") {
-    // gpt-image-1 replaced dall-e-3 (retired March 2026)
-    // gpt-image-1 returns base64 data, not URLs
+    // gpt-image-2 is current OpenAI image model (dall-e-3 retired May 2026)
+    // gpt-image-2 returns base64 data
     const sizeMap = { "1:1":"1024x1024", "3:2":"1536x1024", "2:3":"1024x1536", "16:9":"1536x1024" };
     const size = sizeMap[spec.ratio] || "1024x1024";
     const res = await fetch("https://api.openai.com/v1/images/generations", {
       method: "POST",
       headers: { "Content-Type":"application/json", "Authorization":`Bearer ${apiKeys["openai"]}` },
-      body: JSON.stringify({ model:"gpt-image-1", prompt, n:1, size, quality:"medium" }),
+      body: JSON.stringify({ model:"gpt-image-2", prompt, n:1, size, quality:"medium" }),
     });
     const data = await res.json();
     if (data.error) throw new Error(`OpenAI image error: ${data.error.message}`);
@@ -6267,31 +6267,23 @@ function MediaLibrary({ userId }) {
       const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
 
       if (apiKeys.openai) {
-        // OpenAI DALL-E — generate styled version
+        // OpenAI gpt-image-2 (dall-e-3 retired May 2026, returns b64_json)
         const res = await fetch("https://api.openai.com/v1/images/generations", {
           method:  "POST",
           headers: { "Authorization": `Bearer ${apiKeys.openai}`, "Content-Type": "application/json" },
           body: JSON.stringify({
-            model:   "dall-e-3",
-            prompt:  `${restylePrompt}. Photo style for a fly fishing and whiskey lifestyle blog. High quality, professional photography.`,
-            n:       1,
-            size:    "1024x1024",
-            quality: "standard",
+            model:           "gpt-image-2",
+            prompt:          `${restylePrompt}. Fly fishing and whiskey lifestyle photography, high quality, professional.`,
+            n:               1,
+            size:            "1024x1024",
+            response_format: "b64_json",
           }),
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error.message);
-        const imgUrl = data.data?.[0]?.url;
-        if (!imgUrl) throw new Error("No image URL returned");
-        const imgRes  = await fetch(imgUrl);
-        const imgBlob = await imgRes.blob();
-        const reader  = new FileReader();
-        const dataUrl = await new Promise((resolve, reject) => {
-          reader.onload  = () => resolve(reader.result);
-          reader.onerror = reject;
-          reader.readAsDataURL(imgBlob);
-        });
-        setRestyleResult(dataUrl);
+        const b64 = data.data?.[0]?.b64_json;
+        if (!b64) throw new Error("No image data returned from OpenAI");
+        setRestyleResult(`data:image/png;base64,${b64}`);
 
       } else if (apiKeys.gemini) {
         // Gemini image generation
