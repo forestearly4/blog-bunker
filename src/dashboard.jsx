@@ -2205,53 +2205,32 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
   const scanCompetitor = async (comp) => {
     setScanTarget(comp.name); setScanning(true); setError("");
     try {
-      const response = await fetch("/api/claude", {
-        method: "POST",
+      const response = await fetch("/api/scan-competitor", {
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model:      "claude-sonnet-4-6",
-          max_tokens: 1500,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-          system: `You are a content analyst. Search the web for REAL recent blog posts from this competitor. Return ONLY a JSON array of posts you actually find — never invent posts. Format: [{"title":"exact title","date":"YYYY-MM-DD","url":"post url","angle":"their angle","opportunity":"how Cask & Stream fly fishing + whiskey blog could cover this differently"}]. If you find no posts, return [].`,
-          messages: [{
-            role:    "user",
-            content: `Search for recent blog posts published by ${comp.name} at ${comp.url} in the last 60 days. Return only real posts you can verify.`,
-          }],
-        }),
+        body:    JSON.stringify({ name: comp.name, url: comp.url }),
       });
-
-      // Handle non-OK HTTP response
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`API error ${response.status}: ${errText.slice(0, 100)}`);
-      }
 
       const text = await response.text();
 
-      // Parse the Anthropic response envelope
-      let envelope;
-      try { envelope = JSON.parse(text); }
-      catch { throw new Error("Invalid response from API — try again"); }
+      // Check if Netlify returned an HTML timeout/error page
+      if (text.trimStart().startsWith("<")) {
+        throw new Error(`Server timeout — try again in a moment (${response.status})`);
+      }
 
-      if (envelope.error) throw new Error(envelope.error.message || JSON.stringify(envelope.error));
+      let data;
+      try { data = JSON.parse(text); }
+      catch { throw new Error("Invalid response from server — try again"); }
 
-      // Extract text content from all content blocks
-      const fullText = (envelope.content || [])
-        .filter(b => b.type === "text")
-        .map(b => b.text)
-        .join("\n");
+      if (data.error) throw new Error(data.error);
 
-      if (!fullText) throw new Error("No text response from AI — web search may have failed");
-
-      // Parse JSON from the text (might be wrapped in prose)
-      const posts = parseAIJson(fullText);
-      if (!Array.isArray(posts)) throw new Error("Could not parse post list from response");
+      const posts = Array.isArray(data.posts) ? data.posts : [];
 
       const updated = {
         ...tracking,
         [comp.name]: {
           posts:     posts.slice(0, 8),
-          scannedAt: new Date().toISOString(),
+          scannedAt: data.scannedAt || new Date().toISOString(),
           url:       comp.url,
           realData:  true,
         },

@@ -92,6 +92,21 @@
   status = 200
 
 [[redirects]]
+  from   = "/api/gcs-signed-url"
+  to     = "/.netlify/functions/gcs-signed-url"
+  status = 200
+
+[[redirects]]
+  from   = "/api/gcs-finalize"
+  to     = "/.netlify/functions/gcs-finalize"
+  status = 200
+
+[[redirects]]
+  from   = "/api/scan-competitor"
+  to     = "/.netlify/functions/scan-competitor"
+  status = 200
+
+[[redirects]]
   from   = "/api/upload-image"
   to     = "/.netlify/functions/upload-image"
   status = 200
