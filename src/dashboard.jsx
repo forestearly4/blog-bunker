@@ -6220,9 +6220,145 @@ function MediaLibrary({ userId }) {
   const [search,    setSearch]    = useState("");
   const [copied,    setCopied]    = useState("");
   const [dragOver,  setDragOver]  = useState(false);
+  // AI restyle state
+  const [restylePrompt,  setRestylePrompt]  = useState("");
+  const [restyleLoading, setRestyleLoading] = useState(false);
+  const [restyleResult,  setRestyleResult]  = useState(null);
+  const [restyleError,   setRestyleError]   = useState("");
+  const [restyleOpen,    setRestyleOpen]    = useState(false);
+  const [restyleStrength,setRestyleStrength]= useState(0.65); // 0=keep original, 1=full restyle
   const fileInput = useRef(null);
 
   const TAGS = ["blog headline","instagram","facebook","pinterest","tiktok","brand","product","landscape","portrait","other"];
+
+  const STYLE_PRESETS = [
+    { label:"Cinematic",      prompt:"cinematic photography, golden hour lighting, professional color grading, shallow depth of field, film grain" },
+    { label:"Magazine",       prompt:"professional magazine editorial photography, crisp lighting, vibrant colors, sharp focus" },
+    { label:"Oil Painting",   prompt:"oil painting, impressionist brushstrokes, rich textures, painterly style" },
+    { label:"Watercolor",     prompt:"watercolor illustration, soft washes, delicate strokes, artistic" },
+    { label:"Moody",          prompt:"moody atmospheric photography, dark tones, dramatic shadows, misty, noir style" },
+    { label:"Golden Hour",    prompt:"golden hour photography, warm sunlight, glowing atmosphere, sun rays, bokeh" },
+    { label:"Foggy Morning",  prompt:"misty morning fog over water, atmospheric haze, soft diffused light, serene" },
+    { label:"Vintage Film",   prompt:"vintage film photography, faded colors, grain, light leaks, 35mm aesthetic" },
+  ];
+
+  const runRestyle = async () => {
+    if (!selected || !restylePrompt.trim()) return;
+    setRestyleLoading(true); setRestyleError(""); setRestyleResult(null);
+    try {
+      // Get the image as base64
+      const imageUrl = selected.url || selected.dataUrl;
+      let base64Image;
+
+      if (imageUrl.startsWith("data:")) {
+        base64Image = imageUrl.split(",")[1];
+      } else {
+        // Fetch from GCS URL
+        const res  = await fetch(imageUrl);
+        const blob = await res.blob();
+        const reader = new FileReader();
+        base64Image = await new Promise((resolve, reject) => {
+          reader.onload  = () => resolve(reader.result.split(",")[1]);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+
+      // Use Stability AI img2img
+      const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
+      const stabilityKey = apiKeys.stability;
+
+      if (stabilityKey) {
+        // Stability AI image-to-image
+        const formData = new FormData();
+        // Convert base64 to blob
+        const byteChars = atob(base64Image);
+        const byteArr   = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+        const imgBlob   = new Blob([byteArr], { type: "image/png" });
+        formData.append("init_image", imgBlob, "image.png");
+        formData.append("text_prompts[0][text]", restylePrompt + ", high quality, detailed");
+        formData.append("text_prompts[0][weight]", "1");
+        formData.append("text_prompts[1][text]", "blurry, low quality, distorted");
+        formData.append("text_prompts[1][weight]", "-1");
+        formData.append("image_strength", String(1 - restyleStrength));
+        formData.append("cfg_scale", "7");
+        formData.append("samples", "1");
+        formData.append("steps", "30");
+
+        const res = await fetch("https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image", {
+          method:  "POST",
+          headers: { "Authorization": `Bearer ${stabilityKey}`, "Accept": "application/json" },
+          body:    formData,
+        });
+        const data = await res.json();
+        if (!res.ok || data.message) throw new Error(data.message || `Stability error ${res.status}`);
+        const b64 = data.artifacts?.[0]?.base64;
+        if (!b64) throw new Error("No image returned from Stability AI");
+        setRestyleResult(`data:image/png;base64,${b64}`);
+
+      } else if (apiKeys.openai) {
+        // OpenAI DALL-E — generate a new image inspired by the style prompt
+        // (DALL-E 2 supports image editing with a mask; DALL-E 3 is text-only but we can describe the image)
+        const res = await fetch("https://api.openai.com/v1/images/generations", {
+          method:  "POST",
+          headers: { "Authorization": `Bearer ${apiKeys.openai}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model:   "dall-e-3",
+            prompt:  `${restylePrompt}. Recreate this type of scene: ${selected.name || "the uploaded photo"}. Fly fishing and nature lifestyle photography.`,
+            n:       1,
+            size:    "1024x1024",
+            quality: "standard",
+          }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        const imgUrl = data.data?.[0]?.url;
+        if (!imgUrl) throw new Error("No image URL returned");
+        // Fetch and convert to data URL
+        const imgRes  = await fetch(imgUrl);
+        const imgBlob = await imgRes.blob();
+        const reader  = new FileReader();
+        const dataUrl = await new Promise((resolve, reject) => {
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(imgBlob);
+        });
+        setRestyleResult(dataUrl);
+      } else {
+        throw new Error("Add a Stability AI or OpenAI API key in Settings → API Keys to use AI Restyle.");
+      }
+    } catch(e) {
+      setRestyleError(e.message);
+    }
+    setRestyleLoading(false);
+  };
+
+  const saveRestyleResult = async () => {
+    if (!restyleResult) return;
+    try {
+      const res = await fetch("/api/gcs", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId:  resolvedUserId,
+          dataUrl: restyleResult,
+          name:    `${selected?.name || "image"}-restyled`,
+          tags:    ["restyled", "generated"],
+          notes:   `Restyled from "${selected?.name}" · Prompt: ${restylePrompt.slice(0,80)}`,
+          source:  "restyled",
+        }),
+      });
+      const data = await res.json();
+      if (data.item) {
+        setItems(prev => [data.item, ...prev]);
+        setRestyleResult(null);
+        setRestyleOpen(false);
+        setRestylePrompt("");
+        setSelected(data.item);
+      }
+    } catch(e) { setRestyleError(e.message); }
+  };
 
   // Load from cloud on mount
   const fetchItems = async () => {
@@ -6411,48 +6547,142 @@ function MediaLibrary({ userId }) {
           )}
 
           {selected && (
-            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20, display:"grid", gridTemplateColumns:"220px 1fr", gap:20 }}>
-              <img src={selected.url || selected.dataUrl} alt={selected.name} style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", objectFit:"contain", maxHeight:200 }} />
-              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Name</label>
-                  <input value={selected.name || ""} onChange={e=>updateItem(selected.id,{name:e.target.value})}
-                    style={iS} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
-                </div>
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Tags</label>
-                  <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
-                    {TAGS.map(tag => {
-                      const has = selected.tags?.includes(tag);
-                      return (
-                        <button key={tag} onClick={() => { const next = has ? selected.tags.filter(t=>t!==tag) : [...(selected.tags||[]),tag]; updateItem(selected.id,{tags:next}); }}
-                          style={{ padding:"3px 10px", borderRadius:99, border:has?"1px solid var(--amber)":"1px solid var(--border)", background:has?"var(--amber-glow)":"transparent", color:has?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                          {tag}
-                        </button>
-                      );
-                    })}
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:16 }}>
+              {/* Top: image + metadata */}
+              <div style={{ display:"grid", gridTemplateColumns:"220px 1fr", gap:20 }}>
+                <img src={selected.url || selected.dataUrl} alt={selected.name} style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", objectFit:"contain", maxHeight:200 }} />
+                <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Name</label>
+                    <input value={selected.name || ""} onChange={e=>updateItem(selected.id,{name:e.target.value})}
+                      style={iS} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                  </div>
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Tags</label>
+                    <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+                      {TAGS.map(tag => {
+                        const has = selected.tags?.includes(tag);
+                        return (
+                          <button key={tag} onClick={() => { const next = has ? selected.tags.filter(t=>t!==tag) : [...(selected.tags||[]),tag]; updateItem(selected.id,{tags:next}); }}
+                            style={{ padding:"3px 10px", borderRadius:99, border:has?"1px solid var(--amber)":"1px solid var(--border)", background:has?"var(--amber-glow)":"transparent", color:has?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            {tag}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Notes</label>
+                    <textarea value={selected.notes||""} onChange={e=>updateItem(selected.id,{notes:e.target.value})}
+                      rows={2} style={{ ...iS, resize:"none", lineHeight:1.5, fontSize:12 }} placeholder="e.g. Used for Spring Hatch post…" />
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--muted)", display:"flex", gap:12, flexWrap:"wrap" }}>
+                    {selected.type && <span>📐 {selected.type.split("/")[1]?.toUpperCase()}</span>}
+                    {selected.size && <span>💾 {formatSize(selected.size)}</span>}
+                    <span>🗓 {new Date(selected.createdAt).toLocaleDateString()}</span>
+                    <span style={{ textTransform:"capitalize" }}>📥 {selected.source}</span>
+                  </div>
+                  <div style={{ display:"flex", gap:8 }}>
+                    <button onClick={() => copyUrl(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"none", background:copied===selected.id?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      {copied===selected.id ? "✓ Copied!" : "⎘ Copy URL"}
+                    </button>
+                    <button onClick={() => download(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      ↓ Download
+                    </button>
+                    <button onClick={() => { setRestyleOpen(o=>!o); setRestyleResult(null); setRestyleError(""); }}
+                      style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${restyleOpen?"var(--amber)":"var(--border)"}`, background:restyleOpen?"var(--amber-glow)":"transparent", color:restyleOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:restyleOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                      ✦ AI Restyle
+                    </button>
                   </div>
                 </div>
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Notes</label>
-                  <textarea value={selected.notes||""} onChange={e=>updateItem(selected.id,{notes:e.target.value})}
-                    rows={2} style={{ ...iS, resize:"none", lineHeight:1.5, fontSize:12 }} placeholder="e.g. Used for Spring Hatch post…" />
-                </div>
-                <div style={{ fontSize:11, color:"var(--muted)", display:"flex", gap:12, flexWrap:"wrap" }}>
-                  {selected.type && <span>📐 {selected.type.split("/")[1]?.toUpperCase()}</span>}
-                  {selected.size && <span>💾 {formatSize(selected.size)}</span>}
-                  <span>🗓 {new Date(selected.createdAt).toLocaleDateString()}</span>
-                  <span style={{ textTransform:"capitalize" }}>📥 {selected.source}</span>
-                </div>
-                <div style={{ display:"flex", gap:8 }}>
-                  <button onClick={() => copyUrl(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"none", background:copied===selected.id?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                    {copied===selected.id ? "✓ Copied!" : "⎘ Copy Image URL"}
-                  </button>
-                  <button onClick={() => download(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                    ↓ Download
-                  </button>
-                </div>
               </div>
+
+              {/* AI Restyle Panel */}
+              {restyleOpen && (
+                <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✦ AI Restyle</span>
+                    <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Transform your photo while keeping its composition</span>
+                  </div>
+
+                  {/* Style presets */}
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Quick Styles</label>
+                    <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                      {STYLE_PRESETS.map(p => (
+                        <button key={p.label} onClick={() => setRestylePrompt(p.prompt)}
+                          style={{ padding:"5px 12px", borderRadius:99, border:restylePrompt===p.prompt?"1px solid var(--amber)":"1px solid var(--border)", background:restylePrompt===p.prompt?"var(--amber-glow)":"transparent", color:restylePrompt===p.prompt?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:restylePrompt===p.prompt?600:400 }}>
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Custom prompt */}
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Style Prompt</label>
+                    <textarea value={restylePrompt} onChange={e=>setRestylePrompt(e.target.value)} rows={2}
+                      placeholder="e.g. cinematic golden hour, oil painting style, professional magazine photo, misty morning fog…"
+                      style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
+                  </div>
+
+                  {/* Restyle strength (Stability only) */}
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+                      Restyle Strength — {Math.round(restyleStrength * 100)}%
+                      <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0, color:"var(--muted)", marginLeft:8 }}>
+                        (lower = closer to original · Stability AI only)
+                      </span>
+                    </label>
+                    <input type="range" min={0.2} max={0.9} step={0.05} value={restyleStrength}
+                      onChange={e => setRestyleStrength(Number(e.target.value))}
+                      style={{ width:"100%", accentColor:"var(--amber)" }} />
+                    <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"var(--muted)", marginTop:3 }}>
+                      <span>Subtle (keep original)</span>
+                      <span>Strong (full restyle)</span>
+                    </div>
+                  </div>
+
+                  {restyleError && (
+                    <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{restyleError}</div>
+                  )}
+
+                  {/* Result */}
+                  {restyleResult ? (
+                    <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                        <div>
+                          <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Original</div>
+                          <img src={selected.url || selected.dataUrl} alt="Original" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize:10, fontWeight:700, color:"var(--amber)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>✦ Restyled</div>
+                          <img src={restyleResult} alt="Restyled" style={{ width:"100%", borderRadius:8, border:"1px solid var(--amber)44" }} />
+                        </div>
+                      </div>
+                      <div style={{ display:"flex", gap:8 }}>
+                        <button onClick={saveRestyleResult}
+                          style={{ padding:"8px 20px", borderRadius:8, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                          ✓ Save to Library
+                        </button>
+                        <button onClick={() => { const a=document.createElement("a"); a.href=restyleResult; a.download=`${selected?.name||"image"}-restyled.png`; a.click(); }}
+                          style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                          ↓ Download
+                        </button>
+                        <button onClick={() => { setRestyleResult(null); runRestyle(); }}
+                          style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                          ↻ Try again
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button onClick={runRestyle} disabled={restyleLoading || !restylePrompt.trim()}
+                      style={{ padding:"10px 24px", borderRadius:8, border:"none", background:restyleLoading||!restylePrompt.trim()?"var(--bg-elevated)":"var(--amber)", color:restyleLoading||!restylePrompt.trim()?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:restyleLoading||!restylePrompt.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
+                      {restyleLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Restyling…</> : "✦ Generate Restyle"}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </>
