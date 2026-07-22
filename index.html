@@ -16,18 +16,15 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <style>
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-      html, body, #root { height: 100%; }
+      html, body { height: 100%; }
+      #root { min-height: 100%; }
       body {
         background: #0e0f11;
         color: #e8e6e1;
         font-family: system-ui, sans-serif;
         -webkit-font-smoothing: antialiased;
-        /* Safe area insets for notched phones */
-        padding-env: safe-area-inset-top safe-area-inset-right safe-area-inset-bottom safe-area-inset-left;
+        overflow-x: hidden;
       }
-      /* Prevent iOS bounce scroll */
-      html { overflow: hidden; height: 100%; }
-      body { overflow: auto; height: 100%; }
     </style>
   </head>
   <body>
@@ -36,9 +33,7 @@
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js')
-            .then(reg => console.log('SW registered:', reg.scope))
-            .catch(err => console.log('SW failed:', err));
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
         });
       }
     </script>
