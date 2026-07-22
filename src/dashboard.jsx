@@ -2205,43 +2205,60 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
   const scanCompetitor = async (comp) => {
     setScanTarget(comp.name); setScanning(true); setError("");
     try {
-      // Use Claude with web search to find REAL recent posts
       const response = await fetch("/api/claude", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
+          model:      "claude-sonnet-4-6",
           max_tokens: 1500,
           tools: [{ type: "web_search_20250305", name: "web_search" }],
-          system: `You are a content intelligence analyst. Search the web to find REAL recent blog posts published by the competitor. Return ONLY a valid JSON array of actual posts you find — never make up or hallucinate posts. If you cannot find real posts, return an empty array []. Format: [{"title":"exact title","date":"YYYY-MM-DD or approximate","url":"post url if found","angle":"what angle they took","opportunity":"how Cask & Stream (fly fishing + whiskey lifestyle blog) could cover this topic differently"}]`,
+          system: `You are a content analyst. Search the web for REAL recent blog posts from this competitor. Return ONLY a JSON array of posts you actually find — never invent posts. Format: [{"title":"exact title","date":"YYYY-MM-DD","url":"post url","angle":"their angle","opportunity":"how Cask & Stream fly fishing + whiskey blog could cover this differently"}]. If you find no posts, return [].`,
           messages: [{
-            role: "user",
-            content: `Search for the most recent blog posts published by ${comp.name} at ${comp.url}. Find their actual recent articles from the last 60 days. Return real posts only — no guesses.`,
+            role:    "user",
+            content: `Search for recent blog posts published by ${comp.name} at ${comp.url} in the last 60 days. Return only real posts you can verify.`,
           }],
         }),
       });
 
-      const data = await response.json();
-      // Extract text from response (may include tool use blocks)
-      const textContent = (data.content || [])
+      // Handle non-OK HTTP response
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`API error ${response.status}: ${errText.slice(0, 100)}`);
+      }
+
+      const text = await response.text();
+
+      // Parse the Anthropic response envelope
+      let envelope;
+      try { envelope = JSON.parse(text); }
+      catch { throw new Error("Invalid response from API — try again"); }
+
+      if (envelope.error) throw new Error(envelope.error.message || JSON.stringify(envelope.error));
+
+      // Extract text content from all content blocks
+      const fullText = (envelope.content || [])
         .filter(b => b.type === "text")
         .map(b => b.text)
         .join("\n");
 
-      const posts = parseAIJson(textContent);
-      if (!Array.isArray(posts)) throw new Error("Could not parse scan results");
+      if (!fullText) throw new Error("No text response from AI — web search may have failed");
+
+      // Parse JSON from the text (might be wrapped in prose)
+      const posts = parseAIJson(fullText);
+      if (!Array.isArray(posts)) throw new Error("Could not parse post list from response");
 
       const updated = {
         ...tracking,
         [comp.name]: {
-          posts: posts.slice(0, 8),
+          posts:     posts.slice(0, 8),
           scannedAt: new Date().toISOString(),
-          url: comp.url,
-          realData: true,
-        }
+          url:       comp.url,
+          realData:  true,
+        },
       };
       setTracking(updated);
       saveTrackerData(updated);
+
     } catch(e) {
       setError(`Scan failed for ${comp.name}: ${e.message}`);
     }
