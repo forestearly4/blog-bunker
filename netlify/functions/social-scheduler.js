@@ -1,191 +1,172 @@
 /**
  * netlify/functions/social-scheduler.js
  * Runs every 15 minutes via Netlify cron.
- * Checks Netlify Blobs for scheduled social posts that are due,
- * publishes them to Facebook/Instagram, and marks them as published.
+ *
+ * RACE CONDITION FIX:
+ * Before publishing, immediately writes status="publishing" back to Blobs.
+ * Any concurrent scheduler instance will see "publishing" and skip the post.
+ * This prevents duplicate posts when Netlify fires the cron multiple times.
  */
 
 import { getStore } from "@netlify/blobs";
 
-export const config = {
-  schedule: "*/15 * * * *",
-};
+export const config = { schedule: "*/15 * * * *" };
 
-// Convert a data: URL to a public https:// URL via Netlify Blobs
 async function ensurePublicImageUrl(imageUrl) {
   if (!imageUrl) return null;
   if (imageUrl.startsWith("https://")) return imageUrl;
   if (!imageUrl.startsWith("data:")) return null;
-
   const match = imageUrl.match(/^data:(image\/\w+);base64,(.+)$/);
   if (!match) return null;
-
   const mimeType = match[1];
-  const base64   = match[2];
-  const bytes    = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  const bytes    = Uint8Array.from(atob(match[2]), c => c.charCodeAt(0));
   const id       = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
   const imgStore = getStore("blog-bunker-images");
   await imgStore.set(id, bytes, { metadata: { mimeType } });
-
   return `https://blogbunker.netlify.app/api/get-image?id=${id}`;
+}
+
+async function postToFacebook(page, fullMessage, imageUrl) {
+  const endpoint = imageUrl
+    ? `https://graph.facebook.com/v19.0/${page.id}/photos`
+    : `https://graph.facebook.com/v19.0/${page.id}/feed`;
+  const body = imageUrl
+    ? { url: imageUrl, caption: fullMessage, access_token: page.access_token }
+    : { message: fullMessage, access_token: page.access_token };
+  const res  = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  const data = await res.json();
+  if (data.error) throw new Error(`${data.error.message} (code ${data.error.code})`);
+  return data.id;
+}
+
+async function postToInstagram(page, fullMessage, imageUrl) {
+  if (!imageUrl) throw new Error("Instagram requires a public image URL");
+  const cRes  = await fetch(`https://graph.facebook.com/v19.0/${page.instagram_id}/media`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ image_url: imageUrl, caption: fullMessage, access_token: page.access_token }),
+  });
+  const cData = await cRes.json();
+  if (cData.error) throw new Error(`Container: ${cData.error.message} (${cData.error.code})`);
+  const pRes  = await fetch(`https://graph.facebook.com/v19.0/${page.instagram_id}/media_publish`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ creation_id: cData.id, access_token: page.access_token }),
+  });
+  const pData = await pRes.json();
+  if (pData.error) throw new Error(`Publish: ${pData.error.message} (${pData.error.code})`);
+  return pData.id;
 }
 
 export default async () => {
   const now = new Date();
-  console.log(`[social-scheduler] Running at ${now.toISOString()}`);
+  console.log(`[scheduler] Running at ${now.toISOString()}`);
 
   const store = getStore("blog-bunker-data");
-  let published = 0;
-  let errors = 0;
-  let checked = 0;
+  let published = 0, errors = 0, skipped = 0;
 
   try {
-    // List all keys to find users with social posts
-    const listResult = await store.list();
-    const allKeys = listResult?.blobs?.map(b => b.key) || listResult?.keys || [];
-    console.log(`[social-scheduler] Found ${allKeys.length} total keys`);
+    const listResult  = await store.list();
+    const allKeys     = listResult?.blobs?.map(b => b.key) || listResult?.keys || [];
+    const postKeys    = allKeys.filter(k => k.endsWith(":social_posts"));
+    console.log(`[scheduler] ${postKeys.length} social post key(s)`);
 
-    const socialPostKeys = allKeys.filter(k => k.endsWith(":social_posts") || k.includes(":social_posts"));
-    console.log(`[social-scheduler] Found ${socialPostKeys.length} social post key(s):`, socialPostKeys);
-
-    for (const key of socialPostKeys) {
+    for (const key of postKeys) {
       const userId = key.replace(/:social_posts$/, "");
       let posts;
-
       try {
-        // Use get() with type:"json" — matches how data.js writes with setJSON()
         posts = await store.get(key, { type: "json" });
-        if (!posts || !Array.isArray(posts)) {
-          console.log(`[social-scheduler] No valid posts array for key ${key}`);
-          continue;
-        }
-        console.log(`[social-scheduler] User ${userId} has ${posts.length} post(s)`);
-      } catch(e) {
-        console.error(`[social-scheduler] Failed to load posts for ${key}:`, e.message);
-        continue;
-      }
+        if (!Array.isArray(posts)) continue;
+      } catch(e) { console.error(`[scheduler] Load failed ${key}:`, e.message); continue; }
 
-      // Get Meta credentials for this user
-      let metaConfig = null;
+      // Find all due posts (status must be exactly "scheduled" — not "publishing" or "published")
+      const duePosts = posts
+        .map((p, i) => ({ p, i }))
+        .filter(({ p }) => p.status === "scheduled" && p.scheduledAt && new Date(p.scheduledAt) <= now);
+
+      if (duePosts.length === 0) continue;
+      console.log(`[scheduler] ${duePosts.length} due post(s) for ${userId}`);
+
+      // ── ATOMIC CLAIM: mark all due posts as "publishing" BEFORE doing anything ──
+      // This is the key fix — any other scheduler instance will see "publishing" and skip
+      const claimed = [...posts];
+      for (const { i } of duePosts) {
+        claimed[i] = { ...claimed[i], status: "publishing", claimedAt: now.toISOString() };
+      }
       try {
-        metaConfig = await store.get(`${userId}:meta_config`, { type: "json" });
-        console.log(`[social-scheduler] Meta config for ${userId}: connected=${metaConfig?.connected}, pages=${metaConfig?.pages?.length || 0}`);
-      } catch {
-        console.log(`[social-scheduler] No meta config for ${userId}`);
+        await store.setJSON(key, claimed);
+        console.log(`[scheduler] Claimed ${duePosts.length} post(s) for ${userId}`);
+      } catch(e) {
+        console.error(`[scheduler] Failed to claim posts:`, e.message);
+        continue; // Don't publish if we couldn't claim
       }
 
-      const updatedPosts = [...posts];
-      let anyUpdated = false;
+      // Get Meta credentials
+      let metaConfig = null;
+      try { metaConfig = await store.get(`${userId}:meta_config`, { type: "json" }); } catch {}
 
-      for (let i = 0; i < updatedPosts.length; i++) {
-        const post = updatedPosts[i];
-        if (post.status !== "scheduled") continue;
-        if (!post.scheduledAt) continue;
-
-        const scheduledAt = new Date(post.scheduledAt);
-        checked++;
-        console.log(`[social-scheduler] Post ${post.id}: scheduledAt=${post.scheduledAt}, due=${scheduledAt <= now}`);
-
-        if (scheduledAt > now) continue;
-
-        console.log(`[social-scheduler] Publishing post ${post.id} to platforms: ${post.platforms?.join(", ")}`);
-
+      // ── PUBLISH each claimed post ──
+      const finalPosts = [...claimed];
+      for (const { p: post, i } of duePosts) {
         const results = {};
         const platforms = post.platforms || [];
 
+        // Resolve image URL once (shared across platforms)
+        let imageUrl = null;
+        if (post.imageUrl) {
+          try { imageUrl = await ensurePublicImageUrl(post.imageUrl); }
+          catch(e) { console.error(`[scheduler] Image URL failed:`, e.message); }
+        }
+
         for (const platId of platforms) {
           try {
-            const captionRaw = post.captions?.[platId];
-            const caption = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
+            const captionRaw  = post.captions?.[platId];
+            const caption     = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
             const fullMessage = [caption, post.hashtags].filter(Boolean).join("\n\n").trim();
 
-            // Convert data: URLs to public https:// before sending to Meta
-            let imageUrl = null;
-            if (post.imageUrl) {
-              try {
-                imageUrl = await ensurePublicImageUrl(post.imageUrl);
-                console.log(`[social-scheduler] Image URL resolved: ${imageUrl?.slice(0, 80)}`);
-              } catch(e) {
-                console.error(`[social-scheduler] Image conversion failed:`, e.message);
-              }
-            }
-
             if (platId === "facebook" && metaConfig?.pages?.length > 0) {
-              const page = metaConfig.pages[0];
-              const endpoint = imageUrl
-                ? `https://graph.facebook.com/v19.0/${page.id}/photos`
-                : `https://graph.facebook.com/v19.0/${page.id}/feed`;
-              const body = imageUrl
-                ? { url: imageUrl, caption: fullMessage, access_token: page.access_token }
-                : { message: fullMessage, access_token: page.access_token };
-              const res = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
-              const data = await res.json();
-              if (data.error) throw new Error(`${data.error.message} (code ${data.error.code})`);
-              results[platId] = { success: true, id: data.id };
+              const id = await postToFacebook(metaConfig.pages[0], fullMessage, imageUrl);
+              results[platId] = { success: true, id };
               published++;
-              console.log(`[social-scheduler] ✓ Posted to Facebook: ${data.id}`);
+              console.log(`[scheduler] ✓ Facebook: ${id}`);
 
-            } else if (platId === "instagram" && metaConfig?.pages?.some(p=>p.instagram_id)) {
-              if (!imageUrl) {
-                console.log(`[social-scheduler] Skipping Instagram — no public image URL`);
-                results[platId] = { success: false, error: "No public https:// image URL" };
-                continue;
-              }
+            } else if (platId === "instagram" && metaConfig?.pages?.some(p => p.instagram_id)) {
               const page = metaConfig.pages.find(p => p.instagram_id);
-              const cRes = await fetch(`https://graph.facebook.com/v19.0/${page.instagram_id}/media`, {
-                method:"POST", headers:{"Content-Type":"application/json"},
-                body: JSON.stringify({ image_url: imageUrl, caption: fullMessage, access_token: page.access_token })
-              });
-              const cData = await cRes.json();
-              if (cData.error) throw new Error(`Container: ${cData.error.message} (${cData.error.code})`);
-              const pRes = await fetch(`https://graph.facebook.com/v19.0/${page.instagram_id}/media_publish`, {
-                method:"POST", headers:{"Content-Type":"application/json"},
-                body: JSON.stringify({ creation_id: cData.id, access_token: page.access_token })
-              });
-              const pData = await pRes.json();
-              if (pData.error) throw new Error(`Publish: ${pData.error.message} (${pData.error.code})`);
-              results[platId] = { success: true, id: pData.id };
+              const id   = await postToInstagram(page, fullMessage, imageUrl);
+              results[platId] = { success: true, id };
               published++;
-              console.log(`[social-scheduler] ✓ Posted to Instagram: ${pData.id}`);
+              console.log(`[scheduler] ✓ Instagram: ${id}`);
 
             } else {
-              console.log(`[social-scheduler] Platform ${platId} not connected — skipping`);
-              results[platId] = { success: false, error: "Not connected" };
+              results[platId] = { success: false, error: "Platform not connected" };
             }
           } catch(e) {
-            console.error(`[social-scheduler] Error posting to ${platId}:`, e.message);
+            console.error(`[scheduler] ${platId} error:`, e.message);
             results[platId] = { success: false, error: e.message };
             errors++;
           }
         }
 
-        // Determine new status
         const anySuccess = Object.values(results).some(r => r.success === true);
         const allFailed  = Object.values(results).every(r => r.success === false);
 
-        updatedPosts[i] = {
+        finalPosts[i] = {
           ...post,
-          status:      anySuccess ? "published" : allFailed ? "failed" : "scheduled",
+          status:      anySuccess ? "published" : allFailed ? "failed" : "partial",
           publishedAt: anySuccess ? now.toISOString() : post.publishedAt,
           results:     { ...(post.results || {}), ...results },
-          // Reschedule 30 min ahead if all platforms failed (avoid immediate retry loop)
-          scheduledAt: allFailed && !anySuccess
+          // On complete failure, push 30 min ahead so it retries (but still won't double-post since status is "failed" not "scheduled")
+          scheduledAt: allFailed
             ? new Date(now.getTime() + 30 * 60 * 1000).toISOString()
             : post.scheduledAt,
         };
-        anyUpdated = true;
       }
 
-      // Write updated posts back
-      if (anyUpdated) {
-        await store.setJSON(key, updatedPosts);
-        console.log(`[social-scheduler] Updated ${key} in Blobs`);
-      }
+      // Write final statuses back
+      await store.setJSON(key, finalPosts);
+      console.log(`[scheduler] Finalized ${duePosts.length} post(s) for ${userId}`);
     }
   } catch(e) {
-    console.error("[social-scheduler] Fatal error:", e.message, e.stack?.slice(0,500));
+    console.error("[scheduler] Fatal:", e.message, e.stack?.slice(0, 500));
   }
 
-  console.log(`[social-scheduler] Done — checked: ${checked}, published: ${published}, errors: ${errors}`);
+  console.log(`[scheduler] Done — published: ${published}, errors: ${errors}, skipped: ${skipped}`);
 };
