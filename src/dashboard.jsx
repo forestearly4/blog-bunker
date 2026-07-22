@@ -3754,6 +3754,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
     { id:"pipeline",   label:"Social Pipeline",  icon:"◈", highlight:true },
     { id:"scheduled",  label:"Social Posts",      icon:"▤", badge: socialPosts.length || null },
     { id:"media",      label:"Media Library",     icon:"🖼" },
+    { id:"video",      label:"Video Planning",    icon:"🎬" },
     { id:"create",     label:"Quick Post",        icon:"✎" },
     { id:"email",      label:"Email",             icon:"✉" },
     { id:"pinterest",  label:"Pinterest",         icon:"📌" },
@@ -3787,6 +3788,17 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           </button>
         ))}
       </div>
+
+      {/* ── VIDEO PLANNING ── */}
+      {tab === "video" && (
+        <VideoPlanningStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          userId={userId}
+        />
+      )}
 
       {/* ── MEDIA LIBRARY ── */}
       {tab === "media" && (
@@ -6300,23 +6312,42 @@ function MediaLibrary({ userId }) {
     } catch {}
   };
 
-  // Upload file to cloud
+  // Upload file to cloud — images as base64 JSON, videos as multipart
   const processFile = async (file) => {
-    if (!file.type.startsWith("image/")) { alert("Only image files are supported."); return; }
-    if (file.size > 8 * 1024 * 1024) { alert("File too large — max 8MB."); return; }
-    const dataUrl = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload  = e => resolve(e.target.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-    const res = await fetch("/api/gcs", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ userId: resolvedUserId, dataUrl, name: file.name.replace(/\.[^.]+$/, ""), tags: ["upload"], source: "upload" }),
-    });
-    const data = await res.json();
-    if (data.item) setItems(prev => [data.item, ...prev]);
+    const isVideo = file.type.startsWith("video/");
+    const isImage = file.type.startsWith("image/");
+    if (!isVideo && !isImage) { alert("Only image and video files are supported."); return; }
+    if (isImage && file.size > 8 * 1024 * 1024)  { alert("Image too large — max 8MB."); return; }
+    if (isVideo && file.size > 200 * 1024 * 1024) { alert("Video too large — max 200MB."); return; }
+
+    if (isImage) {
+      // Images: convert to base64 and use JSON endpoint
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = e => resolve(e.target.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const res  = await fetch("/api/gcs-upload", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId: resolvedUserId, dataUrl, name: file.name.replace(/\.[^.]+$/, ""), tags: ["upload"], source: "upload" }),
+      });
+      const data = await res.json();
+      if (data.item) setItems(prev => [data.item, ...prev]);
+    } else {
+      // Videos: multipart form upload
+      const form = new FormData();
+      form.append("file",   file);
+      form.append("userId", resolvedUserId);
+      form.append("name",   file.name.replace(/\.[^.]+$/, ""));
+      form.append("tags",   JSON.stringify(["video", "upload"]));
+      form.append("source", "upload");
+      const res  = await fetch("/api/gcs-upload", { method:"POST", body: form });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      if (data.item) setItems(prev => [data.item, ...prev]);
+    }
   };
 
   const handleFiles = async (files) => {
@@ -6362,7 +6393,7 @@ function MediaLibrary({ userId }) {
           <button onClick={fetchItems} style={{ padding:"7px 14px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>↻ Refresh</button>
           <button onClick={() => fileInput.current?.click()} style={{ padding:"9px 20px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>+ Upload Images</button>
         </div>
-        <input ref={fileInput} type="file" accept="image/*" multiple style={{ display:"none" }} onChange={e=>handleFiles(e.target.files)} />
+        <input ref={fileInput} type="file" accept="image/*,video/*" multiple style={{ display:"none" }} onChange={e=>handleFiles(e.target.files)} />
       </div>
 
       {/* Drop zone */}
@@ -6373,12 +6404,12 @@ function MediaLibrary({ userId }) {
         onClick={() => fileInput.current?.click()}
         style={{ border:`2px dashed ${dragOver?"var(--amber)":"var(--border)"}`, borderRadius:12, padding:"24px 20px", textAlign:"center", cursor:"pointer", background:dragOver?"var(--amber-glow)":"transparent", transition:"all 0.2s" }}>
         {uploading ? (
-          <div style={{ fontSize:13, color:"var(--amber)" }}><span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>Uploading to cloud…</div>
+          <div style={{ fontSize:13, color:"var(--amber)" }}><span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>Uploading to Google Cloud…</div>
         ) : (
           <>
             <div style={{ fontSize:24, marginBottom:6 }}>🖼</div>
-            <div style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:3 }}>{dragOver ? "Drop to upload" : "Drag & drop images or click to browse"}</div>
-            <div style={{ fontSize:11, color:"var(--muted)" }}>PNG, JPG, WEBP, GIF · Max 8MB · Saved to cloud</div>
+            <div style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:3 }}>{dragOver ? "Drop to upload" : "Drag & drop images or videos, or click to browse"}</div>
+            <div style={{ fontSize:11, color:"var(--muted)" }}>Images: PNG, JPG, WEBP (max 8MB) · Videos: MP4, MOV, WebM (max 200MB)</div>
           </>
         )}
       </div>
@@ -6408,8 +6439,15 @@ function MediaLibrary({ userId }) {
                 <div key={item.id}
                   onClick={() => setSelected(selected?.id===item.id ? null : item)}
                   style={{ position:"relative", borderRadius:10, overflow:"hidden", border:`2px solid ${selected?.id===item.id?"var(--amber)":"var(--border)"}`, cursor:"pointer", background:"var(--bg-elevated)", transition:"border-color 0.2s" }}>
-                  <img src={item.url || item.dataUrl} alt={item.name} style={{ width:"100%", aspectRatio:"1", objectFit:"cover", display:"block" }}
-                    onError={e => { e.target.style.opacity="0.3"; }} />
+                  {item.mediaType === "video" ? (
+                    <div style={{ width:"100%", aspectRatio:"1", background:"#000", display:"flex", alignItems:"center", justifyContent:"center", position:"relative" }}>
+                      <video src={item.url} style={{ width:"100%", height:"100%", objectFit:"cover" }} preload="metadata" />
+                      <div style={{ position:"absolute", fontSize:24, opacity:0.9 }}>▶</div>
+                    </div>
+                  ) : (
+                    <img src={item.url || item.dataUrl} alt={item.name} style={{ width:"100%", aspectRatio:"1", objectFit:"cover", display:"block" }}
+                      onError={e => { e.target.style.opacity="0.3"; }} />
+                  )}
                   <div style={{ padding:"6px 8px", background:"var(--bg-surface)" }}>
                     <div style={{ fontSize:10, fontWeight:600, color:"var(--text)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{item.name || "Untitled"}</div>
                     <div style={{ display:"flex", gap:3, flexWrap:"wrap", marginTop:3 }}>
@@ -6441,7 +6479,11 @@ function MediaLibrary({ userId }) {
             <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:16 }}>
               {/* Top: image + metadata */}
               <div style={{ display:"grid", gridTemplateColumns:"220px 1fr", gap:20 }}>
+                {selected.mediaType === "video" ? (
+                <video src={selected.url} controls style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", maxHeight:200 }} />
+              ) : (
                 <img src={selected.url || selected.dataUrl} alt={selected.name} style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", objectFit:"contain", maxHeight:200 }} />
+              )}
                 <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
                   <div>
                     <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Name</label>
@@ -6682,6 +6724,261 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
       <div style={{ fontSize:10, color:"var(--muted)", marginTop:10, lineHeight:1.5 }}>
         Click any image to use it. Add more in Marketing → Media Library.
       </div>
+    </div>
+  );
+}
+
+// ─── VIDEO PLANNING STUDIO ───────────────────────────────────────────────────
+
+const VIDEO_PLAN_STORAGE = "bb_video_plans";
+function loadVideoPlans() { try { return JSON.parse(localStorage.getItem(VIDEO_PLAN_STORAGE) || "[]"); } catch { return []; } }
+function saveVideoPlansToStorage(p) { try { localStorage.setItem(VIDEO_PLAN_STORAGE, JSON.stringify(p)); } catch {} }
+
+function VideoPlanningStudio({ activeProvider, activeModel, apiKeys, posts, userId }) {
+  const [plans,     setPlans]     = useState(loadVideoPlans);
+  const [activeTab, setActiveTab] = useState("youtube");
+  const [selected,  setSelected]  = useState(null);
+  const [generating,setGenerating]= useState(false);
+  const [genResult, setGenResult] = useState(null);
+  const [genType,   setGenType]   = useState("script");
+  const [topic,     setTopic]     = useState("");
+  const [error,     setError]     = useState("");
+
+  const savePlans = (next) => { setPlans(next); saveVideoPlansToStorage(next); };
+
+  const TABS = [
+    { id:"youtube",  label:"YouTube Vlogs",  icon:"▶", color:"#ff0000" },
+    { id:"tiktok",   label:"TikTok",         icon:"🎵", color:"#010101" },
+    { id:"reels",    label:"Reels",          icon:"📸", color:"#e1306c" },
+    { id:"library",  label:"Video Library",  icon:"🎬", color:"var(--amber)" },
+  ];
+
+  const GEN_TYPES = [
+    { id:"script",    label:"Full Script",      icon:"📄" },
+    { id:"outline",   label:"Video Outline",    icon:"▤"  },
+    { id:"hook",      label:"Hook & Intro",      icon:"⚡"  },
+    { id:"title",     label:"Title Ideas",       icon:"✦"  },
+    { id:"desc",      label:"Description & SEO", icon:"◎"  },
+    { id:"chapters",  label:"Chapter Timestamps",icon:"⏱"  },
+    { id:"shorts",    label:"Short Clips Ideas", icon:"📱"  },
+    { id:"thumbnail", label:"Thumbnail Concept", icon:"🖼"  },
+  ];
+
+  const platformConfig = {
+    youtube: { name:"YouTube",  maxLen:"10-20 min", format:"Talking head or on-location",      tone:"Educational, storytelling, authentic" },
+    tiktok:  { name:"TikTok",   maxLen:"15-60 sec", format:"Vertical, fast-paced, trending",    tone:"Casual, entertaining, hook-driven" },
+    reels:   { name:"Reels",    maxLen:"15-90 sec", format:"Vertical, cinematic, lifestyle",    tone:"Aspirational, beautiful, lifestyle-focused" },
+  };
+
+  const generate = async () => {
+    if (!topic.trim()) return;
+    setGenerating(true); setError(""); setGenResult(null);
+    const platform = platformConfig[activeTab];
+    const brand = loadBrandGuide();
+    const brandCtx = buildBrandContext(brand);
+    try {
+      const prompts = {
+        script:    `Write a complete ${platform?.name || activeTab} video script for: "${topic}". Include intro hook, main content sections, and outro with CTA. Format with [SECTION] headers, speaker notes, and B-roll suggestions. Target length: ${platform?.maxLen}. Tone: ${platform?.tone}.`,
+        outline:   `Create a detailed video outline for a ${platform?.name} video: "${topic}". Include: hook idea, 4-6 main sections with talking points, B-roll suggestions, CTA ideas. Keep it punchy and scannable.`,
+        hook:      `Write 5 different opening hooks (first 3-5 seconds) for a ${platform?.name} video about "${topic}". Each hook should immediately grab attention. Include one question hook, one bold statement, one story hook, one shocking fact, one visual hook.`,
+        title:     `Generate 10 ${platform?.name} title ideas for "${topic}". Mix: curiosity gaps, how-to, listicles, emotional triggers. Include SEO-friendly versions. For YouTube, include click-worthy titles. For TikTok/Reels, include trending formats.`,
+        desc:      `Write a ${platform?.name} video description for "${topic}". Include: engaging summary paragraph, key talking points as bullet list, relevant hashtags (10-15), call to action, and links placeholder. Optimize for search.`,
+        chapters:  `Create YouTube chapter timestamps for a video about "${topic}". Assume a 10-15 minute video. Format: 0:00 - Intro, etc. Make chapters interesting and specific enough to make viewers want to jump to each section.`,
+        shorts:    `Suggest 5 short-form clip ideas from a video about "${topic}" that would work as YouTube Shorts, TikToks, or Reels. For each: describe the clip, the hook, why it works as a short, and the ideal length.`,
+        thumbnail: `Describe a compelling YouTube thumbnail concept for "${topic}". Include: main visual element, text overlay (max 3 words), color scheme, facial expression if applicable, and why it would get high CTR. Also suggest 2 alternatives.`,
+      };
+
+      const text = await callAI(activeProvider, activeModel,
+        `${brandCtx}You are a content strategist specializing in fly fishing and whiskey lifestyle video content for Cask & Stream. Platform: ${platform?.name || activeTab}. Format: ${platform?.format || ""}. Create engaging, authentic content that resonates with fly fishing enthusiasts and whiskey lovers.`,
+        prompts[genType] || prompts.script,
+        apiKeys[activeProvider],
+        2500
+      );
+
+      const plan = {
+        id:        Date.now(),
+        platform:  activeTab,
+        topic:     topic.trim(),
+        type:      genType,
+        content:   text,
+        createdAt: new Date().toISOString(),
+        status:    "idea",
+      };
+      setGenResult(plan);
+    } catch(e) { setError(e.message); }
+    setGenerating(false);
+  };
+
+  const savePlan = () => {
+    if (!genResult) return;
+    savePlans([genResult, ...plans]);
+    setGenResult(null);
+    setTopic("");
+  };
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Header */}
+      <div>
+        <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>🎬 Video Planning Studio</h2>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Plan, script, and organize your YouTube vlogs, TikToks, and Reels — all in one place.</p>
+      </div>
+
+      {/* Platform tabs */}
+      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setActiveTab(t.id)}
+            style={{ padding:"7px 18px", borderRadius:8, border:`1px solid ${activeTab===t.id?t.color:"var(--border)"}`, background:activeTab===t.id?t.color+"15":"transparent", color:activeTab===t.id?t.color:"var(--text-secondary)", fontSize:12, fontWeight:activeTab===t.id?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            <span>{t.icon}</span>{t.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "library" ? (
+        /* ── VIDEO LIBRARY ── */
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Videos uploaded to your Media Library appear here for easy access.</p>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24, textAlign:"center", color:"var(--muted)", fontSize:13 }}>
+            <div style={{ fontSize:32, marginBottom:12 }}>🎬</div>
+            Upload videos in the <strong style={{ color:"var(--text)" }}>Media Library</strong> tab — they'll appear here organized by platform tag.
+          </div>
+          {plans.length > 0 && (
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>Saved Plans</div>
+              {plans.map(plan => (
+                <div key={plan.id} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:16, cursor:"pointer" }}
+                  onClick={() => setSelected(selected?.id===plan.id ? null : plan)}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <div>
+                      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:"var(--amber-glow)", color:"var(--amber)", fontWeight:600, marginRight:8, textTransform:"capitalize" }}>{plan.platform} · {plan.type}</span>
+                      <span style={{ fontSize:13, fontWeight:600 }}>{plan.topic}</span>
+                    </div>
+                    <span style={{ fontSize:11, color:"var(--muted)" }}>{new Date(plan.createdAt).toLocaleDateString()}</span>
+                  </div>
+                  {selected?.id === plan.id && (
+                    <pre style={{ marginTop:12, fontSize:12, lineHeight:1.7, color:"var(--text-secondary)", whiteSpace:"pre-wrap", fontFamily:"var(--font-body)" }}>{plan.content}</pre>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        /* ── GENERATOR ── */
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Topic input */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>
+                Video Topic or Idea
+              </label>
+              <input value={topic} onChange={e=>setTopic(e.target.value)}
+                placeholder={`e.g. "Early morning dry fly fishing on the Toccoa River" or "Pairing bourbon with fly fishing — our favorite combos"`}
+                style={iS}
+                onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"}
+                onKeyDown={e=>e.key==="Enter"&&generate()} />
+            </div>
+
+            {/* Quick ideas from existing posts */}
+            {posts.length > 0 && (
+              <div>
+                <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Quick ideas from your blog posts</div>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                  {posts.filter(p=>p.status==="published").slice(0,5).map(post => (
+                    <button key={post.id} onClick={() => setTopic(`Turn blog post into video: "${post.title}"`)}
+                      style={{ padding:"4px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      📄 {post.title?.slice(0,35)}…
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Content type picker */}
+            <div>
+              <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>What do you need?</div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:6 }}>
+                {GEN_TYPES.map(g => (
+                  <button key={g.id} onClick={() => setGenType(g.id)}
+                    style={{ padding:"8px 12px", borderRadius:8, border:`1px solid ${genType===g.id?"var(--amber)":"var(--border)"}`, background:genType===g.id?"var(--amber-glow)":"transparent", color:genType===g.id?"var(--amber)":"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, textAlign:"left", fontWeight:genType===g.id?600:400 }}>
+                    <span>{g.icon}</span>{g.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {error && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{error}</div>}
+
+            <button onClick={generate} disabled={generating || !topic.trim()}
+              style={{ padding:"10px 24px", borderRadius:8, border:"none", background:generating||!topic.trim()?"var(--bg-elevated)":"var(--amber)", color:generating||!topic.trim()?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:generating||!topic.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
+              {generating ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : `🎬 Generate ${GEN_TYPES.find(g=>g.id===genType)?.label}`}
+            </button>
+          </div>
+
+          {/* Generated result */}
+          {genResult && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                <div>
+                  <div style={{ fontSize:11, fontWeight:700, color:"var(--amber)", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:4 }}>
+                    {activeTab.toUpperCase()} · {GEN_TYPES.find(g=>g.id===genType)?.label}
+                  </div>
+                  <div style={{ fontSize:15, fontWeight:600 }}>{genResult.topic}</div>
+                </div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button onClick={() => navigator.clipboard.writeText(genResult.content)}
+                    style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    ⎘ Copy
+                  </button>
+                  <button onClick={savePlan}
+                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    ✓ Save Plan
+                  </button>
+                  <button onClick={generate}
+                    style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    ↻ Regenerate
+                  </button>
+                </div>
+              </div>
+              <pre style={{ fontSize:13, lineHeight:1.8, color:"var(--text)", whiteSpace:"pre-wrap", fontFamily:"var(--font-body)", background:"var(--bg-elevated)", padding:"16px", borderRadius:8, overflow:"auto", maxHeight:500 }}>
+                {genResult.content}
+              </pre>
+            </div>
+          )}
+
+          {/* Saved plans for this platform */}
+          {plans.filter(p=>p.platform===activeTab).length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>
+                Saved {TABS.find(t=>t.id===activeTab)?.label} Plans ({plans.filter(p=>p.platform===activeTab).length})
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {plans.filter(p=>p.platform===activeTab).slice(0,5).map(plan => (
+                  <div key={plan.id} style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", cursor:"pointer" }}
+                    onClick={() => setSelected(selected?.id===plan.id ? null : plan)}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                      <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:"var(--bg-surface)", color:"var(--text-secondary)", border:"1px solid var(--border)" }}>{GEN_TYPES.find(g=>g.id===plan.type)?.label || plan.type}</span>
+                        <span style={{ fontSize:12, fontWeight:500 }}>{plan.topic}</span>
+                      </div>
+                      <div style={{ display:"flex", gap:6 }}>
+                        <span style={{ fontSize:10, color:"var(--muted)" }}>{new Date(plan.createdAt).toLocaleDateString()}</span>
+                        <button onClick={e=>{ e.stopPropagation(); savePlans(plans.filter(p=>p.id!==plan.id)); }}
+                          style={{ background:"none", border:"none", color:"var(--muted)", cursor:"pointer", fontSize:13, padding:0 }}>✕</button>
+                      </div>
+                    </div>
+                    {selected?.id === plan.id && (
+                      <pre style={{ marginTop:10, fontSize:12, lineHeight:1.7, color:"var(--text-secondary)", whiteSpace:"pre-wrap", fontFamily:"var(--font-body)", maxHeight:300, overflow:"auto" }}>{plan.content}</pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
