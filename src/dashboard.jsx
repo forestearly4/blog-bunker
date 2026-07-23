@@ -8999,6 +8999,11 @@ function AddCompetitorModal({ onSave, onClose }) {
   const [form, setForm] = useState({ name:"", url:"", da:"", posts:"", traffic:"", strengths:"", threat:"medium" });
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
   const valid = form.name.trim() && form.url.trim();
+  const normalizeUrl = (u) => {
+    const t = u.trim();
+    if (!t) return t;
+    return t.startsWith("http://") || t.startsWith("https://") ? t : `https://${t}`;
+  };
   return (
     <Modal title="Add Competitor" onClose={onClose}>
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
@@ -9043,7 +9048,7 @@ function AddCompetitorModal({ onSave, onClose }) {
         </div>
         <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginTop:4 }}>
           <button onClick={onClose} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Cancel</button>
-          <button onClick={()=>{ if(valid){ onSave({...form, da:Number(form.da)||0, id:Date.now()}); onClose(); }}} disabled={!valid}
+          <button onClick={()=>{ if(valid){ onSave({...form, url: normalizeUrl(form.url), da:Number(form.da)||0, id:Date.now()}); onClose(); }}} disabled={!valid}
             style={{ padding:"9px 24px", borderRadius:8, border:"none", background:valid?"var(--amber)":"var(--bg-elevated)", color:valid?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:valid?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif" }}>
             Add Competitor
           </button>
