@@ -2315,14 +2315,21 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
               </div>
               <div style={{ display:"flex", alignItems:"center", gap:10 }}>
                 {data && (
-                  <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                    {data.realData ? (
-                      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:"#5cba6c15", color:"#5cba6c", border:"1px solid #5cba6c33", fontWeight:600 }}>● Live data</span>
-                    ) : (
-                      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:"var(--red)11", color:"var(--red)", border:"1px solid var(--red)22" }}>⚠ Estimated</span>
-                    )}
-                    <span style={{ fontSize:11, color:"var(--muted)" }}>Scanned {formatScanTime(data.scannedAt)}</span>
-                  </div>
+              <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                {data.realData && (
+                  <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99,
+                    background: data.source==="rss" ? "#5cba6c15" : "#7c3aed15",
+                    color:      data.source==="rss" ? "#5cba6c"   : "#7c3aed",
+                    border:    `1px solid ${data.source==="rss" ? "#5cba6c33" : "#7c3aed33"}`,
+                    fontWeight:600 }}>
+                    {data.source==="rss" ? "● RSS feed" : "● Web search"}
+                  </span>
+                )}
+                {!data.realData && (
+                  <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:"var(--red)11", color:"var(--red)", border:"1px solid var(--red)22" }}>⚠ Estimated</span>
+                )}
+                <span style={{ fontSize:11, color:"var(--muted)" }}>Scanned {formatScanTime(data.scannedAt)}</span>
+              </div>
                 )}
                 <button onClick={() => scanCompetitor(comp)} disabled={scanning}
                   style={{ padding:"5px 14px", borderRadius:6, border:`1px solid ${threatColor}44`, background:"transparent", color:threatColor, fontSize:11, fontWeight:600, cursor:scanning?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5 }}>
