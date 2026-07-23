@@ -111,9 +111,19 @@ export default async (req) => {
   const { name, url } = body;
   if (!name || !url) return new Response(JSON.stringify({ error:"name and url required" }), { status:400, headers:CORS });
 
+  // Normalize URL — add https:// if missing
+  let normalizedUrl = url.trim();
+  if (!normalizedUrl.startsWith("http://") && !normalizedUrl.startsWith("https://")) {
+    normalizedUrl = `https://${normalizedUrl}`;
+  }
+  // Validate URL
+  let parsedUrl;
+  try { parsedUrl = new URL(normalizedUrl); }
+  catch { return new Response(JSON.stringify({ error:`Invalid URL: "${url}" — make sure it includes the full domain like https://midcurrent.com` }), { status:400, headers:CORS }); }
+
   try {
     // Strategy 1: RSS feed (instant, most reliable)
-    const rssResult = await tryRSS(url);
+    const rssResult = await tryRSS(normalizedUrl);
     if (rssResult?.posts?.length > 0) {
       console.log(`[scan-competitor] RSS found ${rssResult.posts.length} posts for ${name}`);
       return new Response(JSON.stringify({
@@ -125,7 +135,7 @@ export default async (req) => {
 
     // Strategy 2: Claude web search fallback
     console.log(`[scan-competitor] No RSS for ${name}, trying web search`);
-    const searchResult = await tryWebSearch(name, url, apiKey);
+    const searchResult = await tryWebSearch(name, normalizedUrl, apiKey);
     return new Response(JSON.stringify({
       posts:     searchResult.posts,
       scannedAt: new Date().toISOString(),
