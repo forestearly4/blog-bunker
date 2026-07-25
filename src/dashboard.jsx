@@ -2024,9 +2024,16 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
 
 // ─── SETTINGS: GENERAL ───────────────────────────────────────────────────────
 
+const LOGO_STORAGE = "bb_workspace_logo";
+function loadLogo() { try { return localStorage.getItem(LOGO_STORAGE) || null; } catch { return null; } }
+function saveLogo(data) { try { localStorage.setItem(LOGO_STORAGE, data); } catch {} }
+
 function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
-  const [form,  setForm]  = useState({ name:wsName, url:wsUrl, tagline:wsTagline });
-  const [saved, setSaved] = useState(false);
+  const [form,       setForm]       = useState({ name:wsName, url:wsUrl, tagline:wsTagline });
+  const [saved,      setSaved]      = useState(false);
+  const [logo,       setLogo]       = useState(loadLogo);
+  const [logoStatus, setLogoStatus] = useState("");
+  const logoInput = useRef(null);
 
   const handleSave = () => {
     onSave(form);
@@ -2034,18 +2041,84 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
     setTimeout(() => setSaved(false), 2000);
   };
 
+  const handleLogoUpload = (file) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setLogoStatus("Only image files supported"); return; }
+    if (file.size > 2 * 1024 * 1024) { setLogoStatus("Logo too large — max 2MB"); return; }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target.result;
+      // Resize via canvas to max 200px height for sidebar
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const maxH   = 80;
+        const scale  = Math.min(1, maxH / img.height);
+        canvas.width  = Math.round(img.width  * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        const resized = canvas.toDataURL("image/png", 0.9);
+        saveLogo(resized);
+        setLogo(resized);
+        // Trigger re-render of sidebar logo
+        window.dispatchEvent(new CustomEvent("bb-logo-updated", { detail: resized }));
+        setLogoStatus("✓ Logo saved");
+        setTimeout(() => setLogoStatus(""), 3000);
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const removeLogo = () => {
+    saveLogo("");
+    setLogo(null);
+    window.dispatchEvent(new CustomEvent("bb-logo-updated", { detail: null }));
+  };
+
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
-      <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:0 }}>Workspace Settings</h3>
-      {[{label:"Blog Name",key:"name"},{label:"Blog URL",key:"url"},{label:"Tagline",key:"tagline"}].map(f => (
-        <div key={f.label}>
-          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
-          <input style={inputSt} value={form[f.key]} onChange={e => setForm(prev => ({ ...prev, [f.key]: e.target.value }))} />
+    <div style={{ display:"flex", flexDirection:"column", gap:24 }}>
+      {/* Logo Upload */}
+      <div>
+        <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Brand Logo</h3>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 16px" }}>Appears in the sidebar and on exported content. PNG or SVG recommended.</p>
+        <div style={{ display:"flex", alignItems:"center", gap:16 }}>
+          <div style={{ width:120, height:60, borderRadius:8, border:"2px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden" }}>
+            {logo ? (
+              <img src={logo} alt="Logo" style={{ maxWidth:"100%", maxHeight:"100%", objectFit:"contain" }} />
+            ) : (
+              <span style={{ fontSize:11, color:"var(--muted)", textAlign:"center", padding:8 }}>No logo yet</span>
+            )}
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            <button onClick={() => logoInput.current?.click()}
+              style={{ padding:"7px 16px", borderRadius:7, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {logo ? "↑ Replace Logo" : "↑ Upload Logo"}
+            </button>
+            {logo && (
+              <button onClick={removeLogo}
+                style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                Remove Logo
+              </button>
+            )}
+            {logoStatus && <span style={{ fontSize:11, color:"#5cba6c" }}>{logoStatus}</span>}
+          </div>
         </div>
-      ))}
-      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-        <button onClick={handleSave} style={{ ...btnP, alignSelf:"flex-start" }}>Save Changes</button>
-        {saved && <span style={{ fontSize:12, color:"var(--green)" }}>✓ Saved</span>}
+        <input ref={logoInput} type="file" accept="image/*" style={{ display:"none" }} onChange={e => handleLogoUpload(e.target.files[0])} />
+      </div>
+
+      <div style={{ borderTop:"1px solid var(--border)", paddingTop:24 }}>
+        <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 16px" }}>Workspace Settings</h3>
+        {[{label:"Blog Name",key:"name"},{label:"Blog URL",key:"url"},{label:"Tagline",key:"tagline"}].map(f => (
+          <div key={f.label} style={{ marginBottom:14 }}>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
+            <input style={inputSt} value={form[f.key]} onChange={e => setForm(prev => ({ ...prev, [f.key]: e.target.value }))} />
+          </div>
+        ))}
+        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+          <button onClick={handleSave} style={{ ...btnP, alignSelf:"flex-start" }}>Save Changes</button>
+          {saved && <span style={{ fontSize:12, color:"var(--green)" }}>✓ Saved</span>}
+        </div>
       </div>
     </div>
   );
@@ -8334,6 +8407,117 @@ const MOBILE_CSS = `
   }
 `;
 
+// ─── SOCIAL PLATFORM SETTINGS ────────────────────────────────────────────────
+
+const SOCIAL_PLATFORM_STORAGE = "bb_social_platforms";
+function loadSocialPlatforms() { try { return JSON.parse(localStorage.getItem(SOCIAL_PLATFORM_STORAGE) || "{}"); } catch { return {}; } }
+function saveSocialPlatforms(d) { try { localStorage.setItem(SOCIAL_PLATFORM_STORAGE, JSON.stringify(d)); } catch {} }
+
+function SocialPlatformSettings({ platform, icon, name, color, docsUrl, steps, note }) {
+  const [creds,   setCreds]   = useState(() => loadSocialPlatforms()[platform] || {});
+  const [saved,   setSaved]   = useState(false);
+  const [visible, setVisible] = useState({});
+
+  const FIELDS = {
+    tiktok:   [{ key:"clientKey",   label:"Client Key" },     { key:"clientSecret", label:"Client Secret" }],
+    pinterest:[{ key:"appId",       label:"App ID" },         { key:"appSecret",    label:"App Secret" }],
+    twitter:  [{ key:"apiKey",      label:"API Key" },        { key:"apiSecret",    label:"API Key Secret" },
+               { key:"accessToken", label:"Access Token" },   { key:"accessSecret", label:"Access Token Secret" }],
+    reddit:   [{ key:"clientId",    label:"Client ID" },      { key:"clientSecret", label:"Client Secret" },
+               { key:"username",    label:"Reddit Username" },{ key:"password",     label:"Reddit Password", password:true }],
+  };
+
+  const fields = FIELDS[platform] || [];
+  const isConnected = fields.every(f => !!creds[f.key]);
+
+  const handleSave = () => {
+    const all = loadSocialPlatforms();
+    all[platform] = { ...creds, connected: isConnected };
+    saveSocialPlatforms(all);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+        <span style={{ fontSize:28 }}>{icon}</span>
+        <div>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>{name}</h3>
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+            {isConnected ? (
+              <span style={{ fontSize:11, color:"#5cba6c", fontWeight:600 }}>● Connected</span>
+            ) : (
+              <span style={{ fontSize:11, color:"var(--muted)" }}>○ Not connected</span>
+            )}
+            <a href={docsUrl} target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)" }}>Developer docs ↗</a>
+          </div>
+        </div>
+      </div>
+
+      {/* Setup steps */}
+      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Setup Steps</div>
+        <ol style={{ paddingLeft:16, display:"flex", flexDirection:"column", gap:8 }}>
+          {steps.map((step, i) => (
+            <li key={i} style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{step}</li>
+          ))}
+        </ol>
+        {note && (
+          <div style={{ marginTop:12, padding:"8px 12px", borderRadius:7, background:"var(--amber-glow)", border:"1px solid var(--amber)33", fontSize:11, color:"var(--amber)", lineHeight:1.6 }}>
+            ℹ {note}
+          </div>
+        )}
+      </div>
+
+      {/* Credential fields */}
+      <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+        {fields.map(f => (
+          <div key={f.key}>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
+            <div style={{ position:"relative" }}>
+              <input
+                type={f.password && !visible[f.key] ? "password" : "text"}
+                style={{ ...iS, paddingRight:f.password ? 40 : 14 }}
+                value={creds[f.key] || ""}
+                placeholder={`Enter ${f.label}…`}
+                onChange={e => setCreds(c => ({ ...c, [f.key]: e.target.value }))}
+                onFocus={e=>e.target.style.borderColor=color} onBlur={e=>e.target.style.borderColor="var(--border)"}
+              />
+              {f.password && (
+                <button onClick={() => setVisible(v => ({ ...v, [f.key]: !v[f.key] }))}
+                  style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", fontSize:14, color:"var(--muted)" }}>
+                  {visible[f.key] ? "👁" : "🔒"}
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+        <button onClick={handleSave}
+          style={{ padding:"9px 24px", borderRadius:8, border:"none", background:color, color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+          {isConnected ? "Update Credentials" : "Save Credentials"}
+        </button>
+        {saved && <span style={{ fontSize:12, color:"#5cba6c" }}>✓ Saved</span>}
+        {isConnected && (
+          <button onClick={() => { const all = loadSocialPlatforms(); delete all[platform]; saveSocialPlatforms(all); setCreds({}); }}
+            style={{ padding:"9px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            Disconnect
+          </button>
+        )}
+      </div>
+
+      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
+        <strong style={{ color:"var(--text)" }}>Coming next:</strong> Once credentials are saved, Blog Bunker will add {name} as an option in the Social Pipeline publish stage so you can post directly without leaving Blog Bunker.
+      </div>
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -9566,15 +9750,19 @@ export default function Dashboard({ user, workspace }) {
   ];
 
   const SETTINGS_SECTIONS = [
-    { id:"general",  label:"General"             },
-    { id:"brand",    label:"Brand Guide"         },
-    { id:"apikeys",  label:"API Keys"            },
-    { id:"gsc",      label:"Search Console"      },
-    { id:"meta",     label:"Facebook & Instagram"},
-    { id:"social",   label:"Social Media"        },
-    { id:"wix",      label:"Wix Integration"     },
-    { id:"billing",  label:"Billing & Plan"      },
-    { id:"account",  label:"Account"             },
+    { id:"general",    label:"General"              },
+    { id:"brand",      label:"Brand Guide"          },
+    { id:"apikeys",    label:"API Keys"             },
+    { id:"gsc",        label:"Search Console"       },
+    { id:"meta",       label:"Facebook & Instagram" },
+    { id:"tiktok",     label:"TikTok"               },
+    { id:"pinterest",  label:"Pinterest"            },
+    { id:"twitter",    label:"X (Twitter)"          },
+    { id:"reddit",     label:"Reddit"               },
+    { id:"social",     label:"Social Media"         },
+    { id:"wix",        label:"Wix Integration"      },
+    { id:"billing",    label:"Billing & Plan"       },
+    { id:"account",    label:"Account"              },
   ];
 
   return (
@@ -9626,7 +9814,19 @@ export default function Dashboard({ user, workspace }) {
       {/* ── SIDEBAR ── */}
       <aside className="bb-sidebar" style={{width:220,minWidth:220,background:"var(--sidebar-bg)",borderRight:"1px solid var(--border)",display:"flex",flexDirection:"column"}}>
         <div style={{padding:"20px 20px 16px",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:10}}>
-          <div style={{width:32,height:32,borderRadius:8,background:"var(--amber)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:900,color:dark?"#0e0f11":"#fff",fontFamily:"var(--font-display)",flexShrink:0}}>B</div>
+          {(() => {
+            const [sidebarLogo, setSidebarLogo] = useState(loadLogo);
+            useEffect(() => {
+              const handler = (e) => setSidebarLogo(e.detail || null);
+              window.addEventListener("bb-logo-updated", handler);
+              return () => window.removeEventListener("bb-logo-updated", handler);
+            }, []);
+            return sidebarLogo ? (
+              <img src={sidebarLogo} alt="Logo" style={{height:32,maxWidth:100,objectFit:"contain",flexShrink:0}} />
+            ) : (
+              <div style={{width:32,height:32,borderRadius:8,background:"var(--amber)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:900,color:dark?"#0e0f11":"#fff",fontFamily:"var(--font-display)",flexShrink:0}}>B</div>
+            );
+          })()}
           <div>
             <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:14,lineHeight:1.1}}>Blog Bunker</div>
             <div style={{fontSize:9,color:"var(--text-secondary)",letterSpacing:"0.05em",textTransform:"uppercase"}}>Command Center</div>
@@ -9967,6 +10167,34 @@ export default function Dashboard({ user, workspace }) {
                     </p>
                     <MetaConnectPanel onConnected={(cfg) => setMetaConfig(cfg)} />
                   </div>
+                )}
+
+                {settingsSection==="tiktok"&&(
+                  <SocialPlatformSettings platform="tiktok" icon="🎵" name="TikTok"
+                    color="#010101" docsUrl="https://developers.tiktok.com"
+                    steps={["Go to developers.tiktok.com → My Apps → Create app","Add the 'Video Upload' and 'Video Publish' products","Copy your Client Key","Add TikTok as a redirect URI for your OAuth app","Paste your Client Key and Secret below"]}
+                    note="TikTok's Content Posting API requires business account approval. Video publishing is supported; image posts require a Carousel API application." />
+                )}
+
+                {settingsSection==="pinterest"&&(
+                  <SocialPlatformSettings platform="pinterest" icon="📌" name="Pinterest"
+                    color="#e60023" docsUrl="https://developers.pinterest.com"
+                    steps={["Go to developers.pinterest.com → My apps → Create app","Enable 'Pins:read_write' and 'Boards:read_write' scopes","Copy your App ID and App Secret","Paste below — Blog Bunker handles the OAuth flow"]}
+                    note="Pinterest auto-publishing creates Pins from your blog posts and social images. Boards are auto-detected from your account." />
+                )}
+
+                {settingsSection==="twitter"&&(
+                  <SocialPlatformSettings platform="twitter" icon="🐦" name="X (Twitter)"
+                    color="#1da1f2" docsUrl="https://developer.twitter.com"
+                    steps={["Go to developer.twitter.com → Projects & Apps → New App","Apply for 'Basic' access (free, includes tweet posting)","Under 'Keys and tokens' copy your API Key, API Secret, Access Token, and Access Token Secret","Paste all four below"]}
+                    note="X/Twitter requires separate API Key + Secret and Access Token + Secret. Free Basic access allows 1500 tweets/month." />
+                )}
+
+                {settingsSection==="reddit"&&(
+                  <SocialPlatformSettings platform="reddit" icon="🤖" name="Reddit"
+                    color="#ff4500" docsUrl="https://www.reddit.com/prefs/apps"
+                    steps={["Go to reddit.com/prefs/apps → Create another app","Select 'script' type","Set redirect URI to https://blogbunker.netlify.app/api/reddit-callback","Copy your Client ID (under app name) and Client Secret"]}
+                    note="Reddit posting creates text or link posts to fly fishing subreddits like r/flyfishing, r/bourbon, r/whiskey. Blog Bunker suggests relevant subreddits based on post topic." />
                 )}
 
                 {settingsSection==="social"&&(
