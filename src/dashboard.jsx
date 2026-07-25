@@ -2565,25 +2565,46 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   // ── STAGE 3: ENHANCE ────────────────────────────────────────────────────────
 
   const runEnhancement = async () => {
-    setLoading(true); setLoadMsg("Running SEO analysis…"); setError("");
+    setLoading(true); setLoadMsg("Analyzing your post…"); setError("");
     try {
-      // SEO analysis
-      const seoText = await callAI(activeProvider, activeModel,
-        `${brandCtx}You are an SEO expert for Cask & Stream. Return ONLY valid JSON (no fences): {"metaTitle":"...","metaDescription":"...","primaryKeyword":"...","secondaryKeywords":["..."],"suggestions":["..."],"score":85}. metaTitle ≤60 chars, metaDescription ≤160 chars, score 0-100.`,
-        `Analyze and optimize:\nTitle: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0,1000)}`,
-        apiKeys[activeProvider]
+      const brandCtxLocal = buildBrandContext(loadBrandGuide());
+      const text = await callAI(activeProvider, activeModel,
+        `${brandCtxLocal}You are an SEO expert for Cask & Stream (fly fishing + whiskey lifestyle blog). Return ONLY valid JSON (no fences):
+{
+  "primaryKeyword": "best target keyword",
+  "secondaryKeywords": ["kw1","kw2","kw3"],
+  "titles": [
+    {"text":"title option 1 (≤60 chars)","score":85,"why":"reason CTR is good","charCount":52},
+    {"text":"title option 2 (≤60 chars)","score":78,"why":"reason","charCount":48},
+    {"text":"title option 3 (≤60 chars)","score":72,"why":"reason","charCount":55}
+  ],
+  "descriptions": [
+    {"text":"meta description option 1 (≤160 chars)","score":88,"why":"why this converts","charCount":145},
+    {"text":"meta description option 2 (≤160 chars)","score":80,"why":"reason","charCount":138},
+    {"text":"meta description option 3 (≤160 chars)","score":74,"why":"reason","charCount":152}
+  ],
+  "readabilityScore": 82,
+  "readabilityNotes": "brief note on readability",
+  "suggestions": ["actionable tip 1","actionable tip 2","actionable tip 3"],
+  "overallScore": 80
+}
+Titles and descriptions MUST be under their character limits. Score each on: keyword inclusion, CTR potential, length, clarity.`,
+        `Title: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0, 1200)}`,
+        apiKeys[activeProvider],
+        2000
       );
-      const seo = parseAIJson(seoText);
-
-      setLoadMsg("Generating headline options…");
-      const hlText = await callAI(activeProvider, activeModel,
-        `${brandCtx}Generate 5 headline variations for this Cask & Stream blog post. Return ONLY a JSON array of 5 strings. No fences.`,
-        `Original title: ${draft.title}\nTopic: ${brief.topic}`,
-        apiKeys[activeProvider]
-      );
-      const headlines = parseAIJson(hlText);
-
-      setEnhance({ ...seo, headlines, improved: seo.metaTitle });
+      const seo = parseAIJson(text);
+      // Pick best by default
+      const bestTitle = seo.titles?.sort((a,b)=>b.score-a.score)[0]?.text || draft.title;
+      const bestDesc  = seo.descriptions?.sort((a,b)=>b.score-a.score)[0]?.text || "";
+      setEnhance({
+        ...seo,
+        metaTitle:       bestTitle,
+        metaDescription: bestDesc,
+        selectedTitle:   0,
+        selectedDesc:    0,
+        headlines:       seo.titles?.map(t=>t.text) || [],
+      });
       markDone("enhance");
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
@@ -2851,61 +2872,171 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       {/* ── STAGE 3: ENHANCE ── */}
       {stage === "enhance" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-          {!enhance.metaTitle ? (
+          {!enhance.titles ? (
             <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:32, textAlign:"center" }}>
               <div style={{ fontSize:32, marginBottom:12 }}>✦</div>
-              <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8 }}>Enhance with AI</h3>
-              <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24, maxWidth:400, margin:"0 auto 24px" }}>
-                Run SEO analysis, generate meta tags, check readability, and get 5 alternative headlines — all in one click.
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8 }}>SEO Enhance</h3>
+              <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:8, maxWidth:440, margin:"0 auto 8px", lineHeight:1.7 }}>
+                AI generates <strong>3 title options</strong> and <strong>3 meta descriptions</strong>, each scored and explained so you can pick the best one. Plus a live Google preview.
               </p>
+              <p style={{ fontSize:12, color:"var(--muted)", marginBottom:24 }}>One click — takes about 10 seconds.</p>
               <button onClick={runEnhancement} disabled={loading} style={btnA}>
-                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Run Enhancement`}
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Run SEO Enhance`}
               </button>
             </div>
           ) : (
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
-              {/* SEO panel */}
-              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--green)" }}>✓ SEO Analysis</div>
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Meta Title</label>
-                  <input style={{ ...iS, fontFamily:"monospace", fontSize:12 }} value={enhance.metaTitle} onChange={e=>setEnhance(en=>({...en,metaTitle:e.target.value}))} />
-                  <div style={{ fontSize:10, color: enhance.metaTitle.length > 60 ? "var(--red)" : "var(--muted)", marginTop:3, textAlign:"right" }}>{enhance.metaTitle.length}/60</div>
-                </div>
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Meta Description</label>
-                  <textarea rows={2} style={{ ...iS, resize:"none", fontFamily:"monospace", fontSize:12 }} value={enhance.metaDescription} onChange={e=>setEnhance(en=>({...en,metaDescription:e.target.value}))} />
-                  <div style={{ fontSize:10, color: enhance.metaDescription?.length > 160 ? "var(--red)" : "var(--muted)", marginTop:3, textAlign:"right" }}>{enhance.metaDescription?.length||0}/160</div>
-                </div>
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Primary Keyword</label>
-                  <div style={{ padding:"6px 12px", borderRadius:99, background:"var(--amber)22", color:"var(--amber)", fontSize:12, fontWeight:600, display:"inline-block" }}>{enhance.primaryKeyword}</div>
-                </div>
-                {enhance.suggestions?.length > 0 && (
-                  <div>
-                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Suggestions</label>
-                    {enhance.suggestions.map((s,i)=><div key={i} style={{ fontSize:12, color:"var(--text-secondary)", padding:"4px 0", borderBottom:i<enhance.suggestions.length-1?"1px solid var(--border)":"none" }}>· {s}</div>)}
-                  </div>
-                )}
-                <button onClick={runEnhancement} disabled={loading} style={{ ...btnS, fontSize:11, padding:"6px 14px" }}>↻ Re-run Analysis</button>
-              </div>
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
 
-              {/* Headlines panel */}
-              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:12 }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)" }}>Headline Options</div>
-                {enhance.headlines?.map((h,i) => (
-                  <div key={i} style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 12px", borderRadius:8, background: draft.title===h?"var(--amber-glow)":"var(--bg-elevated)", border: draft.title===h?"1px solid var(--amber)":"1px solid var(--border)", cursor:"pointer" }}
-                    onClick={()=>setDraft(d=>({...d,title:h}))}>
-                    <span style={{ fontSize:12, flex:1 }}>{h}</span>
-                    {draft.title===h && <span style={{ fontSize:10, color:"var(--amber)", fontWeight:700 }}>Selected</span>}
+              {/* Overall score + keyword */}
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+                {[
+                  { label:"Overall SEO Score", value:`${enhance.overallScore}/100`, color: enhance.overallScore>=80?"#5cba6c":enhance.overallScore>=60?"var(--amber)":"var(--red)" },
+                  { label:"Readability Score",  value:`${enhance.readabilityScore}/100`, color:"#7c3aed" },
+                  { label:"Primary Keyword",   value:enhance.primaryKeyword, color:"var(--amber)" },
+                ].map(s => (
+                  <div key={s.label} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:"14px 16px" }}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{s.label}</div>
+                    <div style={{ fontSize:20, fontWeight:700, color:s.color }}>{s.value}</div>
                   </div>
                 ))}
               </div>
+
+              {/* Title options */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>
+                  Title Options — pick one (Google shows ~60 chars)
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {(enhance.titles || []).map((t, i) => {
+                    const selected = enhance.selectedTitle === i;
+                    const over = t.charCount > 60 || t.text?.length > 60;
+                    const score = t.score || 0;
+                    const scoreColor = score >= 80 ? "#5cba6c" : score >= 65 ? "var(--amber)" : "var(--red)";
+                    return (
+                      <div key={i} onClick={() => setEnhance(e => ({ ...e, selectedTitle:i, metaTitle:t.text }))}
+                        style={{ padding:"12px 14px", borderRadius:9, border:`2px solid ${selected?"var(--amber)":"var(--border)"}`, background:selected?"var(--amber-glow)":"var(--bg-elevated)", cursor:"pointer", transition:"all 0.15s" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
+                          <div style={{ flex:1 }}>
+                            <div style={{ fontSize:13, fontWeight:selected?700:400, color:"var(--text)", marginBottom:4, lineHeight:1.4 }}>{t.text}</div>
+                            <div style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.5 }}>💡 {t.why}</div>
+                          </div>
+                          <div style={{ display:"flex", gap:8, flexShrink:0, alignItems:"center" }}>
+                            <span style={{ fontSize:10, color:over?"var(--red)":"var(--muted)" }}>{t.text?.length || t.charCount}/60</span>
+                            <span style={{ fontSize:12, fontWeight:700, color:scoreColor, padding:"2px 8px", borderRadius:6, background:scoreColor+"15" }}>{score}</span>
+                            {selected && <span style={{ fontSize:10, fontWeight:700, color:"var(--amber)" }}>✓ Selected</span>}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Editable selected title */}
+                <div style={{ marginTop:12 }}>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Edit selected title</label>
+                  <input value={enhance.metaTitle || ""} onChange={e => setEnhance(en => ({ ...en, metaTitle:e.target.value }))}
+                    style={{ ...iS, fontSize:13 }}
+                    onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                  <div style={{ fontSize:10, color:enhance.metaTitle?.length>60?"var(--red)":"var(--muted)", marginTop:3, textAlign:"right" }}>
+                    {enhance.metaTitle?.length || 0}/60 chars {enhance.metaTitle?.length>60?"— too long, Google will cut it off":""}
+                  </div>
+                </div>
+              </div>
+
+              {/* Description options */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>
+                  Meta Description Options — pick one (Google shows ~160 chars)
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {(enhance.descriptions || []).map((d, i) => {
+                    const selected = enhance.selectedDesc === i;
+                    const over = d.charCount > 160 || d.text?.length > 160;
+                    const score = d.score || 0;
+                    const scoreColor = score >= 80 ? "#5cba6c" : score >= 65 ? "var(--amber)" : "var(--red)";
+                    return (
+                      <div key={i} onClick={() => setEnhance(e => ({ ...e, selectedDesc:i, metaDescription:d.text }))}
+                        style={{ padding:"12px 14px", borderRadius:9, border:`2px solid ${selected?"var(--amber)":"var(--border)"}`, background:selected?"var(--amber-glow)":"var(--bg-elevated)", cursor:"pointer", transition:"all 0.15s" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
+                          <div style={{ flex:1 }}>
+                            <div style={{ fontSize:12, color:"var(--text)", marginBottom:4, lineHeight:1.5 }}>{d.text}</div>
+                            <div style={{ fontSize:11, color:"var(--text-secondary)" }}>💡 {d.why}</div>
+                          </div>
+                          <div style={{ display:"flex", gap:8, flexShrink:0, alignItems:"center" }}>
+                            <span style={{ fontSize:10, color:over?"var(--red)":"var(--muted)" }}>{d.text?.length || d.charCount}/160</span>
+                            <span style={{ fontSize:12, fontWeight:700, color:scoreColor, padding:"2px 8px", borderRadius:6, background:scoreColor+"15" }}>{score}</span>
+                            {selected && <span style={{ fontSize:10, fontWeight:700, color:"var(--amber)" }}>✓ Selected</span>}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ marginTop:12 }}>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Edit selected description</label>
+                  <textarea value={enhance.metaDescription || ""} onChange={e => setEnhance(en => ({ ...en, metaDescription:e.target.value }))}
+                    rows={2} style={{ ...iS, resize:"none", fontSize:12, lineHeight:1.5 }}
+                    onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                  <div style={{ fontSize:10, color:enhance.metaDescription?.length>160?"var(--red)":"var(--muted)", marginTop:3, textAlign:"right" }}>
+                    {enhance.metaDescription?.length || 0}/160 chars {enhance.metaDescription?.length>160?"— too long":""}
+                  </div>
+                </div>
+              </div>
+
+              {/* Live SERP Preview */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>
+                  🔍 Google Search Preview
+                </div>
+                <div style={{ background:"#fff", borderRadius:8, padding:"16px 20px", fontFamily:"Arial, sans-serif" }}>
+                  <div style={{ fontSize:12, color:"#202124", marginBottom:2, opacity:0.6 }}>
+                    caskandstream.com › blog
+                  </div>
+                  <div style={{ fontSize:18, color:"#1a0dab", marginBottom:4, lineHeight:1.3, fontWeight:400, maxWidth:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    {enhance.metaTitle || draft.title}
+                  </div>
+                  <div style={{ fontSize:13, color:"#4d5156", lineHeight:1.6, maxWidth:600 }}>
+                    {(enhance.metaDescription || "").slice(0,160)}{enhance.metaDescription?.length > 160 ? "…" : ""}
+                  </div>
+                </div>
+                <div style={{ marginTop:8, fontSize:11, color:"var(--muted)" }}>
+                  This is exactly how your post appears in Google results. The title {enhance.metaTitle?.length > 60 ? "⚠ is too long and will be cut off" : "✓ fits"} · The description {enhance.metaDescription?.length > 160 ? "⚠ is too long and will be cut off" : "✓ fits"}.
+                </div>
+              </div>
+
+              {/* Secondary keywords + suggestions */}
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                {enhance.secondaryKeywords?.length > 0 && (
+                  <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Secondary Keywords</div>
+                    <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                      {enhance.secondaryKeywords.map((k,i) => (
+                        <span key={i} style={{ padding:"3px 10px", borderRadius:99, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:11, color:"var(--text-secondary)" }}>{k}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {enhance.suggestions?.length > 0 && (
+                  <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Quick Tips</div>
+                    {enhance.suggestions.map((s,i) => (
+                      <div key={i} style={{ fontSize:12, color:"var(--text-secondary)", padding:"3px 0", display:"flex", gap:6 }}>
+                        <span style={{ color:"var(--amber)", flexShrink:0 }}>→</span>{s}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <button onClick={runEnhancement} disabled={loading}
+                style={{ ...btnS, fontSize:11, padding:"6px 14px", alignSelf:"flex-start" }}>
+                ↻ Re-run Analysis
+              </button>
             </div>
           )}
 
           <div style={{ display:"flex", gap:10 }}>
-            <button onClick={()=>{ markDone("enhance"); advanceTo("social"); }} disabled={!enhance.metaTitle} style={{ ...btnA, background:enhance.metaTitle?"var(--amber)":"var(--bg-elevated)", color:enhance.metaTitle?"#0e0f11":"var(--muted)", cursor:enhance.metaTitle?"pointer":"not-allowed" }}>
+            <button onClick={()=>{ markDone("enhance"); advanceTo("social"); }} disabled={!enhance.metaTitle}
+              style={{ ...btnA, background:enhance.metaTitle?"var(--amber)":"var(--bg-elevated)", color:enhance.metaTitle?"#0e0f11":"var(--muted)", cursor:enhance.metaTitle?"pointer":"not-allowed" }}>
               Continue to Social →
             </button>
             <button onClick={()=>setStage("draft")} style={btnS}>← Back to Draft</button>
