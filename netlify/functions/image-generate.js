@@ -39,6 +39,7 @@ export default async (req) => {
           n:      1,
           size,
         }),
+        signal: AbortSignal.timeout(24000),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error.message);
