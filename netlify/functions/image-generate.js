@@ -34,11 +34,10 @@ export default async (req) => {
         method:  "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model:           "gpt-image-2",
+          model:  "gpt-image-2",
           prompt,
-          n:               1,
+          n:      1,
           size,
-          response_format: "b64_json",
         }),
       });
       const data = await res.json();
