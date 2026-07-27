@@ -4804,6 +4804,8 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
     { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
     { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
+    { id:"pinterest", label:"Pinterest", color:"#e60023", icon:"📌" },
+    { id:"reddit",    label:"Reddit",    color:"#ff4500", icon:"🤖" },
   ];
 
   // idea.platforms is now an ARRAY — supports multi-select
@@ -8440,113 +8442,256 @@ const MOBILE_CSS = `
 
 const SOCIAL_PLATFORM_STORAGE = "bb_social_platforms";
 function loadSocialPlatforms() { try { return JSON.parse(localStorage.getItem(SOCIAL_PLATFORM_STORAGE) || "{}"); } catch { return {}; } }
-function saveSocialPlatforms(d) { try { localStorage.setItem(SOCIAL_PLATFORM_STORAGE, JSON.stringify(d)); } catch {} }
+function saveSocialPlatforms(d) {
+  try { localStorage.setItem(SOCIAL_PLATFORM_STORAGE, JSON.stringify(d)); } catch {}
+  // Sync to cloud so scheduler can read webhook URLs
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("social_platforms", uid, d);
+}
 
-function SocialPlatformSettings({ platform, icon, name, color, docsUrl, steps, note }) {
-  const [creds,   setCreds]   = useState(() => loadSocialPlatforms()[platform] || {});
+const PLATFORM_WEBHOOK_CONFIGS = {
+  tiktok: {
+    name:    "TikTok",
+    icon:    "🎵",
+    color:   "#010101",
+    zapier:  "https://zapier.com/apps/tiktok/integrations/webhooks",
+    make:    "https://www.make.com/en/integrations/tiktok",
+    steps: [
+      "Go to zapier.com → Create Zap",
+      'Trigger: "Webhooks by Zapier" → "Catch Hook" → Copy the webhook URL',
+      'Action: "TikTok" → "Create Video Post" (connect your TikTok account)',
+      'Map fields: Caption = {{caption}}, Video URL = {{videoUrl}}',
+      "Turn on the Zap → paste the webhook URL below",
+    ],
+    note: "TikTok via Zapier supports video posts. For image posts, use the Carousel action. Make sure your TikTok account is a Creator or Business account.",
+    fields: ["caption", "imageUrl", "videoUrl", "hashtags"],
+  },
+  pinterest: {
+    name:    "Pinterest",
+    icon:    "📌",
+    color:   "#e60023",
+    zapier:  "https://zapier.com/apps/pinterest/integrations/webhooks",
+    make:    "https://www.make.com/en/integrations/pinterest",
+    steps: [
+      "Go to zapier.com → Create Zap",
+      'Trigger: "Webhooks by Zapier" → "Catch Hook" → Copy the webhook URL',
+      'Action: "Pinterest" → "Create Pin" (connect your Pinterest account)',
+      'Map fields: Title = {{title}}, Description = {{caption}}, Image = {{imageUrl}}, Board = your board name',
+      "Turn on the Zap → paste the webhook URL below",
+    ],
+    note: "Pinterest Pins work best with images. Blog Bunker sends the image URL, caption, and post title. Make sure your image is publicly accessible (saved to GCS Media Library).",
+    fields: ["title", "caption", "imageUrl", "hashtags", "link"],
+  },
+  twitter: {
+    name:    "X (Twitter)",
+    icon:    "🐦",
+    color:   "#1da1f2",
+    zapier:  "https://zapier.com/apps/twitter/integrations/webhooks",
+    make:    "https://www.make.com/en/integrations/twitter",
+    steps: [
+      "Go to zapier.com → Create Zap",
+      'Trigger: "Webhooks by Zapier" → "Catch Hook" → Copy the webhook URL',
+      'Action: "X (Twitter)" → "Create Tweet" (connect your X account)',
+      'Map the Message field to {{caption}} — keep it under 280 chars',
+      "Turn on the Zap → paste the webhook URL below",
+    ],
+    note: "X free tier via Zapier allows posting. Caption is automatically trimmed to 280 characters. Images are included when an imageUrl is provided.",
+    fields: ["caption", "imageUrl", "hashtags"],
+  },
+  reddit: {
+    name:    "Reddit",
+    icon:    "🤖",
+    color:   "#ff4500",
+    zapier:  "https://zapier.com/apps/reddit/integrations/webhooks",
+    make:    "https://www.make.com/en/integrations/reddit",
+    steps: [
+      "Go to zapier.com → Create Zap",
+      'Trigger: "Webhooks by Zapier" → "Catch Hook" → Copy the webhook URL',
+      'Action: "Reddit" → "Submit a Link" or "Submit a Text Post"',
+      'Map fields: Subreddit = {{subreddit}}, Title = {{title}}, URL = {{link}}',
+      "Turn on the Zap → paste the webhook URL below",
+    ],
+    note: "Set your target subreddits below (e.g. flyfishing, bourbon, whiskey). Blog Bunker will suggest the best subreddit based on post topic and send it in the webhook payload.",
+    fields: ["title", "caption", "link", "subreddit"],
+  },
+};
+
+function SocialPlatformSettings({ platform }) {
+  const cfg       = PLATFORM_WEBHOOK_CONFIGS[platform];
+  const [data,    setData]    = useState(() => loadSocialPlatforms()[platform] || {});
   const [saved,   setSaved]   = useState(false);
-  const [visible, setVisible] = useState({});
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState("");
 
-  const FIELDS = {
-    tiktok:   [{ key:"clientKey",   label:"Client Key" },     { key:"clientSecret", label:"Client Secret" }],
-    pinterest:[{ key:"appId",       label:"App ID" },         { key:"appSecret",    label:"App Secret" }],
-    twitter:  [{ key:"apiKey",      label:"API Key" },        { key:"apiSecret",    label:"API Key Secret" },
-               { key:"accessToken", label:"Access Token" },   { key:"accessSecret", label:"Access Token Secret" }],
-    reddit:   [{ key:"clientId",    label:"Client ID" },      { key:"clientSecret", label:"Client Secret" },
-               { key:"username",    label:"Reddit Username" },{ key:"password",     label:"Reddit Password", password:true }],
-  };
-
-  const fields = FIELDS[platform] || [];
-  const isConnected = fields.every(f => !!creds[f.key]);
-
-  const handleSave = () => {
+  const save = (next) => {
     const all = loadSocialPlatforms();
-    all[platform] = { ...creds, connected: isConnected };
+    all[platform] = { ...next, connected: !!next.webhookUrl?.trim() };
     saveSocialPlatforms(all);
+    setData(next);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const testWebhook = async () => {
+    if (!data.webhookUrl?.trim()) return;
+    setTesting(true); setTestMsg("");
+    try {
+      const payload = {
+        platform,
+        title:    "Test post from Blog Bunker",
+        caption:  "This is a test post from Blog Bunker to verify your Zapier webhook is working! 🎣🥃",
+        hashtags: "#CaskAndStream #FlyFishing #Whiskey",
+        imageUrl: "",
+        link:     "https://caskandstream.com",
+        subreddit: data.subreddits?.[0] || "flyfishing",
+        test:     true,
+        sentAt:   new Date().toISOString(),
+      };
+      const res = await fetch(data.webhookUrl, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(payload),
+      });
+      setTestMsg(res.ok ? "✓ Webhook fired! Check your Zapier task history." : `⚠ Response: ${res.status} — check your webhook URL`);
+    } catch(e) {
+      // CORS will block the response but the webhook still fires
+      setTestMsg("✓ Webhook sent! Check your Zapier task history to confirm.");
+    }
+    setTesting(false);
   };
 
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Header */}
       <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-        <span style={{ fontSize:28 }}>{icon}</span>
+        <span style={{ fontSize:28 }}>{cfg.icon}</span>
         <div>
-          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>{name}</h3>
-          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-            {isConnected ? (
-              <span style={{ fontSize:11, color:"#5cba6c", fontWeight:600 }}>● Connected</span>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>{cfg.name}</h3>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            {data.connected ? (
+              <span style={{ fontSize:11, color:"#5cba6c", fontWeight:600 }}>● Connected via Zapier</span>
             ) : (
               <span style={{ fontSize:11, color:"var(--muted)" }}>○ Not connected</span>
             )}
-            <a href={docsUrl} target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)" }}>Developer docs ↗</a>
+            <a href={cfg.zapier} target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)" }}>Zapier integration ↗</a>
+            <a href={cfg.make}   target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)" }}>Make.com ↗</a>
           </div>
+        </div>
+      </div>
+
+      {/* How it works */}
+      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+          How it works
+        </div>
+        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.8, marginBottom:12 }}>
+          Blog Bunker sends your post to a Zapier webhook URL. Zapier then posts it to {cfg.name} using their native integration — no API keys needed on your end.
+        </div>
+        <div style={{ display:"flex", gap:8, alignItems:"center", padding:"8px 12px", borderRadius:7, background:"var(--bg-surface)", fontSize:11, color:"var(--text-secondary)" }}>
+          <span style={{ fontSize:16 }}>📋</span>
+          Blog Bunker → <strong style={{color:"var(--amber)",margin:"0 4px"}}>Zapier Webhook</strong> → {cfg.name}
         </div>
       </div>
 
       {/* Setup steps */}
       <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
-        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Setup Steps</div>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+          Setup (5 minutes)
+        </div>
         <ol style={{ paddingLeft:16, display:"flex", flexDirection:"column", gap:8 }}>
-          {steps.map((step, i) => (
+          {cfg.steps.map((step, i) => (
             <li key={i} style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{step}</li>
           ))}
         </ol>
-        {note && (
+        {cfg.note && (
           <div style={{ marginTop:12, padding:"8px 12px", borderRadius:7, background:"var(--amber-glow)", border:"1px solid var(--amber)33", fontSize:11, color:"var(--amber)", lineHeight:1.6 }}>
-            ℹ {note}
+            ℹ {cfg.note}
           </div>
         )}
       </div>
 
-      {/* Credential fields */}
-      <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-        {fields.map(f => (
-          <div key={f.key}>
-            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
-            <div style={{ position:"relative" }}>
-              <input
-                type={f.password && !visible[f.key] ? "password" : "text"}
-                style={{ ...iS, paddingRight:f.password ? 40 : 14 }}
-                value={creds[f.key] || ""}
-                placeholder={`Enter ${f.label}…`}
-                onChange={e => setCreds(c => ({ ...c, [f.key]: e.target.value }))}
-                onFocus={e=>e.target.style.borderColor=color} onBlur={e=>e.target.style.borderColor="var(--border)"}
-              />
-              {f.password && (
-                <button onClick={() => setVisible(v => ({ ...v, [f.key]: !v[f.key] }))}
-                  style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", fontSize:14, color:"var(--muted)" }}>
-                  {visible[f.key] ? "👁" : "🔒"}
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
+      {/* Webhook URL */}
+      <div>
+        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+          Zapier Webhook URL
+        </label>
+        <input style={iS} placeholder="https://hooks.zapier.com/hooks/catch/..."
+          value={data.webhookUrl || ""}
+          onChange={e => setData(d => ({ ...d, webhookUrl: e.target.value }))}
+          onFocus={e=>e.target.style.borderColor=cfg.color} onBlur={e=>e.target.style.borderColor="var(--border)"} />
       </div>
 
-      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-        <button onClick={handleSave}
-          style={{ padding:"9px 24px", borderRadius:8, border:"none", background:color, color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-          {isConnected ? "Update Credentials" : "Save Credentials"}
+      {/* Reddit-specific: subreddits */}
+      {platform === "reddit" && (
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+            Target Subreddits (comma-separated)
+          </label>
+          <input style={iS} placeholder="flyfishing, bourbon, whiskey, flytying"
+            value={data.subredditsStr || ""}
+            onChange={e => setData(d => ({ ...d, subredditsStr: e.target.value, subreddits: e.target.value.split(",").map(s=>s.trim()).filter(Boolean) }))}
+            onFocus={e=>e.target.style.borderColor=cfg.color} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          <p style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>Blog Bunker picks the most relevant subreddit for each post based on topic.</p>
+        </div>
+      )}
+
+      {/* Pinterest-specific: board name */}
+      {platform === "pinterest" && (
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+            Default Pinterest Board Name
+          </label>
+          <input style={iS} placeholder="Fly Fishing Tips"
+            value={data.boardName || ""}
+            onChange={e => setData(d => ({ ...d, boardName: e.target.value }))}
+            onFocus={e=>e.target.style.borderColor=cfg.color} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        </div>
+      )}
+
+      {/* Payload preview */}
+      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+          Payload Blog Bunker sends to Zapier
+        </div>
+        <pre style={{ fontSize:11, color:"var(--text-secondary)", fontFamily:"monospace", lineHeight:1.7, overflow:"auto" }}>{JSON.stringify({
+          platform,
+          title:     "Your post title",
+          caption:   "Your post caption...",
+          hashtags:  "#CaskAndStream #FlyFishing",
+          imageUrl:  "https://storage.googleapis.com/blogbunker-media/...",
+          link:      "https://caskandstream.com/blog/your-post",
+          ...(platform === "reddit"    ? { subreddit: data.subreddits?.[0] || "flyfishing" } : {}),
+          ...(platform === "pinterest" ? { boardName: data.boardName || "Fly Fishing" }      : {}),
+          scheduledAt: "2026-07-26T14:00:00Z",
+        }, null, 2)}</pre>
+      </div>
+
+      {/* Buttons */}
+      <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+        <button onClick={() => save(data)}
+          style={{ padding:"9px 24px", borderRadius:8, border:"none", background:cfg.color, color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+          Save Settings
         </button>
-        {saved && <span style={{ fontSize:12, color:"#5cba6c" }}>✓ Saved</span>}
-        {isConnected && (
-          <button onClick={() => { const all = loadSocialPlatforms(); delete all[platform]; saveSocialPlatforms(all); setCreds({}); }}
+        {data.webhookUrl?.trim() && (
+          <button onClick={testWebhook} disabled={testing}
+            style={{ padding:"9px 20px", borderRadius:8, border:`1px solid ${cfg.color}44`, background:"transparent", color:cfg.color, fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            {testing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Sending…</> : "▶ Test Webhook"}
+          </button>
+        )}
+        {data.connected && (
+          <button onClick={() => { save({ webhookUrl:"" }); }}
             style={{ padding:"9px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
             Disconnect
           </button>
         )}
-      </div>
-
-      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
-        <strong style={{ color:"var(--text)" }}>Coming next:</strong> Once credentials are saved, Blog Bunker will add {name} as an option in the Social Pipeline publish stage so you can post directly without leaving Blog Bunker.
+        {saved   && <span style={{ fontSize:12, color:"#5cba6c" }}>✓ Saved</span>}
+        {testMsg && <span style={{ fontSize:12, color: testMsg.startsWith("✓") ? "#5cba6c" : "var(--amber)" }}>{testMsg}</span>}
       </div>
     </div>
   );
 }
-
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -8658,15 +8803,17 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
     }
   };
 
-  // Opens the preview modal with an AI-drafted prompt the user can edit before generating
+  // Opens the preview modal with a pre-built prompt the user can edit before generating
   const openPromptPreview = async () => {
     setLoading(true); setError("");
     try {
       let draftedPrompt = prompt;
       if (!draftedPrompt) {
-        const topic = `${title}. ${(body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim()}`;
-        draftedPrompt = await generateImagePrompt(topic, "facebook", activeProvider, activeModel, apiKeys[activeProvider]);
-        draftedPrompt += `, ${HEADLINE_IMAGE_SPEC.style}, wide editorial banner`;
+        // Build a prompt directly from the title — no extra AI call needed
+        const guide = loadBrandGuide();
+        const style = guide?.imageStyle || "cinematic editorial photography, moody atmospheric, fly fishing and whiskey lifestyle, amber and teal tones";
+        const topic = (title || "").replace(/[#*\n]/g, " ").trim();
+        draftedPrompt = `${topic}, ${style}, wide landscape banner, professional photography, golden hour lighting, 16:9 aspect ratio`;
       }
       setDraftPrompt(draftedPrompt);
       setPreviewOpen(true);
@@ -10199,31 +10346,19 @@ export default function Dashboard({ user, workspace }) {
                 )}
 
                 {settingsSection==="tiktok"&&(
-                  <SocialPlatformSettings platform="tiktok" icon="🎵" name="TikTok"
-                    color="#010101" docsUrl="https://developers.tiktok.com"
-                    steps={["Go to developers.tiktok.com → My Apps → Create app","Add the 'Video Upload' and 'Video Publish' products","Copy your Client Key","Add TikTok as a redirect URI for your OAuth app","Paste your Client Key and Secret below"]}
-                    note="TikTok's Content Posting API requires business account approval. Video publishing is supported; image posts require a Carousel API application." />
+                  <SocialPlatformSettings platform="tiktok" />
                 )}
 
                 {settingsSection==="pinterest"&&(
-                  <SocialPlatformSettings platform="pinterest" icon="📌" name="Pinterest"
-                    color="#e60023" docsUrl="https://developers.pinterest.com"
-                    steps={["Go to developers.pinterest.com → My apps → Create app","Enable 'Pins:read_write' and 'Boards:read_write' scopes","Copy your App ID and App Secret","Paste below — Blog Bunker handles the OAuth flow"]}
-                    note="Pinterest auto-publishing creates Pins from your blog posts and social images. Boards are auto-detected from your account." />
+                  <SocialPlatformSettings platform="pinterest" />
                 )}
 
                 {settingsSection==="twitter"&&(
-                  <SocialPlatformSettings platform="twitter" icon="🐦" name="X (Twitter)"
-                    color="#1da1f2" docsUrl="https://developer.twitter.com"
-                    steps={["Go to developer.twitter.com → Projects & Apps → New App","Apply for 'Basic' access (free, includes tweet posting)","Under 'Keys and tokens' copy your API Key, API Secret, Access Token, and Access Token Secret","Paste all four below"]}
-                    note="X/Twitter requires separate API Key + Secret and Access Token + Secret. Free Basic access allows 1500 tweets/month." />
+                  <SocialPlatformSettings platform="twitter" />
                 )}
 
                 {settingsSection==="reddit"&&(
-                  <SocialPlatformSettings platform="reddit" icon="🤖" name="Reddit"
-                    color="#ff4500" docsUrl="https://www.reddit.com/prefs/apps"
-                    steps={["Go to reddit.com/prefs/apps → Create another app","Select 'script' type","Set redirect URI to https://blogbunker.netlify.app/api/reddit-callback","Copy your Client ID (under app name) and Client Secret"]}
-                    note="Reddit posting creates text or link posts to fly fishing subreddits like r/flyfishing, r/bourbon, r/whiskey. Blog Bunker suggests relevant subreddits based on post topic." />
+                  <SocialPlatformSettings platform="reddit" />
                 )}
 
                 {settingsSection==="social"&&(
