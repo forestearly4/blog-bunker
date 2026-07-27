@@ -438,39 +438,68 @@ function getAvailableImageProviders(apiKeys) {
 async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
   const provider = forceProvider || getImageProvider(apiKeys);
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
-
-  if (!provider) {
-    throw new Error("No image provider connected. Add an OpenAI or Gemini key in Settings → API Keys.");
-  }
-
+  if (!provider) throw new Error("No image provider connected. Add an OpenAI or Gemini key in Settings → API Keys.");
   const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
   const apiKey = apiKeys[keyMap[provider]];
-  if (!apiKey) {
-    throw new Error(`${getImageProviderLabel(provider)} key not set. Add it in Settings → API Keys.`);
-  }
-
-  // Map provider name to proxy format
-  const proxyProvider = provider === "dalle" ? "openai" : provider === "gemini-image" ? "gemini" : "stability";
+  if (!apiKey) throw new Error(`${getImageProviderLabel(provider)} key not set. Add it in Settings → API Keys.`);
   const sizeMap = { "1:1":"1024x1024", "3:2":"1536x1024", "2:3":"1024x1536", "16:9":"1536x1024" };
   const size = sizeMap[spec.ratio] || "1024x1024";
 
-  // Route through Netlify function to avoid CORS
+  // OpenAI — call directly from browser (avoids Netlify 10s timeout, OpenAI supports CORS for images)
+  if (provider === "dalle") {
+    const res = await fetch("https://api.openai.com/v1/images/generations", {
+      method:  "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model:"gpt-image-2", prompt, n:1, size }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(`OpenAI: ${data.error.message}`);
+    const b64 = data.data?.[0]?.b64_json;
+    if (!b64) throw new Error("No image data returned from OpenAI");
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    return URL.createObjectURL(new Blob([bytes], { type:"image/png" }));
+  }
+
+  // Gemini — call directly from browser
+  if (provider === "gemini-image") {
+    const models = ["gemini-3.1-flash-image-preview", "gemini-2.5-flash-image"];
+    let lastErr = "";
+    for (const model of models) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
+              generationConfig: { responseModalities: ["IMAGE","TEXT"] },
+            }),
+          }
+        );
+        const data = await res.json();
+        if (data.error) { lastErr = data.error.message; continue; }
+        const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+        if (!part) { lastErr = "No image data returned"; continue; }
+        const bytes = Uint8Array.from(atob(part.inlineData.data), c => c.charCodeAt(0));
+        return URL.createObjectURL(new Blob([bytes], { type: part.inlineData.mimeType || "image/png" }));
+      } catch(e) { lastErr = e.message; }
+    }
+    throw new Error(`Gemini image failed: ${lastErr}`);
+  }
+
+  // Stability AI — still needs proxy (no CORS support)
   const res = await fetch("/api/image-generate", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider: proxyProvider, prompt, apiKey, size, quality: "medium" }),
+    body: JSON.stringify({ provider:"stability", prompt, apiKey, size }),
   });
-
-  const data = await res.json();
+  const text = await res.text();
+  if (text.trimStart().startsWith("<")) throw new Error("Image generation timed out — try again");
+  const data = JSON.parse(text);
   if (data.error) throw new Error(data.error);
-  if (!data.b64) throw new Error("No image data returned");
-
-  // Convert base64 → blob URL for display
-  const byteStr = atob(data.b64);
-  const bytes   = new Uint8Array(byteStr.length);
-  for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
-  const blob = new Blob([bytes], { type: data.mimeType || "image/png" });
-  return URL.createObjectURL(blob);
+  const bytes = Uint8Array.from(atob(data.b64), c => c.charCodeAt(0));
+  return URL.createObjectURL(new Blob([bytes], { type:"image/png" }));
 }
 
 function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", userId, style: extraStyle = {} }) {
