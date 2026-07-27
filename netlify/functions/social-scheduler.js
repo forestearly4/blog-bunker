@@ -135,6 +135,36 @@ export default async () => {
               published++;
               console.log(`[scheduler] ✓ Instagram: ${id}`);
 
+            } else if (["twitter","tiktok","pinterest","reddit"].includes(platId)) {
+              // Webhook platforms via Zapier
+              let platformCfg = null;
+              try { platformCfg = await store.get(`${userId}:social_platforms`, { type:"json" }); } catch {}
+              const webhookUrl = platformCfg?.[platId]?.webhookUrl;
+              if (!webhookUrl) {
+                results[platId] = { success:false, error:`No Zapier webhook URL set for ${platId} — add it in Settings` };
+                continue;
+              }
+              const payload = {
+                platform:   platId,
+                title:      post.title || "",
+                caption:    fullMessage,
+                hashtags:   post.hashtags || "",
+                imageUrl:   imageUrl || "",
+                link:       post.link || "",
+                subreddit:  platformCfg?.[platId]?.subreddits?.[0] || "flyfishing",
+                boardName:  platformCfg?.[platId]?.boardName || "",
+                scheduledAt: post.scheduledAt,
+              };
+              const res = await fetch(webhookUrl, {
+                method:  "POST",
+                headers: { "Content-Type": "application/json" },
+                body:    JSON.stringify(payload),
+              });
+              if (!res.ok) throw new Error(`Webhook returned ${res.status}`);
+              results[platId] = { success:true, id:`webhook_${Date.now()}` };
+              published++;
+              console.log(`[scheduler] ✓ ${platId} webhook fired`);
+
             } else {
               results[platId] = { success: false, error: "Platform not connected" };
             }
