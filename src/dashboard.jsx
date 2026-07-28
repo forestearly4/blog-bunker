@@ -8464,6 +8464,9 @@ function BufferSettings() {
     threads: "Threads", bluesky: "Bluesky", youtube: "YouTube", linkedin: "LinkedIn",
   };
 
+  const [orgId,    setOrgId]    = useState(() => loadBufferConfig().orgId || "");
+  const [account,  setAccount]  = useState(() => loadBufferConfig().account || null);
+
   const loadChannels = async () => {
     if (!apiKey.trim()) { setError("Enter your Buffer API key first"); return; }
     setLoading(true); setError("");
@@ -8476,13 +8479,15 @@ function BufferSettings() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       setChannels(data.channels || []);
-      if ((data.channels||[]).length === 0) setError("No channels found — make sure you have social accounts connected in Buffer.");
+      setOrgId(data.orgId || "");
+      setAccount(data.account || null);
+      if ((data.channels||[]).length === 0) setError("No channels found — connect social accounts in Buffer first.");
     } catch(e) { setError(e.message); }
     setLoading(false);
   };
 
   const save = () => {
-    const cfg = { apiKey: apiKey.trim(), channels, mapping, connected: !!apiKey.trim() && channels.length > 0 };
+    const cfg = { apiKey: apiKey.trim(), channels, mapping, orgId, account, connected: !!apiKey.trim() && channels.length > 0 };
     saveBufferConfig(cfg);
     setConfig(cfg);
     setSaved(true);
@@ -8581,7 +8586,11 @@ function BufferSettings() {
 
       {error && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{error}</div>}
 
-      {/* Channel mapping */}
+      {account && !error && (
+        <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", fontSize:12, color:"#5cba6c", display:"flex", alignItems:"center", gap:8 }}>
+          ✓ Connected as <strong style={{marginLeft:4}}>{account.name || account.email}</strong> · {channels.length} channel{channels.length !== 1 ? "s" : ""} found
+        </div>
+      )}
       {channels.length > 0 && (
         <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
           <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>
