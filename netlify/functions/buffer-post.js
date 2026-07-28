@@ -34,7 +34,7 @@ const GET_CHANNELS = `
       id
       name
       service
-      serviceType
+      serviceId
     }
   }
 `;
