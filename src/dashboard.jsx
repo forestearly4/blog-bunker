@@ -8490,30 +8490,57 @@ function BufferSettings() {
   };
 
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
-
   const SERVICE_ICONS = { twitter:"🐦", tiktok:"🎵", pinterest:"📌", instagram:"📸", facebook:"👍", threads:"🧵", bluesky:"🦋", youtube:"▶", linkedin:"💼", reddit:"🤖", googlebusiness:"📍" };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Header */}
       <div style={{ display:"flex", alignItems:"center", gap:12 }}>
         <span style={{ fontSize:28 }}>🟦</span>
         <div>
-          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>Buffer</h3>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>Buffer — Extended Reach</h3>
           <div style={{ fontSize:11, color: config.connected ? "#5cba6c" : "var(--muted)", fontWeight: config.connected ? 600 : 400 }}>
-            {config.connected ? `● Connected · ${channels.length} channels` : "○ Not connected"}
+            {config.connected ? `● Connected · ${channels.length} channels` : "○ Optional · not connected"}
           </div>
         </div>
       </div>
 
-      {/* How it works */}
-      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
-        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.8, marginBottom:8 }}>
-          Buffer connects Blog Bunker to X, TikTok, Pinterest, Instagram, Facebook, Reddit, Threads, Bluesky, YouTube, and LinkedIn — all through one API key. No API keys, no OAuth flows per platform. Just connect your accounts in Buffer and Blog Bunker posts to all of them.
+      {/* Optional framing banner */}
+      <div style={{ background:"var(--amber-glow)", border:"1px solid var(--amber)44", borderRadius:10, padding:16 }}>
+        <div style={{ fontSize:13, fontWeight:700, color:"var(--amber)", marginBottom:6 }}>
+          📸 Facebook & Instagram already work without Buffer
         </div>
-        <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-          {["🐦 X","🎵 TikTok","📌 Pinterest","📸 Instagram","👍 Facebook","🤖 Reddit","🧵 Threads","🦋 Bluesky","▶ YouTube","💼 LinkedIn"].map(p => (
-            <span key={p} style={{ fontSize:11, padding:"2px 8px", borderRadius:99, background:"var(--bg-surface)", border:"1px solid var(--border)", color:"var(--text-secondary)" }}>{p}</span>
-          ))}
+        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
+          Blog Bunker posts directly to Facebook and Instagram through your existing connection in <strong style={{color:"var(--text)"}}>Settings → Facebook & Instagram</strong>. Buffer is an optional add-on that unlocks posting to <strong style={{color:"var(--text)"}}>X, TikTok, Pinterest, Reddit, Threads, Bluesky, YouTube, and LinkedIn</strong> — all through one connection.
+        </div>
+      </div>
+
+      {/* Platform coverage */}
+      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+          What each connection covers
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+          <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-surface)", border:"1px solid #5cba6c33" }}>
+            <div style={{ fontSize:11, fontWeight:700, color:"#5cba6c", marginBottom:6 }}>✓ Built-in (no Buffer needed)</div>
+            <div style={{ fontSize:12, color:"var(--text-secondary)", display:"flex", flexDirection:"column", gap:3 }}>
+              <span>📸 Instagram</span>
+              <span>👍 Facebook</span>
+            </div>
+          </div>
+          <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-surface)", border:"1px solid var(--amber)33" }}>
+            <div style={{ fontSize:11, fontWeight:700, color:"var(--amber)", marginBottom:6 }}>+ Unlocked with Buffer</div>
+            <div style={{ fontSize:12, color:"var(--text-secondary)", display:"grid", gridTemplateColumns:"1fr 1fr", gap:3 }}>
+              <span>🐦 X (Twitter)</span>
+              <span>🎵 TikTok</span>
+              <span>📌 Pinterest</span>
+              <span>🤖 Reddit</span>
+              <span>🧵 Threads</span>
+              <span>🦋 Bluesky</span>
+              <span>▶ YouTube</span>
+              <span>💼 LinkedIn</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -8522,20 +8549,22 @@ function BufferSettings() {
         <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Setup (2 minutes)</div>
         <ol style={{ paddingLeft:16, display:"flex", flexDirection:"column", gap:8 }}>
           {[
-            "Sign up at buffer.com (free plan works)",
-            "Connect your social accounts in Buffer (X, TikTok, Pinterest, etc.)",
-            "Go to buffer.com/api → Generate API Key",
+            <>Sign up at <a href="https://buffer.com" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>buffer.com</a> — free plan works</>,
+            "Connect your social accounts in Buffer (X, TikTok, Pinterest, etc.) — Buffer handles all the OAuth",
+            <>Go to <a href="https://buffer.com/api" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>buffer.com/api</a> → Generate API Key</>,
             "Paste the key below → click Load Channels",
-            "Map each platform to its Buffer channel → Save",
+            "Map each Buffer channel to its platform → Save",
           ].map((s, i) => (
             <li key={i} style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{s}</li>
           ))}
         </ol>
       </div>
 
-      {/* API Key */}
+      {/* API Key input */}
       <div>
-        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Buffer API Key</label>
+        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+          Buffer API Key
+        </label>
         <div style={{ display:"flex", gap:8 }}>
           <input style={{ ...iS, flex:1 }} type="password" placeholder="paste your Buffer API key…"
             value={apiKey} onChange={e => setApiKey(e.target.value)}
@@ -8546,7 +8575,7 @@ function BufferSettings() {
           </button>
         </div>
         <p style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>
-          Get your key at <a href="https://buffer.com/api" target="_blank" rel="noopener" style={{ color:"var(--amber)" }}>buffer.com/api</a> → Generate API Key (you must be the org owner)
+          Find your key at <a href="https://buffer.com/api" target="_blank" rel="noopener" style={{ color:"var(--amber)" }}>buffer.com/api</a> → Generate API Key (must be the org owner)
         </p>
       </div>
 
@@ -8556,14 +8585,14 @@ function BufferSettings() {
       {channels.length > 0 && (
         <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
           <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>
-            Your Buffer Channels — map to platforms
+            Map your Buffer channels
           </div>
-          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
             {channels.map(ch => (
               <div key={ch.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                 <span style={{ fontSize:18 }}>{SERVICE_ICONS[ch.service?.toLowerCase()] || "📱"}</span>
-                <div style={{ flex:1 }}>
-                  <div style={{ fontSize:13, fontWeight:600 }}>{ch.name}</div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ch.name}</div>
                   <div style={{ fontSize:11, color:"var(--text-secondary)", textTransform:"capitalize" }}>{ch.service} · {ch.serviceType}</div>
                 </div>
                 <select
@@ -8574,8 +8603,8 @@ function BufferSettings() {
                     if (platform) next[platform] = ch.id;
                     setMapping(next);
                   }}
-                  style={{ ...iS, width:"auto", minWidth:140, cursor:"pointer" }}>
-                  <option value="">Not mapped</option>
+                  style={{ ...iS, width:"auto", minWidth:150, cursor:"pointer" }}>
+                  <option value="">— not mapped —</option>
                   {Object.entries(PLATFORM_NAMES).map(([id, name]) => (
                     <option key={id} value={id}>{name}</option>
                   ))}
@@ -8583,12 +8612,13 @@ function BufferSettings() {
               </div>
             ))}
           </div>
-          <p style={{ fontSize:11, color:"var(--muted)", marginTop:10 }}>
-            Map each Buffer channel to the Blog Bunker platform it represents. When you schedule a post to X, Blog Bunker sends it to whichever Buffer channel is mapped to X.
+          <p style={{ fontSize:11, color:"var(--muted)", marginTop:10, lineHeight:1.6 }}>
+            Map each Buffer channel to the platform it represents. When you schedule a post to X in Blog Bunker, it sends to whichever Buffer channel is mapped to X.
           </p>
         </div>
       )}
 
+      {/* Save / disconnect */}
       <div style={{ display:"flex", gap:10, alignItems:"center" }}>
         <button onClick={save}
           style={{ padding:"9px 24px", borderRadius:8, border:"none", background:"#1da1f2", color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -8597,7 +8627,7 @@ function BufferSettings() {
         {config.connected && (
           <button onClick={() => { saveBufferConfig({}); setConfig({}); setApiKey(""); setChannels([]); setMapping({}); }}
             style={{ padding:"9px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-            Disconnect
+            Disconnect Buffer
           </button>
         )}
         {saved && <span style={{ fontSize:12, color:"#5cba6c" }}>✓ Saved</span>}
