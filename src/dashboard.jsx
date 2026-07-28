@@ -2966,6 +2966,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               activeProvider={activeProvider}
               activeModel={activeModel}
               apiKeys={apiKeys}
+              onImageSaved={(url) => setDraft(d => ({ ...d, headlineImageUrl: url }))}
             />
           )}
         </div>
@@ -8438,260 +8439,193 @@ const MOBILE_CSS = `
   }
 `;
 
-// ─── SOCIAL PLATFORM SETTINGS ────────────────────────────────────────────────
+// ─── BUFFER SETTINGS ─────────────────────────────────────────────────────────
 
-const SOCIAL_PLATFORM_STORAGE = "bb_social_platforms";
-function loadSocialPlatforms() { try { return JSON.parse(localStorage.getItem(SOCIAL_PLATFORM_STORAGE) || "{}"); } catch { return {}; } }
-function saveSocialPlatforms(d) {
-  try { localStorage.setItem(SOCIAL_PLATFORM_STORAGE, JSON.stringify(d)); } catch {}
-  // Sync to cloud so scheduler can read webhook URLs
+const BUFFER_STORAGE = "bb_buffer_config";
+function loadBufferConfig() { try { return JSON.parse(localStorage.getItem(BUFFER_STORAGE) || "{}"); } catch { return {}; } }
+function saveBufferConfig(d) {
+  try { localStorage.setItem(BUFFER_STORAGE, JSON.stringify(d)); } catch {}
   const uid = window.__bbUserId;
-  if (uid) cloudSet("social_platforms", uid, d);
+  if (uid) cloudSet("buffer_config", uid, d);
 }
 
-const PLATFORM_WEBHOOK_CONFIGS = {
-  tiktok: {
-    name:    "TikTok",
-    icon:    "🎵",
-    color:   "#010101",
-    zapier:  "https://zapier.com/apps/tiktok/integrations/webhooks",
-    make:    "https://www.make.com/en/integrations/tiktok",
-    steps: [
-      "Go to zapier.com → Create Zap",
-      'Trigger: "Webhooks by Zapier" → "Catch Hook" → Copy the webhook URL',
-      'Action: "TikTok" → "Create Video Post" (connect your TikTok account)',
-      'Map fields: Caption = {{caption}}, Video URL = {{videoUrl}}',
-      "Turn on the Zap → paste the webhook URL below",
-    ],
-    note: "TikTok via Zapier supports video posts. For image posts, use the Carousel action. Make sure your TikTok account is a Creator or Business account.",
-    fields: ["caption", "imageUrl", "videoUrl", "hashtags"],
-  },
-  pinterest: {
-    name:    "Pinterest",
-    icon:    "📌",
-    color:   "#e60023",
-    zapier:  "https://zapier.com/apps/pinterest/integrations/webhooks",
-    make:    "https://www.make.com/en/integrations/pinterest",
-    steps: [
-      "Go to zapier.com → Create Zap",
-      'Trigger: "Webhooks by Zapier" → "Catch Hook" → Copy the webhook URL',
-      'Action: "Pinterest" → "Create Pin" (connect your Pinterest account)',
-      'Map fields: Title = {{title}}, Description = {{caption}}, Image = {{imageUrl}}, Board = your board name',
-      "Turn on the Zap → paste the webhook URL below",
-    ],
-    note: "Pinterest Pins work best with images. Blog Bunker sends the image URL, caption, and post title. Make sure your image is publicly accessible (saved to GCS Media Library).",
-    fields: ["title", "caption", "imageUrl", "hashtags", "link"],
-  },
-  twitter: {
-    name:    "X (Twitter)",
-    icon:    "🐦",
-    color:   "#1da1f2",
-    zapier:  "https://zapier.com/apps/twitter/integrations/webhooks",
-    make:    "https://www.make.com/en/integrations/twitter",
-    steps: [
-      "Go to zapier.com → Create Zap",
-      'Trigger: "Webhooks by Zapier" → "Catch Hook" → Copy the webhook URL',
-      'Action: "X (Twitter)" → "Create Tweet" (connect your X account)',
-      'Map the Message field to {{caption}} — keep it under 280 chars',
-      "Turn on the Zap → paste the webhook URL below",
-    ],
-    note: "X free tier via Zapier allows posting. Caption is automatically trimmed to 280 characters. Images are included when an imageUrl is provided.",
-    fields: ["caption", "imageUrl", "hashtags"],
-  },
-  reddit: {
-    name:    "Reddit",
-    icon:    "🤖",
-    color:   "#ff4500",
-    zapier:  "https://zapier.com/apps/reddit/integrations/webhooks",
-    make:    "https://www.make.com/en/integrations/reddit",
-    steps: [
-      "Go to zapier.com → Create Zap",
-      'Trigger: "Webhooks by Zapier" → "Catch Hook" → Copy the webhook URL',
-      'Action: "Reddit" → "Submit a Link" or "Submit a Text Post"',
-      'Map fields: Subreddit = {{subreddit}}, Title = {{title}}, URL = {{link}}',
-      "Turn on the Zap → paste the webhook URL below",
-    ],
-    note: "Set your target subreddits below (e.g. flyfishing, bourbon, whiskey). Blog Bunker will suggest the best subreddit based on post topic and send it in the webhook payload.",
-    fields: ["title", "caption", "link", "subreddit"],
-  },
-};
+function BufferSettings() {
+  const [config,   setConfig]   = useState(loadBufferConfig);
+  const [apiKey,   setApiKey]   = useState(() => loadBufferConfig().apiKey || "");
+  const [channels, setChannels] = useState(() => loadBufferConfig().channels || []);
+  const [loading,  setLoading]  = useState(false);
+  const [saved,    setSaved]    = useState(false);
+  const [error,    setError]    = useState("");
+  const [mapping,  setMapping]  = useState(() => loadBufferConfig().mapping || {});
 
-function SocialPlatformSettings({ platform }) {
-  const cfg       = PLATFORM_WEBHOOK_CONFIGS[platform];
-  const [data,    setData]    = useState(() => loadSocialPlatforms()[platform] || {});
-  const [saved,   setSaved]   = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [testMsg, setTestMsg] = useState("");
+  const PLATFORM_NAMES = {
+    twitter: "X (Twitter)", tiktok: "TikTok", pinterest: "Pinterest",
+    reddit: "Reddit", instagram: "Instagram", facebook: "Facebook",
+    threads: "Threads", bluesky: "Bluesky", youtube: "YouTube", linkedin: "LinkedIn",
+  };
 
-  const save = (next) => {
-    const all = loadSocialPlatforms();
-    all[platform] = { ...next, connected: !!next.webhookUrl?.trim() };
-    saveSocialPlatforms(all);
-    setData(next);
+  const loadChannels = async () => {
+    if (!apiKey.trim()) { setError("Enter your Buffer API key first"); return; }
+    setLoading(true); setError("");
+    try {
+      const res  = await fetch("/api/buffer-post", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ apiKey: apiKey.trim(), action: "getChannels" }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setChannels(data.channels || []);
+      if ((data.channels||[]).length === 0) setError("No channels found — make sure you have social accounts connected in Buffer.");
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const save = () => {
+    const cfg = { apiKey: apiKey.trim(), channels, mapping, connected: !!apiKey.trim() && channels.length > 0 };
+    saveBufferConfig(cfg);
+    setConfig(cfg);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
 
-  const testWebhook = async () => {
-    if (!data.webhookUrl?.trim()) return;
-    setTesting(true); setTestMsg("");
-    try {
-      const payload = {
-        platform,
-        title:    "Test post from Blog Bunker",
-        caption:  "This is a test post from Blog Bunker to verify your Zapier webhook is working! 🎣🥃",
-        hashtags: "#CaskAndStream #FlyFishing #Whiskey",
-        imageUrl: "",
-        link:     "https://caskandstream.com",
-        subreddit: data.subreddits?.[0] || "flyfishing",
-        test:     true,
-        sentAt:   new Date().toISOString(),
-      };
-      const res = await fetch(data.webhookUrl, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(payload),
-      });
-      setTestMsg(res.ok ? "✓ Webhook fired! Check your Zapier task history." : `⚠ Response: ${res.status} — check your webhook URL`);
-    } catch(e) {
-      // CORS will block the response but the webhook still fires
-      setTestMsg("✓ Webhook sent! Check your Zapier task history to confirm.");
-    }
-    setTesting(false);
-  };
-
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const SERVICE_ICONS = { twitter:"🐦", tiktok:"🎵", pinterest:"📌", instagram:"📸", facebook:"👍", threads:"🧵", bluesky:"🦋", youtube:"▶", linkedin:"💼", reddit:"🤖", googlebusiness:"📍" };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
-      {/* Header */}
       <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-        <span style={{ fontSize:28 }}>{cfg.icon}</span>
+        <span style={{ fontSize:28 }}>🟦</span>
         <div>
-          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>{cfg.name}</h3>
-          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-            {data.connected ? (
-              <span style={{ fontSize:11, color:"#5cba6c", fontWeight:600 }}>● Connected via Zapier</span>
-            ) : (
-              <span style={{ fontSize:11, color:"var(--muted)" }}>○ Not connected</span>
-            )}
-            <a href={cfg.zapier} target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)" }}>Zapier integration ↗</a>
-            <a href={cfg.make}   target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)" }}>Make.com ↗</a>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>Buffer</h3>
+          <div style={{ fontSize:11, color: config.connected ? "#5cba6c" : "var(--muted)", fontWeight: config.connected ? 600 : 400 }}>
+            {config.connected ? `● Connected · ${channels.length} channels` : "○ Not connected"}
           </div>
         </div>
       </div>
 
       {/* How it works */}
       <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
-        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
-          How it works
+        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.8, marginBottom:8 }}>
+          Buffer connects Blog Bunker to X, TikTok, Pinterest, Instagram, Facebook, Reddit, Threads, Bluesky, YouTube, and LinkedIn — all through one API key. No API keys, no OAuth flows per platform. Just connect your accounts in Buffer and Blog Bunker posts to all of them.
         </div>
-        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.8, marginBottom:12 }}>
-          Blog Bunker sends your post to a Zapier webhook URL. Zapier then posts it to {cfg.name} using their native integration — no API keys needed on your end.
-        </div>
-        <div style={{ display:"flex", gap:8, alignItems:"center", padding:"8px 12px", borderRadius:7, background:"var(--bg-surface)", fontSize:11, color:"var(--text-secondary)" }}>
-          <span style={{ fontSize:16 }}>📋</span>
-          Blog Bunker → <strong style={{color:"var(--amber)",margin:"0 4px"}}>Zapier Webhook</strong> → {cfg.name}
+        <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+          {["🐦 X","🎵 TikTok","📌 Pinterest","📸 Instagram","👍 Facebook","🤖 Reddit","🧵 Threads","🦋 Bluesky","▶ YouTube","💼 LinkedIn"].map(p => (
+            <span key={p} style={{ fontSize:11, padding:"2px 8px", borderRadius:99, background:"var(--bg-surface)", border:"1px solid var(--border)", color:"var(--text-secondary)" }}>{p}</span>
+          ))}
         </div>
       </div>
 
       {/* Setup steps */}
       <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
-        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
-          Setup (5 minutes)
-        </div>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Setup (2 minutes)</div>
         <ol style={{ paddingLeft:16, display:"flex", flexDirection:"column", gap:8 }}>
-          {cfg.steps.map((step, i) => (
-            <li key={i} style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{step}</li>
+          {[
+            "Sign up at buffer.com (free plan works)",
+            "Connect your social accounts in Buffer (X, TikTok, Pinterest, etc.)",
+            "Go to buffer.com/api → Generate API Key",
+            "Paste the key below → click Load Channels",
+            "Map each platform to its Buffer channel → Save",
+          ].map((s, i) => (
+            <li key={i} style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{s}</li>
           ))}
         </ol>
-        {cfg.note && (
-          <div style={{ marginTop:12, padding:"8px 12px", borderRadius:7, background:"var(--amber-glow)", border:"1px solid var(--amber)33", fontSize:11, color:"var(--amber)", lineHeight:1.6 }}>
-            ℹ {cfg.note}
-          </div>
-        )}
       </div>
 
-      {/* Webhook URL */}
+      {/* API Key */}
       <div>
-        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-          Zapier Webhook URL
-        </label>
-        <input style={iS} placeholder="https://hooks.zapier.com/hooks/catch/..."
-          value={data.webhookUrl || ""}
-          onChange={e => setData(d => ({ ...d, webhookUrl: e.target.value }))}
-          onFocus={e=>e.target.style.borderColor=cfg.color} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Buffer API Key</label>
+        <div style={{ display:"flex", gap:8 }}>
+          <input style={{ ...iS, flex:1 }} type="password" placeholder="paste your Buffer API key…"
+            value={apiKey} onChange={e => setApiKey(e.target.value)}
+            onFocus={e=>e.target.style.borderColor="#1da1f2"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          <button onClick={loadChannels} disabled={loading || !apiKey.trim()}
+            style={{ padding:"10px 18px", borderRadius:8, border:"none", background:loading||!apiKey.trim()?"var(--bg-elevated)":"#1da1f2", color:loading||!apiKey.trim()?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:loading||!apiKey.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:6 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Loading…</> : "Load Channels"}
+          </button>
+        </div>
+        <p style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>
+          Get your key at <a href="https://buffer.com/api" target="_blank" rel="noopener" style={{ color:"var(--amber)" }}>buffer.com/api</a> → Generate API Key (you must be the org owner)
+        </p>
       </div>
 
-      {/* Reddit-specific: subreddits */}
-      {platform === "reddit" && (
-        <div>
-          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-            Target Subreddits (comma-separated)
-          </label>
-          <input style={iS} placeholder="flyfishing, bourbon, whiskey, flytying"
-            value={data.subredditsStr || ""}
-            onChange={e => setData(d => ({ ...d, subredditsStr: e.target.value, subreddits: e.target.value.split(",").map(s=>s.trim()).filter(Boolean) }))}
-            onFocus={e=>e.target.style.borderColor=cfg.color} onBlur={e=>e.target.style.borderColor="var(--border)"} />
-          <p style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>Blog Bunker picks the most relevant subreddit for each post based on topic.</p>
+      {error && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{error}</div>}
+
+      {/* Channel mapping */}
+      {channels.length > 0 && (
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>
+            Your Buffer Channels — map to platforms
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            {channels.map(ch => (
+              <div key={ch.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                <span style={{ fontSize:18 }}>{SERVICE_ICONS[ch.service?.toLowerCase()] || "📱"}</span>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:13, fontWeight:600 }}>{ch.name}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)", textTransform:"capitalize" }}>{ch.service} · {ch.serviceType}</div>
+                </div>
+                <select
+                  value={Object.entries(mapping).find(([,v]) => v === ch.id)?.[0] || ""}
+                  onChange={e => {
+                    const platform = e.target.value;
+                    const next = Object.fromEntries(Object.entries(mapping).filter(([,v]) => v !== ch.id));
+                    if (platform) next[platform] = ch.id;
+                    setMapping(next);
+                  }}
+                  style={{ ...iS, width:"auto", minWidth:140, cursor:"pointer" }}>
+                  <option value="">Not mapped</option>
+                  {Object.entries(PLATFORM_NAMES).map(([id, name]) => (
+                    <option key={id} value={id}>{name}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize:11, color:"var(--muted)", marginTop:10 }}>
+            Map each Buffer channel to the Blog Bunker platform it represents. When you schedule a post to X, Blog Bunker sends it to whichever Buffer channel is mapped to X.
+          </p>
         </div>
       )}
 
-      {/* Pinterest-specific: board name */}
-      {platform === "pinterest" && (
-        <div>
-          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-            Default Pinterest Board Name
-          </label>
-          <input style={iS} placeholder="Fly Fishing Tips"
-            value={data.boardName || ""}
-            onChange={e => setData(d => ({ ...d, boardName: e.target.value }))}
-            onFocus={e=>e.target.style.borderColor=cfg.color} onBlur={e=>e.target.style.borderColor="var(--border)"} />
-        </div>
-      )}
-
-      {/* Payload preview */}
-      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
-        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
-          Payload Blog Bunker sends to Zapier
-        </div>
-        <pre style={{ fontSize:11, color:"var(--text-secondary)", fontFamily:"monospace", lineHeight:1.7, overflow:"auto" }}>{JSON.stringify({
-          platform,
-          title:     "Your post title",
-          caption:   "Your post caption...",
-          hashtags:  "#CaskAndStream #FlyFishing",
-          imageUrl:  "https://storage.googleapis.com/blogbunker-media/...",
-          link:      "https://caskandstream.com/blog/your-post",
-          ...(platform === "reddit"    ? { subreddit: data.subreddits?.[0] || "flyfishing" } : {}),
-          ...(platform === "pinterest" ? { boardName: data.boardName || "Fly Fishing" }      : {}),
-          scheduledAt: "2026-07-26T14:00:00Z",
-        }, null, 2)}</pre>
-      </div>
-
-      {/* Buttons */}
-      <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
-        <button onClick={() => save(data)}
-          style={{ padding:"9px 24px", borderRadius:8, border:"none", background:cfg.color, color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+        <button onClick={save}
+          style={{ padding:"9px 24px", borderRadius:8, border:"none", background:"#1da1f2", color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
           Save Settings
         </button>
-        {data.webhookUrl?.trim() && (
-          <button onClick={testWebhook} disabled={testing}
-            style={{ padding:"9px 20px", borderRadius:8, border:`1px solid ${cfg.color}44`, background:"transparent", color:cfg.color, fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-            {testing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Sending…</> : "▶ Test Webhook"}
-          </button>
-        )}
-        {data.connected && (
-          <button onClick={() => { save({ webhookUrl:"" }); }}
+        {config.connected && (
+          <button onClick={() => { saveBufferConfig({}); setConfig({}); setApiKey(""); setChannels([]); setMapping({}); }}
             style={{ padding:"9px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
             Disconnect
           </button>
         )}
-        {saved   && <span style={{ fontSize:12, color:"#5cba6c" }}>✓ Saved</span>}
-        {testMsg && <span style={{ fontSize:12, color: testMsg.startsWith("✓") ? "#5cba6c" : "var(--amber)" }}>{testMsg}</span>}
+        {saved && <span style={{ fontSize:12, color:"#5cba6c" }}>✓ Saved</span>}
       </div>
     </div>
   );
 }
+
+// Keep old SocialPlatformSettings as a thin wrapper that redirects to Buffer
+const SOCIAL_PLATFORM_STORAGE = "bb_social_platforms";
+function loadSocialPlatforms() { try { return JSON.parse(localStorage.getItem(SOCIAL_PLATFORM_STORAGE) || "{}"); } catch { return {}; } }
+function saveSocialPlatforms(d) {
+  try { localStorage.setItem(SOCIAL_PLATFORM_STORAGE, JSON.stringify(d)); } catch {}
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("social_platforms", uid, d);
+}
+
+function SocialPlatformSettings() {
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--amber)44", borderRadius:10, padding:16, fontSize:13, color:"var(--text-secondary)", lineHeight:1.7 }}>
+        Social platform connections are now managed through <strong style={{color:"var(--text)"}}>Buffer</strong>. Configure your Buffer API key in <strong style={{color:"var(--amber)"}}>Settings → Buffer</strong> to connect X, TikTok, Pinterest, Instagram, Facebook, Reddit, Threads, Bluesky, and YouTube all at once.
+      </div>
+      <BufferSettings />
+    </div>
+  );
+}
+
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -8723,10 +8657,12 @@ const HEADLINE_IMAGE_SPEC = {
   style: "cinematic editorial photography, moody atmospheric, fly fishing and whiskey lifestyle, amber and teal tones, wide landscape",
 };
 
-function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys }) {
+function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys, onImageSaved }) {
   const [imageUrl,    setImageUrl]    = useState(null);
+  const [cloudUrl,    setCloudUrl]    = useState(null); // permanent GCS URL
   const [prompt,      setPrompt]      = useState("");
   const [loading,     setLoading]     = useState(false);
+  const [uploading,   setUploading]   = useState(false);
   const [error,       setError]       = useState("");
   const [copied,      setCopied]      = useState(false);
   const [savedToLib,  setSavedToLib]  = useState(false);
@@ -8823,11 +8759,51 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
 
   const generate = async (finalPrompt) => {
     setPreviewOpen(false);
-    setLoading(true); setError(""); setImageUrl(null);
+    setLoading(true); setError(""); setImageUrl(null); setCloudUrl(null);
     try {
       setPrompt(finalPrompt);
-      const url = await generateImage(finalPrompt, "facebook", apiKeys, imgProvider);
-      setImageUrl(url);
+      const blobUrl = await generateImage(finalPrompt, "facebook", apiKeys, imgProvider);
+      setImageUrl(blobUrl);
+
+      // Auto-upload to GCS so the image persists in the cloud
+      setUploading(true);
+      try {
+        const userId   = window.__bbUserId || "anonymous";
+        const safeName = `headline-${(title || "image").toLowerCase().replace(/\s+/g, "-").slice(0, 30)}-${Date.now()}`;
+
+        // Convert blob URL to base64
+        const res  = await fetch(blobUrl);
+        const blob = await res.blob();
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+
+        const uploadRes = await fetch("/api/gcs", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({
+            userId,
+            dataUrl,
+            name:   safeName,
+            tags:   ["blog headline", "generated"],
+            notes:  `Prompt: ${finalPrompt.slice(0, 100)}`,
+            source: "generated",
+          }),
+        });
+        const uploadData = await uploadRes.json();
+        if (uploadData.url) {
+          setCloudUrl(uploadData.url);
+          if (onImageSaved) onImageSaved(uploadData.url); // notify parent post record
+        }
+      } catch(e) {
+        console.warn("Auto-upload to GCS failed:", e.message);
+        // Not fatal — blob URL still works for display
+      }
+      setUploading(false);
+
     } catch(e) { setError(e.message); }
     setLoading(false);
   };
@@ -8885,11 +8861,26 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↻ New
             </button>
-            <button onClick={handleSaveToLibrary}
-              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:savedToLib?"rgba(92,186,108,0.85)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
-              {savedToLib ? "✓ Saved!" : "🖼 Save to Library"}
-            </button>
+            {cloudUrl ? (
+              <span style={{ padding:"6px 14px", borderRadius:6, background:"rgba(92,186,108,0.85)", color:"#fff", fontSize:11, fontWeight:700, backdropFilter:"blur(4px)" }}>
+                ✓ Saved to Cloud
+              </span>
+            ) : uploading ? (
+              <span style={{ padding:"6px 14px", borderRadius:6, background:"rgba(0,0,0,0.5)", color:"#fff", fontSize:11, backdropFilter:"blur(4px)", display:"flex", alignItems:"center", gap:5 }}>
+                <span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span> Saving…
+              </span>
+            ) : (
+              <button onClick={handleSaveToLibrary}
+                style={{ padding:"6px 14px", borderRadius:6, border:"none", background:savedToLib?"rgba(92,186,108,0.85)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+                {savedToLib ? "✓ Saved!" : "🖼 Save to Library"}
+              </button>
+            )}
           </div>
+          {cloudUrl && (
+            <div style={{ position:"absolute", top:8, left:8, fontSize:10, padding:"3px 8px", borderRadius:99, background:"rgba(0,0,0,0.65)", color:"#5cba6c", fontWeight:600 }}>
+              ☁ Synced to GCS
+            </div>
+          )}
         </div>
         {saveError && <div style={{ fontSize:11, color:"var(--red)", marginTop:6 }}>{saveError}</div>}
         </>
@@ -9431,6 +9422,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           activeProvider={activeProvider || "anthropic"}
           activeModel={activeModel || "claude-sonnet-4-6"}
           apiKeys={apiKeys || {}}
+          onImageSaved={(url) => setForm(f => ({ ...f, headlineImageUrl: url }))}
         />
 
         {/* Copy to Wix */}
@@ -9725,6 +9717,11 @@ export default function Dashboard({ user, workspace }) {
         saveMetaConfig(cloudMeta);
         setMetaConfig(cloudMeta);
       }
+      // Pull Buffer config
+      const cloudBuffer = await cloudGet("buffer_config", userId);
+      if (cloudBuffer && typeof cloudBuffer === "object" && cloudBuffer.apiKey) {
+        saveBufferConfig(cloudBuffer);
+      }
       setCloudSynced(true);
     })();
   }, []);
@@ -9931,10 +9928,7 @@ export default function Dashboard({ user, workspace }) {
     { id:"apikeys",    label:"API Keys"             },
     { id:"gsc",        label:"Search Console"       },
     { id:"meta",       label:"Facebook & Instagram" },
-    { id:"tiktok",     label:"TikTok"               },
-    { id:"pinterest",  label:"Pinterest"            },
-    { id:"twitter",    label:"X (Twitter)"          },
-    { id:"reddit",     label:"Reddit"               },
+    { id:"buffer",     label:"Buffer (Social)"      },
     { id:"social",     label:"Social Media"         },
     { id:"wix",        label:"Wix Integration"      },
     { id:"billing",    label:"Billing & Plan"       },
@@ -10345,21 +10339,14 @@ export default function Dashboard({ user, workspace }) {
                   </div>
                 )}
 
-                {settingsSection==="tiktok"&&(
-                  <SocialPlatformSettings platform="tiktok" />
+                {settingsSection==="buffer"&&(
+                  <BufferSettings />
                 )}
 
-                {settingsSection==="pinterest"&&(
-                  <SocialPlatformSettings platform="pinterest" />
-                )}
-
-                {settingsSection==="twitter"&&(
-                  <SocialPlatformSettings platform="twitter" />
-                )}
-
-                {settingsSection==="reddit"&&(
-                  <SocialPlatformSettings platform="reddit" />
-                )}
+                {settingsSection==="tiktok"&&( <BufferSettings /> )}
+                {settingsSection==="pinterest"&&( <BufferSettings /> )}
+                {settingsSection==="twitter"&&( <BufferSettings /> )}
+                {settingsSection==="reddit"&&( <BufferSettings /> )}
 
                 {settingsSection==="social"&&(
                   <SocialSettings/>
