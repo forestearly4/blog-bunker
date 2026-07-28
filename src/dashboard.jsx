@@ -8593,7 +8593,7 @@ function BufferSettings() {
                 <span style={{ fontSize:18 }}>{SERVICE_ICONS[ch.service?.toLowerCase()] || "📱"}</span>
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ch.name}</div>
-                  <div style={{ fontSize:11, color:"var(--text-secondary)", textTransform:"capitalize" }}>{ch.service} · {ch.serviceType}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)", textTransform:"capitalize" }}>{ch.service} · {ch.serviceId}</div>
                 </div>
                 <select
                   value={Object.entries(mapping).find(([,v]) => v === ch.id)?.[0] || ""}
