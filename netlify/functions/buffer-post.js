@@ -27,14 +27,30 @@ async function bufferQuery(apiKey, query, variables = {}) {
   return data.data;
 }
 
-// Fetch all connected channels for this API key
+// Get account + org ID
+const GET_ACCOUNT = `
+  query GetAccount {
+    account {
+      id
+      email
+      name
+      organizations {
+        id
+        name
+      }
+    }
+  }
+`;
+
+// Fetch channels for an org
 const GET_CHANNELS = `
-  query GetChannels {
-    channels {
+  query GetChannels($input: ChannelsInput!) {
+    channels(input: $input) {
       id
       name
       service
       serviceId
+      avatar
     }
   }
 `;
@@ -64,24 +80,34 @@ export default async (req) => {
   try {
     // ── GET CHANNELS ────────────────────────────────────────────────────────
     if (action === "getChannels") {
-      const data = await bufferQuery(apiKey, GET_CHANNELS);
-      return new Response(JSON.stringify({ channels: data.channels || [] }), { status: 200, headers: CORS });
+      // Step 1: get org ID
+      const accountData = await bufferQuery(apiKey, GET_ACCOUNT);
+      const orgId = accountData?.account?.organizations?.[0]?.id;
+      if (!orgId) throw new Error("No organization found on this Buffer account. Make sure you are the org owner.");
+      // Step 2: get channels for that org
+      const data = await bufferQuery(apiKey, GET_CHANNELS, { input: { organizationId: orgId } });
+      return new Response(JSON.stringify({
+        channels: data.channels || [],
+        orgId,
+        account: accountData.account,
+      }), { status: 200, headers: CORS });
     }
 
     // ── CREATE POST ─────────────────────────────────────────────────────────
     if (action === "createPost") {
       if (!channelId || !text) return new Response(JSON.stringify({ error:"channelId and text required" }), { status: 400, headers: CORS });
 
+      // Per Buffer schema (May 2026): assets is required, even if empty
+      const assets = imageUrl?.startsWith("https://")
+        ? [{ image: { url: imageUrl } }]
+        : [];
       const input = {
         channelId,
         text,
         schedulingType: "automatic",
         mode: scheduledAt ? "customScheduled" : "addToQueue",
         ...(scheduledAt ? { dueAt: new Date(scheduledAt).toISOString() } : {}),
-        // Assets — image must be a public https:// URL (GCS URLs work perfectly)
-        assets: imageUrl?.startsWith("https://")
-          ? [{ image: { url: imageUrl } }]
-          : [],
+        assets,
       };
 
       const data = await bufferQuery(apiKey, CREATE_POST, { input });
