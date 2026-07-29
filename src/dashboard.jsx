@@ -4287,12 +4287,56 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
 // ─── SOCIAL RESEARCH ──────────────────────────────────────────────────────────
 
 function SocialResearch({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
-  const [topic,   setTopic]   = useState("");
-  const [results, setResults] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState("");
+  const [topic,      setTopic]      = useState("");
+  const [results,    setResults]    = useState(null);
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState("");
+  // Post ideas generator
+  const [ideaTopic,  setIdeaTopic]  = useState("");
+  const [ideas,      setIdeas]      = useState(null);
+  const [ideaCount,  setIdeaCount]  = useState(5);
+  const [ideaType,   setIdeaType]   = useState("mixed"); // blog | social | mixed
+  const [loadIdeas,  setLoadIdeas]  = useState(false);
+  const [ideaError,  setIdeaError]  = useState("");
+  const [saved,      setSaved]      = useState({});
+
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const generateIdeas = async () => {
+    if (!ideaTopic.trim()) return;
+    setLoadIdeas(true); setIdeaError(""); setIdeas(null); setSaved({});
+    try {
+      const typeLabel = ideaType === "blog" ? "blog post" : ideaType === "social" ? "social media post" : "blog post or social media post";
+      const text = await callAI(activeProvider, activeModel,
+        `You are a content strategist for Cask & Stream — a fly fishing and whiskey/bourbon lifestyle blog. Generate specific, compelling ${typeLabel} ideas. Return ONLY valid JSON array (no fences, no prose):
+[
+  {
+    "title": "specific post title or hook",
+    "type": "blog" or "social",
+    "platform": "instagram" or "facebook" or "blog" or "tiktok" or "pinterest",
+    "angle": "unique angle or hook in one sentence",
+    "why": "why this will resonate with fly fishing / whiskey audience",
+    "outline": ["point 1", "point 2", "point 3"]
+  }
+]
+Be specific and actionable. Use real fly fishing and whiskey terminology. Vary the angles — educational, storytelling, tips, gear, recipes, locations, seasonal.`,
+        `Generate ${ideaCount} ${typeLabel} ideas for the topic: "${ideaTopic}"\n\nExisting posts to avoid repeating: ${posts.slice(0,8).map(p=>p.title).join("; ")}`,
+        apiKeys[activeProvider],
+        2000
+      );
+      const parsed = parseAIJson(text);
+      setIdeas(Array.isArray(parsed) ? parsed : []);
+    } catch(e) { setIdeaError(e.message); }
+    setLoadIdeas(false);
+  };
+
+  const saveIdea = (idea, i) => {
+    if (onAddInspiration) {
+      onAddInspiration({ id: Date.now() + i, title: idea.title, note: `${idea.angle}\n\nWhy: ${idea.why}\n\nOutline: ${idea.outline?.join(", ")}`, type: idea.type, platform: idea.platform });
+      setSaved(s => ({ ...s, [i]: true }));
+    }
+  };
 
   const research = async () => {
     if (!topic.trim()) return;
@@ -4315,8 +4359,108 @@ function SocialResearch({ activeProvider, activeModel, apiKeys, posts, inspirati
     setLoading(false);
   };
 
+  const IDEA_COUNTS = [3, 5, 8, 10, 15];
+  const IDEA_TYPES = [
+    { id:"mixed",  label:"Blog + Social", icon:"✦" },
+    { id:"blog",   label:"Blog Posts",    icon:"▤" },
+    { id:"social", label:"Social Posts",  icon:"▣" },
+  ];
+  const PLATFORM_COLORS = { blog:"var(--amber)", instagram:"#e1306c", facebook:"#1877f2", tiktok:"#010101", pinterest:"#e60023", twitter:"#1da1f2" };
+
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+
+      {/* ── POST IDEAS GENERATOR ── */}
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}>
+          <span style={{ fontSize:16 }}>✦</span>
+          <div style={{ fontSize:13, fontWeight:700, color:"var(--amber)" }}>Post Ideas Generator</div>
+          <div style={{ fontSize:12, color:"var(--text-secondary)" }}>— get specific ideas for any topic</div>
+        </div>
+
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          <input style={iS} placeholder='e.g. "fly fishing tips and techniques" or "bourbon pairing with wild game" or "best rivers in Georgia"'
+            value={ideaTopic} onChange={e=>setIdeaTopic(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&generateIdeas()}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+
+          <div style={{ display:"flex", gap:12, alignItems:"center", flexWrap:"wrap" }}>
+            {/* Type selector */}
+            <div style={{ display:"flex", gap:5 }}>
+              {IDEA_TYPES.map(t => (
+                <button key={t.id} onClick={()=>setIdeaType(t.id)}
+                  style={{ padding:"6px 12px", borderRadius:7, border:`1px solid ${ideaType===t.id?"var(--amber)":"var(--border)"}`, background:ideaType===t.id?"var(--amber-glow)":"transparent", color:ideaType===t.id?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:ideaType===t.id?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:4 }}>
+                  {t.icon} {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Count selector */}
+            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+              <span style={{ fontSize:11, color:"var(--muted)" }}>How many:</span>
+              {IDEA_COUNTS.map(n => (
+                <button key={n} onClick={()=>setIdeaCount(n)}
+                  style={{ width:32, height:28, borderRadius:6, border:`1px solid ${ideaCount===n?"var(--amber)":"var(--border)"}`, background:ideaCount===n?"var(--amber-glow)":"transparent", color:ideaCount===n?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:ideaCount===n?700:400, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  {n}
+                </button>
+              ))}
+            </div>
+
+            <button onClick={generateIdeas} disabled={!ideaTopic.trim()||loadIdeas}
+              style={{ padding:"8px 20px", borderRadius:8, border:"none", background:ideaTopic.trim()&&!loadIdeas?"var(--amber)":"var(--bg-elevated)", color:ideaTopic.trim()&&!loadIdeas?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:ideaTopic.trim()&&!loadIdeas?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, marginLeft:"auto" }}>
+              {loadIdeas ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : `${provider.logo} Generate Ideas`}
+            </button>
+          </div>
+        </div>
+
+        {ideaError && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33", marginTop:12 }}>{ideaError}</div>}
+
+        {ideas && (
+          <div style={{ marginTop:16, display:"flex", flexDirection:"column", gap:10 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--muted)" }}>{ideas.length} ideas for "{ideaTopic}"</div>
+              <button onClick={generateIdeas}
+                style={{ fontSize:11, color:"var(--text-secondary)", background:"none", border:"none", cursor:"pointer", display:"flex", alignItems:"center", gap:4 }}>
+                ↻ Regenerate
+              </button>
+            </div>
+            {ideas.map((idea, i) => (
+              <div key={i} style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", display:"flex", flexDirection:"column", gap:8 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ display:"flex", gap:6, alignItems:"center", marginBottom:6 }}>
+                      <span style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:(PLATFORM_COLORS[idea.platform]||"var(--amber)")+"15", color:PLATFORM_COLORS[idea.platform]||"var(--amber)", border:`1px solid ${PLATFORM_COLORS[idea.platform]||"var(--amber)"}33`, fontWeight:600, textTransform:"capitalize" }}>
+                        {idea.platform || idea.type}
+                      </span>
+                    </div>
+                    <div style={{ fontSize:14, fontWeight:700, marginBottom:4, lineHeight:1.4 }}>{idea.title}</div>
+                    <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6, marginBottom:4 }}>{idea.angle}</div>
+                    <div style={{ fontSize:11, color:"var(--muted)", fontStyle:"italic" }}>Why it works: {idea.why}</div>
+                  </div>
+                  <button onClick={() => saveIdea(idea, i)} disabled={saved[i]}
+                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:saved[i]?"#5cba6c":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[i]?"default":"pointer", fontFamily:"var(--font-body)", flexShrink:0, whiteSpace:"nowrap" }}>
+                    {saved[i] ? "✓ Saved" : "+ Save Idea"}
+                  </button>
+                </div>
+                {idea.outline?.length > 0 && (
+                  <div style={{ paddingTop:8, borderTop:"1px solid var(--border)" }}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Outline</div>
+                    <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+                      {idea.outline.map((point, j) => (
+                        <div key={j} style={{ fontSize:11, color:"var(--text-secondary)", display:"flex", gap:8 }}>
+                          <span style={{ color:"var(--amber)", flexShrink:0 }}>{j+1}.</span>{point}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── SOCIAL RESEARCH ── */}
       <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
         <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Research Topic or Niche</div>
         <div style={{ display:"flex", gap:10 }}>
@@ -5037,12 +5181,43 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     clearSocialPipelineDraft();
   };
 
-  const handleSchedule = () => {
+  const handleSchedule = async () => {
+    setLoading(true); setError(""); setLoadMsg("Preparing post…");
+
+    // Ensure image is in GCS before scheduling (blob: URLs won't survive the cron)
+    let finalImageUrl = imageData.url;
+    if (finalImageUrl?.startsWith("blob:") || finalImageUrl?.startsWith("data:")) {
+      setLoadMsg("Uploading image to cloud…");
+      try {
+        const userId = window.__bbUserId || "anonymous";
+        let dataUrl  = finalImageUrl;
+        if (finalImageUrl.startsWith("blob:")) {
+          const res  = await fetch(finalImageUrl);
+          const blob = await res.blob();
+          dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload  = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        }
+        const uploadRes  = await fetch("/api/gcs", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ userId, dataUrl, name:`social-${Date.now()}`, tags:["social","scheduled"], source:"generated" }),
+        });
+        const uploadData = await uploadRes.json();
+        if (uploadData.url) finalImageUrl = uploadData.url;
+      } catch(e) { console.warn("Image GCS upload failed:", e.message); }
+    }
+
     const post = buildSocialPostRecord("scheduled", scheduleDate);
+    post.imageUrl = finalImageUrl; // use GCS URL
     if (onSaveSocialPost) onSaveSocialPost(post);
     setSuccess(`✓ Scheduled for ${new Date(scheduleDate).toLocaleString([], {dateStyle:"medium",timeStyle:"short"})}`);
     markDone("publish");
     clearSocialPipelineDraft();
+    setLoading(false); setLoadMsg("");
   };
 
   const handlePublish = async () => {
@@ -5070,9 +5245,43 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
           results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
 
         } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
-          // Buffer platforms — post immediately via Buffer API
+          // Buffer platforms — image must be a public https:// GCS URL
+          let publicImageUrl = imageData.url;
+
+          // If we have a blob: URL, upload it to GCS first
+          if (publicImageUrl?.startsWith("blob:") || publicImageUrl?.startsWith("data:")) {
+            setLoadMsg(`Uploading image to cloud for ${plat.label}…`);
+            try {
+              const userId = window.__bbUserId || "anonymous";
+              let dataUrl = publicImageUrl;
+              if (publicImageUrl.startsWith("blob:")) {
+                const res  = await fetch(publicImageUrl);
+                const blob = await res.blob();
+                dataUrl = await new Promise((resolve, reject) => {
+                  const reader = new FileReader();
+                  reader.onload  = () => resolve(reader.result);
+                  reader.onerror = reject;
+                  reader.readAsDataURL(blob);
+                });
+              }
+              const uploadRes = await fetch("/api/gcs", {
+                method:  "POST",
+                headers: { "Content-Type": "application/json" },
+                body:    JSON.stringify({ userId, dataUrl, name:`social-${Date.now()}`, tags:["social","generated"], source:"generated" }),
+              });
+              const uploadData = await uploadRes.json();
+              if (uploadData.url) publicImageUrl = uploadData.url;
+            } catch(e) {
+              console.warn("Image upload to GCS failed:", e.message);
+              publicImageUrl = null;
+            }
+          }
+
+          // Ensure we have a valid public URL
+          if (!publicImageUrl?.startsWith("https://")) publicImageUrl = null;
+
           const channelId = bufferCfg.mapping[plat.id];
-          const imageUrl  = imageData.url?.startsWith("https://") ? imageData.url : null;
+          setLoadMsg(`Publishing to ${plat.label} via Buffer…`);
           const res = await fetch("/api/buffer-post", {
             method:  "POST",
             headers: { "Content-Type": "application/json" },
@@ -5081,8 +5290,8 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               action:    "createPost",
               channelId,
               text:      fullMessage,
-              imageUrl:  imageUrl || "",
-              scheduledAt: null, // null = add to queue immediately
+              imageUrl:  publicImageUrl || "",
+              scheduledAt: null,
             }),
           });
           const data = await res.json();
