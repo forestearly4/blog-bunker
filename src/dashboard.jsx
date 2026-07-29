@@ -3497,12 +3497,32 @@ async function fetchGSCData(accessToken, siteUrl, days = 28) {
 
 function GSCPanel({ onDataLoaded }) {
   const [cfg,      setCfg]      = useState(loadGSCConfig);
-  const [siteUrl,  setSiteUrl]  = useState(() => loadGSCConfig().siteUrl || "https://caskandstream.com/");
+  const [siteUrl,  setSiteUrl]  = useState(() => loadGSCConfig().siteUrl || "");
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState("");
   const [success,  setSuccess]  = useState("");
+  const [sites,    setSites]    = useState([]);
+  const [loadingSites, setLoadingSites] = useState(false);
 
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
+
+  // Fetch all sites this account has access to
+  const fetchSites = async () => {
+    setLoadingSites(true); setError("");
+    try {
+      const accessToken = await getGSCAccessToken(cfg);
+      const res = await fetch("https://www.googleapis.com/webmasters/v3/sites", {
+        headers: { "Authorization": `Bearer ${accessToken}` },
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      const siteList = (data.siteEntry || []).map(s => s.siteUrl);
+      setSites(siteList);
+      if (siteList.length === 0) setError("No sites found for this account in Search Console.");
+      else if (siteList.length === 1) { setSiteUrl(siteList[0]); }
+    } catch(e) { setError(e.message); }
+    setLoadingSites(false);
+  };
 
   const connectGSC = () => {
     if (!cfg.clientId?.trim()) { setError("Enter your Google OAuth Client ID first."); return; }
@@ -3600,11 +3620,44 @@ function GSCPanel({ onDataLoaded }) {
 
       <div>
         <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-          Site URL (exactly as in Search Console)
+          Property / Site URL
         </label>
-        <input style={iS} placeholder="https://caskandstream.com/" value={siteUrl}
-          onChange={e => setSiteUrl(e.target.value)}
-          onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+
+        {/* If connected, show a fetch-sites button and dropdown */}
+        {cfg.connected ? (
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            <div style={{ display:"flex", gap:8 }}>
+              <button onClick={fetchSites} disabled={loadingSites}
+                style={{ padding:"8px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:6 }}>
+                {loadingSites ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Loading…</> : "↓ Load my GSC properties"}
+              </button>
+              {siteUrl && <div style={{ fontSize:12, color:"#5cba6c", alignSelf:"center", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>✓ {siteUrl}</div>}
+            </div>
+            {sites.length > 0 && (
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                <div style={{ fontSize:11, color:"var(--muted)" }}>Select your property:</div>
+                {sites.map(s => (
+                  <button key={s} onClick={() => setSiteUrl(s)}
+                    style={{ padding:"9px 14px", borderRadius:8, border:`1px solid ${siteUrl===s?"var(--amber)":"var(--border)"}`, background:siteUrl===s?"var(--amber-glow)":"var(--bg-elevated)", color:siteUrl===s?"var(--amber)":"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textAlign:"left", fontWeight:siteUrl===s?700:400 }}>
+                    {siteUrl===s ? "✓ " : ""}{s}
+                  </button>
+                ))}
+                <div style={{ fontSize:11, color:"var(--muted)", lineHeight:1.6 }}>
+                  Tip: If you see both <code>sc-domain:caskandstream.com</code> and <code>https://caskandstream.com/</code> — pick the one that shows data in Search Console. Domain properties (sc-domain:) usually have more complete data.
+                </div>
+              </div>
+            )}
+            {!sites.length && !loadingSites && !siteUrl && (
+              <input style={iS} placeholder="or type manually: sc-domain:caskandstream.com"
+                value={siteUrl} onChange={e => setSiteUrl(e.target.value)}
+                onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            )}
+          </div>
+        ) : (
+          <input style={iS} placeholder="Connect first, then load your properties"
+            value={siteUrl} onChange={e => setSiteUrl(e.target.value)}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        )}
       </div>
 
       <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
@@ -4995,10 +5048,11 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   const handlePublish = async () => {
     setLoading(true); setError(""); setSuccess(""); setPublishResults({});
     const results = {};
+    const bufferCfg = loadBufferConfig();
 
     for (const plat of selectedPlatforms) {
       const captionText = captions[plat.id]?.text || "";
-      const fullMessage = `${captionText}\n\n${hashtags.selected}`;
+      const fullMessage = [captionText, hashtags.selected].filter(Boolean).join("\n\n");
       setLoadMsg(`Publishing to ${plat.label}…`);
 
       try {
@@ -5015,6 +5069,26 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
           if (!res.instagram?.success) throw new Error(res.instagram?.error || "Instagram post failed");
           results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
 
+        } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
+          // Buffer platforms — post immediately via Buffer API
+          const channelId = bufferCfg.mapping[plat.id];
+          const imageUrl  = imageData.url?.startsWith("https://") ? imageData.url : null;
+          const res = await fetch("/api/buffer-post", {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify({
+              apiKey:    bufferCfg.apiKey,
+              action:    "createPost",
+              channelId,
+              text:      fullMessage,
+              imageUrl:  imageUrl || "",
+              scheduledAt: null, // null = add to queue immediately
+            }),
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          results[plat.id] = { success: true, message: `✓ Sent to Buffer → ${plat.label}` };
+
         } else {
           results[plat.id] = { success: "manual", message: `Not connected — copy & paste manually` };
         }
@@ -5029,7 +5103,6 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
     const allOk = selectedPlatforms.every(p => results[p.id]?.success === true || results[p.id]?.success === "manual");
     if (allOk) {
-      // Save a "published" record
       const post = buildSocialPostRecord("published");
       post.publishedAt = new Date().toISOString();
       post.results = results;
@@ -5428,17 +5501,20 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
                 <div style={{ display:"flex", flexDirection:"column", gap:14, marginBottom:20 }}>
                   {selectedPlatforms.map(plat => {
-                    const isConnected = (plat.id==="facebook" && metaConfig?.connected && metaConfig?.pages?.length>0) ||
-                                        (plat.id==="instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id));
+                    const bufferCfg = loadBufferConfig();
+                    const isMetaConnected = (plat.id==="facebook" && metaConfig?.connected && metaConfig?.pages?.length>0) ||
+                                           (plat.id==="instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id));
+                    const isBufferConnected = bufferCfg?.connected && !!bufferCfg?.mapping?.[plat.id];
+                    const isConnected = isMetaConnected || isBufferConnected;
+                    const connectionLabel = isMetaConnected ? "● Direct" : isBufferConnected ? "● Buffer" : "Manual";
+                    const connectionColor = isMetaConnected ? "#5cba6c" : isBufferConnected ? "#1da1f2" : "var(--muted)";
                     const prevResult = publishResults[plat.id];
                     return (
                       <div key={plat.id} style={{ display:"grid", gridTemplateColumns: imageData.url ? "auto 1fr 120px" : "auto 1fr", gap:14, alignItems:"flex-start", padding:14, borderRadius:10, background:"var(--bg-elevated)", border:`1px solid ${isConnected?"#5cba6c33":"var(--border)"}` }}>
                         <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4, width:70 }}>
                           <span style={{ fontSize:20 }}>{plat.icon}</span>
                           <span style={{ fontSize:10, fontWeight:700, color:plat.color }}>{plat.label}</span>
-                          {isConnected
-                            ? <span style={{ fontSize:9, color:"#5cba6c" }}>● Live</span>
-                            : <span style={{ fontSize:9, color:"var(--muted)" }}>Manual</span>}
+                          <span style={{ fontSize:9, color:connectionColor, fontWeight:600 }}>{connectionLabel}</span>
                         </div>
                         <div style={{ fontSize:12, lineHeight:1.6, whiteSpace:"pre-wrap", color:"var(--text-secondary)" }}>
                           {captions[plat.id]?.text}
@@ -5455,11 +5531,23 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   })}
                 </div>
 
-                <div style={{ padding:14, borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)" }}>
-                  {selectedPlatforms.some(p => (p.id==="facebook"||p.id==="instagram") && metaConfig?.connected)
-                    ? "● Connected platforms publish directly. Others copy to clipboard for manual posting."
-                    : "⚠ No platforms connected for direct publishing — captions will copy to clipboard. Connect in Settings → Facebook & Instagram."}
-                </div>
+                {(() => {
+                  const bufferCfg = loadBufferConfig();
+                  const hasMetaDirect = selectedPlatforms.some(p => (p.id==="facebook"||p.id==="instagram") && metaConfig?.connected);
+                  const hasBuffer = selectedPlatforms.some(p => !["facebook","instagram"].includes(p.id) && bufferCfg?.connected && bufferCfg?.mapping?.[p.id]);
+                  const hasManual = selectedPlatforms.some(p => {
+                    const isMeta = (p.id==="facebook"&&metaConfig?.connected) || (p.id==="instagram"&&metaConfig?.connected);
+                    const isBuffer = bufferCfg?.connected && bufferCfg?.mapping?.[p.id];
+                    return !isMeta && !isBuffer;
+                  });
+                  return (
+                    <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
+                      {hasMetaDirect && <div>● <strong style={{color:"var(--text)"}}>Facebook/Instagram</strong> — posts directly</div>}
+                      {hasBuffer     && <div style={{color:"#1da1f2"}}>● <strong>Buffer platforms</strong> — adds to Buffer queue immediately</div>}
+                      {hasManual     && <div style={{color:"var(--amber)"}}>⚠ Some platforms not connected — caption copied to clipboard for manual posting. Connect in <strong>Settings → Buffer</strong>.</div>}
+                    </div>
+                  );
+                })()}
 
                 {/* Action mode selector */}
                 <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:18 }}>
@@ -10085,11 +10173,24 @@ export default function Dashboard({ user, workspace }) {
       {/* ── MAIN ── */}
       <main style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
         <header style={{padding:"16px 28px",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"space-between",background:"var(--bg-surface)"}}>
-          <div>
-            <h1 style={{fontFamily:"var(--font-display)",fontSize:22,fontWeight:700,margin:0}}>🥃 {wsName}</h1>
-            <p style={{margin:"2px 0 0",fontSize:12,color:"var(--text-secondary)"}}>
-              {posts.length} posts · {wsTagline}
-            </p>
+          <div style={{display:"flex",alignItems:"center",gap:14}}>
+            {(() => {
+              const [headerLogo, setHeaderLogo] = useState(loadLogo);
+              useEffect(() => {
+                const handler = (e) => setHeaderLogo(e.detail || null);
+                window.addEventListener("bb-logo-updated", handler);
+                return () => window.removeEventListener("bb-logo-updated", handler);
+              }, []);
+              return headerLogo ? (
+                <img src={headerLogo} alt="Logo" style={{height:40,maxWidth:160,objectFit:"contain"}} />
+              ) : null;
+            })()}
+            <div>
+              <h1 style={{fontFamily:"var(--font-display)",fontSize:22,fontWeight:700,margin:0}}>{!loadLogo() ? "🥃 " : ""}{wsName}</h1>
+              <p style={{margin:"2px 0 0",fontSize:12,color:"var(--text-secondary)"}}>
+                {posts.length} posts · {wsTagline}
+              </p>
+            </div>
           </div>
           <div style={{display:"flex",gap:8}}>
             {wixConnected && (
