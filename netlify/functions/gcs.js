@@ -76,6 +76,15 @@ export default async (req) => {
   try {
     // ── LIST ──────────────────────────────────────────────────────────────────
     if (req.method === "GET") {
+      // Proxy image URL (for restyle — bypasses browser CORS)
+      const proxyUrl = url.searchParams.get("proxyUrl");
+      if (proxyUrl) {
+        const imgRes = await fetch(proxyUrl);
+        if (!imgRes.ok) return new Response(JSON.stringify({ error: "Could not fetch image" }), { status: 502, headers: CORS });
+        const blob    = await imgRes.blob();
+        const buffer  = await blob.arrayBuffer();
+        return new Response(buffer, { status: 200, headers: { ...CORS, "Content-Type": imgRes.headers.get("content-type") || "image/png" } });
+      }
       const userId = url.searchParams.get("userId") || "anonymous";
       const store  = metaStore();
       const meta   = await store.get(`${userId}:media_library`, { type: "json" }) || [];

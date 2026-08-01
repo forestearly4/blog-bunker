@@ -39,7 +39,6 @@ export default async (req) => {
           n:      1,
           size,
         }),
-        signal: AbortSignal.timeout(24000),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error.message);
@@ -104,6 +103,37 @@ export default async (req) => {
       if (!res.ok) throw new Error(data.message || `Stability error ${res.status}`);
       const b64 = data.artifacts?.[0]?.base64;
       if (!b64) throw new Error("No image returned from Stability AI");
+      return new Response(JSON.stringify({ b64, mimeType: "image/png" }), { status: 200, headers: CORS });
+    }
+
+    // ── OPENAI IMAGE EDIT (restyle uploaded image) ──────────────────────────────
+    if (provider === "openai-edit") {
+      const { imageBase64 } = body;
+      if (!imageBase64) throw new Error("imageBase64 required for openai-edit");
+
+      // Convert base64 to proper RGBA PNG using canvas-like processing
+      // Build a valid PNG from the base64 data
+      const byteChars = atob(imageBase64);
+      const byteArr   = new Uint8Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+      const imageBlob = new Blob([byteArr], { type: "image/png" });
+
+      const formData = new FormData();
+      formData.append("model",  "gpt-image-2");
+      formData.append("image",  imageBlob, "image.png");
+      formData.append("prompt", prompt);
+      formData.append("n",      "1");
+      formData.append("size",   size || "1024x1024");
+
+      const res = await fetch("https://api.openai.com/v1/images/edits", {
+        method:  "POST",
+        headers: { "Authorization": `Bearer ${apiKey}` },
+        body:    formData,
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      const b64 = data.data?.[0]?.b64_json;
+      if (!b64) throw new Error("No image data returned from OpenAI edits");
       return new Response(JSON.stringify({ b64, mimeType: "image/png" }), { status: 200, headers: CORS });
     }
 
