@@ -6935,19 +6935,36 @@ function MediaLibrary({ userId }) {
       const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
 
       if (apiKeys.openai) {
-        // Use OpenAI gpt-image-2 edit endpoint — actually transforms the uploaded image
-        // Convert base64 to blob for multipart upload
-        const byteChars = atob(base64Image);
+        // OpenAI /edits requires a PNG with alpha channel (RGBA)
+        // Convert via canvas to ensure correct format
+        const pngBase64 = await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => {
+            const canvas = document.createElement("canvas");
+            canvas.width  = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0);
+            // Export as PNG (RGBA) — required by OpenAI edits endpoint
+            const dataUrl = canvas.toDataURL("image/png");
+            resolve(dataUrl.split(",")[1]);
+          };
+          img.onerror = reject;
+          img.src = `data:image/png;base64,${base64Image}`;
+        });
+
+        const byteChars = atob(pngBase64);
         const byteArr   = new Uint8Array(byteChars.length);
         for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
         const imageBlob = new Blob([byteArr], { type: "image/png" });
 
         const formData = new FormData();
-        formData.append("model", "gpt-image-2");
-        formData.append("image", imageBlob, "image.png");
-        formData.append("prompt", `${restylePrompt}. Maintain the original scene, composition and subjects. Only change the visual style, lighting, and atmosphere.`);
-        formData.append("n", "1");
-        formData.append("size", "1024x1024");
+        formData.append("model",  "gpt-image-2");
+        formData.append("image",  imageBlob, "image.png");
+        formData.append("prompt", `${restylePrompt}. Keep the same scene, subjects, and composition. Only change the visual style, lighting, color grading, and atmosphere.`);
+        formData.append("n",      "1");
+        formData.append("size",   "1024x1024");
 
         const res = await fetch("https://api.openai.com/v1/images/edits", {
           method:  "POST",
@@ -8407,76 +8424,6 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
           )}
         </div>
       )}
-            <>
-              {loadingInsights && (
-                <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13 }}>
-                  <span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>
-                  Fetching insights from Meta…
-                </div>
-              )}
-
-              {insightError && (
-                <div style={{ padding:"12px 16px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>
-                  {insightError} — Meta Page Insights require a Business or Creator account with sufficient activity.
-                </div>
-              )}
-
-              {socialInsights && (
-                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
-                  {/* Facebook */}
-                  {socialInsights.facebook && (
-                    <div style={{ background:"var(--bg-surface)", border:"1px solid #1877f233", borderRadius:12, padding:20 }}>
-                      <div style={{ fontSize:12, fontWeight:700, color:"#1877f2", marginBottom:14 }}>👍 Facebook Page</div>
-                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-                        {[
-                          { key:"page_fans",              label:"Page Fans" },
-                          { key:"page_impressions",       label:"Impressions" },
-                          { key:"page_post_engagements",  label:"Engagements" },
-                          { key:"page_views_total",       label:"Page Views" },
-                        ].map(({ key, label }) => socialInsights.facebook[key] != null && (
-                          <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)" }}>
-                            <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>{label}</div>
-                            <div style={{ fontSize:22, fontWeight:700, color:"#1877f2" }}>{socialInsights.facebook[key]?.toLocaleString()}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Instagram */}
-                  {socialInsights.instagram && (
-                    <div style={{ background:"var(--bg-surface)", border:"1px solid #e1306c33", borderRadius:12, padding:20 }}>
-                      <div style={{ fontSize:12, fontWeight:700, color:"#e1306c", marginBottom:14 }}>📸 Instagram</div>
-                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-                        {[
-                          { key:"follower_count", label:"Followers" },
-                          { key:"impressions",    label:"Impressions" },
-                          { key:"reach",          label:"Reach" },
-                          { key:"profile_views",  label:"Profile Views" },
-                        ].map(({ key, label }) => socialInsights.instagram[key] != null && (
-                          <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)" }}>
-                            <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>{label}</div>
-                            <div style={{ fontSize:22, fontWeight:700, color:"#e1306c" }}>{socialInsights.instagram[key]?.toLocaleString()}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {!loadingInsights && !socialInsights && !insightError && (
-                <div style={{ textAlign:"center", padding:40 }}>
-                  <div style={{ fontSize:32, marginBottom:12 }}>📊</div>
-                  <p style={{ fontSize:13, color:"var(--muted)", marginBottom:20 }}>Pull live data from your Facebook and Instagram accounts.</p>
-                  <button onClick={fetchSocialInsights}
-                    style={{ padding:"10px 28px", borderRadius:8, border:"none", background:"#1877f2", color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                    Load Social Analytics
-                  </button>
-                </div>
-              )}
-            </>
-          )}
 
       {/* ── CONTENT ── */}
       {tab === "content" && (
@@ -9280,72 +9227,90 @@ function SocialPlatformSettings() {
 // ─── IMAGE TEXT OVERLAY EDITOR ───────────────────────────────────────────────
 
 function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
-  const canvasRef = useRef(null);
-  const imgRef    = useRef(null);
-  const [layers,  setLayers]  = useState([{
+  const canvasRef  = useRef(null);
+  const [dataUrl,  setDataUrl]  = useState(null); // local data URL, avoids CORS
+  const [layers,   setLayers]   = useState([{
     id:1, text:"Your text here", x:50, y:85, fontSize:36,
     fontFamily:"Georgia, serif", color:"#ffffff", align:"center",
     shadow:true, shadowColor:"#000000", shadowBlur:6, bold:true, italic:false, bgBox:false, bgColor:"#000000aa",
   }]);
-  const [sel,     setSel]     = useState(0);
-  const [loaded,  setLoaded]  = useState(false);
-  const [saving,  setSaving]  = useState(false);
+  const [sel,      setSel]      = useState(0);
+  const [saving,   setSaving]   = useState(false);
+  const [loadErr,  setLoadErr]  = useState("");
 
   const FONTS = [
-    { label:"Georgia (Serif)",  value:"Georgia, serif"             },
-    { label:"Times New Roman",  value:"'Times New Roman', serif"   },
-    { label:"Arial",            value:"Arial, sans-serif"          },
-    { label:"Impact",           value:"Impact, sans-serif"         },
-    { label:"Courier",          value:"'Courier New', monospace"   },
+    { label:"Georgia (Serif)",  value:"Georgia, serif"           },
+    { label:"Times New Roman",  value:"'Times New Roman', serif" },
+    { label:"Arial",            value:"Arial, sans-serif"        },
+    { label:"Impact",           value:"Impact, sans-serif"       },
+    { label:"Courier",          value:"'Courier New', monospace" },
   ];
 
+  // Load image via fetch to avoid CORS issues with GCS URLs
+  useEffect(() => {
+    setLoadErr("");
+    (async () => {
+      try {
+        if (imageUrl.startsWith("data:")) { setDataUrl(imageUrl); return; }
+        const res  = await fetch(imageUrl);
+        const blob = await res.blob();
+        const reader = new FileReader();
+        reader.onload = e => setDataUrl(e.target.result);
+        reader.readAsDataURL(blob);
+      } catch(e) { setLoadErr("Could not load image: " + e.message); }
+    })();
+  }, [imageUrl]);
+
+  // Draw whenever dataUrl or layers change
+  useEffect(() => {
+    if (!dataUrl || !canvasRef.current) return;
+    const img = new Image();
+    img.onload = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      canvas.width  = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+
+      for (const l of layers) {
+        if (!l.text.trim()) continue;
+        const x = (l.x / 100) * canvas.width;
+        const y = (l.y / 100) * canvas.height;
+        ctx.font = `${l.italic?"italic ":""}${l.bold?"bold ":""}${l.fontSize}px ${l.fontFamily}`;
+        ctx.textAlign    = l.align;
+        ctx.textBaseline = "middle";
+        const tw = ctx.measureText(l.text).width;
+        if (l.bgBox) {
+          const pad = 14;
+          const bx  = l.align==="center" ? x-tw/2-pad : l.align==="right" ? x-tw-pad : x-pad;
+          ctx.shadowColor = "transparent"; ctx.shadowBlur = 0;
+          ctx.fillStyle = l.bgColor;
+          ctx.fillRect(bx, y-l.fontSize*0.65, tw+pad*2, l.fontSize*1.3);
+        }
+        ctx.shadowColor   = l.shadow ? l.shadowColor : "transparent";
+        ctx.shadowBlur    = l.shadow ? l.shadowBlur : 0;
+        ctx.shadowOffsetX = l.shadow ? 2 : 0;
+        ctx.shadowOffsetY = l.shadow ? 2 : 0;
+        ctx.fillStyle = l.color;
+        ctx.fillText(l.text, x, y);
+        ctx.shadowColor = "transparent"; ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+      }
+    };
+    img.src = dataUrl;
+  }, [dataUrl, layers]);
+
   const layer = layers[sel] || layers[0];
-
-  const draw = () => {
-    const canvas = canvasRef.current;
-    const img    = imgRef.current;
-    if (!canvas || !img || !loaded) return;
-    const ctx = canvas.getContext("2d");
-    canvas.width  = img.naturalWidth  || 1024;
-    canvas.height = img.naturalHeight || 1024;
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-    for (const l of layers) {
-      if (!l.text.trim()) continue;
-      const x = (l.x / 100) * canvas.width;
-      const y = (l.y / 100) * canvas.height;
-      ctx.font = `${l.italic?"italic ":""}${l.bold?"bold ":""}${l.fontSize}px ${l.fontFamily}`;
-      ctx.textAlign    = l.align;
-      ctx.textBaseline = "middle";
-      const tw = ctx.measureText(l.text).width;
-      if (l.bgBox) {
-        const pad = 14;
-        const bx  = l.align==="center" ? x-tw/2-pad : l.align==="right" ? x-tw-pad : x-pad;
-        ctx.fillStyle = l.bgColor;
-        ctx.fillRect(bx, y-l.fontSize*0.65, tw+pad*2, l.fontSize*1.3);
-      }
-      if (l.shadow) {
-        ctx.shadowColor = l.shadowColor; ctx.shadowBlur = l.shadowBlur;
-        ctx.shadowOffsetX = 2; ctx.shadowOffsetY = 2;
-      }
-      ctx.fillStyle = l.color;
-      ctx.fillText(l.text, x, y);
-      ctx.shadowColor = "transparent"; ctx.shadowBlur = 0;
-      ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
-    }
-  };
-
-  useEffect(() => { if (loaded) draw(); }, [layers, loaded]);
-
-  const upd = (patch) => setLayers(p => p.map((l,i) => i===sel ? {...l,...patch} : l));
+  const upd   = (patch) => setLayers(p => p.map((l,i) => i===sel ? {...l,...patch} : l));
 
   const save = async () => {
     setSaving(true);
     try {
-      const dataUrl = canvasRef.current.toDataURL("image/png", 0.92);
+      const exportUrl = canvasRef.current.toDataURL("image/png", 0.92);
       const res  = await fetch("/api/gcs", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ userId, dataUrl, name:`${imageName||"image"}-overlay`, tags:["overlay","edited"], source:"edited" }),
+        body: JSON.stringify({ userId, dataUrl: exportUrl, name:`${imageName||"image"}-overlay`, tags:["overlay","edited"], source:"edited" }),
       });
       const data = await res.json();
       if (data.item) onSave(data.item);
@@ -9359,133 +9324,136 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
     <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✎ Text Overlay Editor</span>
-        <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Add text directly to your image — click image to reposition</span>
+        <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Click image to reposition selected text</span>
       </div>
 
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 280px", gap:14 }}>
-        {/* Canvas */}
-        <div>
-          <img ref={imgRef} src={imageUrl} crossOrigin="anonymous" style={{ display:"none" }} onLoad={() => { setLoaded(true); }} />
-          <canvas ref={canvasRef} onClick={e => {
-            const r = e.currentTarget.getBoundingClientRect();
-            upd({ x: Math.round((e.clientX-r.left)/r.width*100), y: Math.round((e.clientY-r.top)/r.height*100) });
-          }} style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", cursor:"crosshair", display:"block" }} />
-          <div style={{ fontSize:10, color:"var(--muted)", marginTop:4, textAlign:"center" }}>Click to reposition · drag sliders for precise control</div>
+      {loadErr && <div style={{ padding:"8px 12px", borderRadius:7, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{loadErr}</div>}
+
+      {!dataUrl && !loadErr && (
+        <div style={{ padding:20, textAlign:"center", color:"var(--muted)", fontSize:12 }}>
+          <span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:6 }}>◌</span>Loading image…
         </div>
+      )}
 
-        {/* Controls */}
-        <div style={{ display:"flex", flexDirection:"column", gap:10, maxHeight:520, overflow:"auto" }}>
-          {/* Layers */}
+      {dataUrl && (
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 280px", gap:14 }}>
+          {/* Canvas preview */}
           <div>
-            <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Layers</div>
-            <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
-              {layers.map((l,i) => (
-                <div key={l.id} style={{ display:"flex", gap:3 }}>
-                  <button onClick={() => setSel(i)} style={{ flex:1, padding:"5px 8px", borderRadius:6, border:`1px solid ${sel===i?"var(--amber)":"var(--border)"}`, background:sel===i?"var(--amber-glow)":"transparent", color:sel===i?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", textAlign:"left", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                    {l.text.slice(0,18)||"Empty"}
-                  </button>
-                  {layers.length>1 && <button onClick={() => { setLayers(p=>p.filter((_,j)=>j!==i)); setSel(Math.max(0,i-1)); }} style={{ padding:"4px 7px", borderRadius:5, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer" }}>✕</button>}
-                </div>
-              ))}
-              <button onClick={() => { setLayers(p=>[...p,{...p[0],id:Date.now(),text:"New text",y:30}]); setSel(layers.length); }} style={{ padding:"4px", borderRadius:6, border:"1px dashed var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer" }}>+ Add Layer</button>
-            </div>
+            <canvas ref={canvasRef}
+              onClick={e => {
+                const r = e.currentTarget.getBoundingClientRect();
+                upd({ x: Math.round((e.clientX-r.left)/r.width*100), y: Math.round((e.clientY-r.top)/r.height*100) });
+              }}
+              style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", cursor:"crosshair", display:"block" }} />
+            <div style={{ fontSize:10, color:"var(--muted)", marginTop:4, textAlign:"center" }}>Click image to reposition · use sliders for precision</div>
           </div>
 
-          {/* Text */}
-          <div>
-            <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Text</label>
-            <textarea value={layer.text} onChange={e=>upd({text:e.target.value})} rows={2} style={{...iS, resize:"none"}} />
-          </div>
-
-          {/* Font + Size */}
-          <div>
-            <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Font</label>
-            <select value={layer.fontFamily} onChange={e=>upd({fontFamily:e.target.value})} style={iS}>
-              {FONTS.map(f=><option key={f.value} value={f.value}>{f.label}</option>)}
-            </select>
-          </div>
-          <div>
-            <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Size: {layer.fontSize}px</label>
-            <input type="range" min={12} max={200} value={layer.fontSize} onChange={e=>upd({fontSize:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
-          </div>
-
-          {/* Color + Align */}
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+          {/* Controls */}
+          <div style={{ display:"flex", flexDirection:"column", gap:10, maxHeight:520, overflow:"auto" }}>
+            {/* Layers */}
             <div>
-              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Color</label>
-              <input type="color" value={layer.color} onChange={e=>upd({color:e.target.value})} style={{ width:"100%", height:30, borderRadius:6, border:"1px solid var(--border)", cursor:"pointer" }} />
-            </div>
-            <div>
-              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Align</label>
-              <div style={{ display:"flex", gap:3 }}>
-                {["left","center","right"].map(a=>(
-                  <button key={a} onClick={()=>upd({align:a})} style={{ flex:1, padding:"4px", borderRadius:5, border:`1px solid ${layer.align===a?"var(--amber)":"var(--border)"}`, background:layer.align===a?"var(--amber-glow)":"transparent", color:layer.align===a?"var(--amber)":"var(--muted)", fontSize:11, cursor:"pointer" }}>
-                    {a==="left"?"←":a==="center"?"↔":"→"}
-                  </button>
+              <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Layers</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+                {layers.map((l,i) => (
+                  <div key={l.id} style={{ display:"flex", gap:3 }}>
+                    <button onClick={() => setSel(i)} style={{ flex:1, padding:"5px 8px", borderRadius:6, border:`1px solid ${sel===i?"var(--amber)":"var(--border)"}`, background:sel===i?"var(--amber-glow)":"transparent", color:sel===i?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", textAlign:"left", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {l.text.slice(0,20)||"Empty"}
+                    </button>
+                    {layers.length>1 && <button onClick={() => { setLayers(p=>p.filter((_,j)=>j!==i)); setSel(Math.max(0,i-1)); }} style={{ padding:"4px 7px", borderRadius:5, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer" }}>✕</button>}
+                  </div>
                 ))}
+                <button onClick={() => { setLayers(p=>[...p,{...p[0],id:Date.now(),text:"New text",y:30}]); setSel(layers.length); }} style={{ padding:"4px", borderRadius:6, border:"1px dashed var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer" }}>+ Add Layer</button>
               </div>
             </div>
-          </div>
 
-          {/* Style toggles */}
-          <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
-            {[{k:"bold",label:"Bold"},{k:"italic",label:"Italic"},{k:"shadow",label:"Shadow"},{k:"bgBox",label:"BG Box"}].map(t=>(
-              <button key={t.k} onClick={()=>upd({[t.k]:!layer[t.k]})} style={{ padding:"4px 10px", borderRadius:6, border:`1px solid ${layer[t.k]?"var(--amber)":"var(--border)"}`, background:layer[t.k]?"var(--amber-glow)":"transparent", color:layer[t.k]?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontWeight:layer[t.k]?700:400 }}>
-                {t.label}
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Text</label>
+              <textarea value={layer.text} onChange={e=>upd({text:e.target.value})} rows={2} style={{...iS, resize:"none"}} />
+            </div>
+
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Font</label>
+              <select value={layer.fontFamily} onChange={e=>upd({fontFamily:e.target.value})} style={iS}>
+                {FONTS.map(f=><option key={f.value} value={f.value}>{f.label}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Size: {layer.fontSize}px</label>
+              <input type="range" min={10} max={200} value={layer.fontSize} onChange={e=>upd({fontSize:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
+            </div>
+
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Color</label>
+                <input type="color" value={layer.color} onChange={e=>upd({color:e.target.value})} style={{ width:"100%", height:30, borderRadius:6, border:"1px solid var(--border)", cursor:"pointer" }} />
+              </div>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Align</label>
+                <div style={{ display:"flex", gap:3 }}>
+                  {["left","center","right"].map(a=>(
+                    <button key={a} onClick={()=>upd({align:a})} style={{ flex:1, padding:"4px", borderRadius:5, border:`1px solid ${layer.align===a?"var(--amber)":"var(--border)"}`, background:layer.align===a?"var(--amber-glow)":"transparent", color:layer.align===a?"var(--amber)":"var(--muted)", fontSize:11, cursor:"pointer" }}>
+                      {a==="left"?"←":a==="center"?"↔":"→"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+              {[{k:"bold",label:"Bold"},{k:"italic",label:"Italic"},{k:"shadow",label:"Shadow"},{k:"bgBox",label:"BG Box"}].map(t=>(
+                <button key={t.k} onClick={()=>upd({[t.k]:!layer[t.k]})} style={{ padding:"4px 10px", borderRadius:6, border:`1px solid ${layer[t.k]?"var(--amber)":"var(--border)"}`, background:layer[t.k]?"var(--amber-glow)":"transparent", color:layer[t.k]?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontWeight:layer[t.k]?700:400 }}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {layer.bgBox && (
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Box Color</label>
+                <input type="color" value={layer.bgColor.slice(0,7)} onChange={e=>upd({bgColor:e.target.value+"aa"})} style={{ width:"100%", height:28, borderRadius:6, border:"1px solid var(--border)", cursor:"pointer" }} />
+              </div>
+            )}
+
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>X: {layer.x}%</label>
+                <input type="range" min={0} max={100} value={layer.x} onChange={e=>upd({x:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
+              </div>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Y: {layer.y}%</label>
+                <input type="range" min={0} max={100} value={layer.y} onChange={e=>upd({y:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
+              </div>
+            </div>
+
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Quick Presets</label>
+              {[
+                { label:"Tagline", text:"Cast at Dawn. Sip at Dusk.", y:87, fontSize:28 },
+                { label:"URL",     text:"caskandstream.com",          y:95, fontSize:16 },
+                { label:"Quote",   text:'"The river knows."',         y:50, fontSize:42 },
+                { label:"CTA",     text:"Link in bio →",              y:91, fontSize:22 },
+              ].map((p,i)=>(
+                <button key={i} onClick={()=>upd({text:p.text, y:p.y, fontSize:p.fontSize})} style={{ display:"block", width:"100%", padding:"4px 8px", marginBottom:3, borderRadius:5, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", textAlign:"left" }}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display:"flex", flexDirection:"column", gap:5, paddingTop:6, borderTop:"1px solid var(--border)" }}>
+              <button onClick={save} disabled={saving} style={{ padding:"9px", borderRadius:8, border:"none", background:saving?"var(--bg-elevated)":"#5cba6c", color:saving?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:saving?"not-allowed":"pointer" }}>
+                {saving ? "Saving…" : "✓ Save to Library"}
               </button>
-            ))}
-          </div>
-
-          {/* BG Color */}
-          {layer.bgBox && (
-            <div>
-              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Box Color</label>
-              <input type="color" value={layer.bgColor.slice(0,7)} onChange={e=>upd({bgColor:e.target.value+"aa"})} style={{ width:"100%", height:28, borderRadius:6, border:"1px solid var(--border)", cursor:"pointer" }} />
-            </div>
-          )}
-
-          {/* Position sliders */}
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
-            <div>
-              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>X: {layer.x}%</label>
-              <input type="range" min={0} max={100} value={layer.x} onChange={e=>upd({x:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
-            </div>
-            <div>
-              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Y: {layer.y}%</label>
-              <input type="range" min={0} max={100} value={layer.y} onChange={e=>upd({y:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
-            </div>
-          </div>
-
-          {/* Presets */}
-          <div>
-            <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Quick Presets</label>
-            {[
-              { label:"Site tagline",   text:"Cast at Dawn. Sip at Dusk.",  y:87, fontSize:28 },
-              { label:"URL watermark",  text:"caskandstream.com",            y:95, fontSize:16 },
-              { label:"Quote style",    text:'"The river knows."',           y:50, fontSize:40 },
-              { label:"CTA bottom",     text:"Link in bio →",               y:91, fontSize:22 },
-            ].map((p,i)=>(
-              <button key={i} onClick={()=>upd({text:p.text, y:p.y, fontSize:p.fontSize})} style={{ display:"block", width:"100%", padding:"4px 8px", marginBottom:3, borderRadius:5, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", textAlign:"left" }}>
-                {p.label}
+              <button onClick={()=>{ const a=document.createElement("a"); a.href=canvasRef.current.toDataURL("image/png"); a.download=`${imageName||"image"}-overlay.png`; a.click(); }} style={{ padding:"9px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer" }}>
+                ↓ Download PNG
               </button>
-            ))}
-          </div>
-
-          {/* Save */}
-          <div style={{ display:"flex", flexDirection:"column", gap:5, paddingTop:6, borderTop:"1px solid var(--border)" }}>
-            <button onClick={save} disabled={saving} style={{ padding:"9px", borderRadius:8, border:"none", background:saving?"var(--bg-elevated)":"#5cba6c", color:saving?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:saving?"not-allowed":"pointer" }}>
-              {saving ? "Saving…" : "✓ Save to Library"}
-            </button>
-            <button onClick={()=>{ const a=document.createElement("a"); a.href=canvasRef.current.toDataURL(); a.download=`${imageName||"image"}-overlay.png`; a.click(); }} style={{ padding:"9px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer" }}>
-              ↓ Download PNG
-            </button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
-
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
