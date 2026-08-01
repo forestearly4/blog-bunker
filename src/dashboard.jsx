@@ -339,6 +339,7 @@ const SOCIAL_PLATFORMS = [
     color: "#e1306c",
     charLimit: 2200,
     hashtagLimit: 30,
+    bestTimes: ["Tue–Fri 11am–1pm", "Mon–Fri 7–9pm"],
     tone: "visual, aspirational, lifestyle-focused",
     format: "Hook line, 3-4 short paragraphs, line breaks between each, 10-15 relevant hashtags at end",
     placeholder: "Share to Instagram feed",
@@ -351,6 +352,7 @@ const SOCIAL_PLATFORMS = [
     color: "#1877f2",
     charLimit: 63206,
     hashtagLimit: 5,
+    bestTimes: ["Wed 11am–1pm", "Thu–Fri 1–4pm"],
     tone: "conversational, community-friendly, story-driven",
     format: "Engaging opening question or statement, 2-3 paragraphs, call to action, 2-3 hashtags optional",
     placeholder: "Share to Facebook page",
@@ -363,6 +365,7 @@ const SOCIAL_PLATFORMS = [
     color: "#fe2c55",
     charLimit: 2200,
     hashtagLimit: 10,
+    bestTimes: ["Tue–Thu 7–9pm", "Fri–Sun 6–9pm"],
     tone: "punchy, energetic, trend-aware, Gen Z/Millennial",
     format: "Hook in first line (no more than 8 words), ultra-short sentences, 3-5 trending hashtags",
     placeholder: "Write TikTok caption",
@@ -375,6 +378,7 @@ const SOCIAL_PLATFORMS = [
     color: "#ff4500",
     charLimit: 40000,
     hashtagLimit: 0,
+    bestTimes: ["Mon–Fri 9am–12pm", "Sat 10am–12pm"],
     tone: "authentic, community-first, no marketing speak, conversational",
     format: "Title line, then body as genuine post. No hashtags. No salesy language. Share value first, mention the blog naturally if relevant.",
     placeholder: "Write Reddit post",
@@ -387,10 +391,24 @@ const SOCIAL_PLATFORMS = [
     color: "#000000",
     charLimit: 280,
     hashtagLimit: 2,
+    bestTimes: ["Mon–Fri 8–10am", "Wed 5–6pm"],
     tone: "sharp, witty, opinionated, punchy",
     format: "Single punchy statement or question. Max 280 chars. 1-2 hashtags max. No filler.",
     placeholder: "Write a tweet",
     urlNote: "URLs count as ~23 chars — account for that in length",
+  },
+  {
+    id: "pinterest",
+    name: "Pinterest",
+    icon: "📌",
+    color: "#e60023",
+    charLimit: 500,
+    hashtagLimit: 5,
+    bestTimes: ["Sat–Sun 2–4pm", "Fri 3–5pm"],
+    tone: "inspirational, keyword-rich, search-friendly",
+    format: "2-3 sentences with keywords, CTA, 3-5 relevant hashtags",
+    placeholder: "Write Pinterest pin description",
+    urlNote: "Pin links directly to your blog post for traffic",
   },
 ];
 
@@ -1066,6 +1084,18 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig 
                 rows={plat.id === "twitter" ? 4 : 9}
                 style={{ width:"100%", padding:"14px", borderRadius:8, border:`1px solid ${isOver(plat.id)?"var(--red)":"var(--border)"}`, background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box", resize:"vertical", lineHeight:1.7 }}
               />
+
+              {/* Twitter hard char limit warning */}
+              {plat.id === "twitter" && (
+                <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                  <div style={{ flex:1, height:4, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
+                    <div style={{ height:"100%", width:`${Math.min(100,(charCount(plat.id)/280)*100)}%`, background:charCount(plat.id)>280?"var(--red)":charCount(plat.id)>240?"var(--amber)":"#5cba6c", borderRadius:99, transition:"width 0.2s" }} />
+                  </div>
+                  <span style={{ fontSize:12, fontWeight:700, color:charCount(plat.id)>280?"var(--red)":charCount(plat.id)>240?"var(--amber)":"var(--muted)", flexShrink:0 }}>
+                    {280 - charCount(plat.id)} chars left
+                  </span>
+                </div>
+              )}
 
               {/* Image panel — shown for visual platforms */}
               {plat.id !== "reddit" && (
@@ -2156,12 +2186,16 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
 // ─── AI IDEA GENERATOR ───────────────────────────────────────────────────────
 
 function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activeModel, apiKeys, dark, onProviderChange, onModelChange }) {
-  const [loading,   setLoading]   = useState(false);
-  const [ideas,     setIdeas]     = useState([]);
-  const [error,     setError]     = useState("");
-  const [saved,     setSaved]     = useState({});
-  const [focus,     setFocus]     = useState("mixed");
+  const [loading,    setLoading]    = useState(false);
+  const [ideas,      setIdeas]      = useState([]);
+  const [error,      setError]      = useState("");
+  const [saved,      setSaved]      = useState({});
+  const [focus,      setFocus]      = useState("mixed");
+  const [customTopic,setCustomTopic]= useState("");
+  const [ideaCount,  setIdeaCount]  = useState(10);
+  const [mode,       setMode]       = useState("category"); // "category" | "custom"
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
 
   const FOCUSES = [
     { id:"mixed",      label:"Mixed",          desc:"All angles" },
@@ -2183,14 +2217,19 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
         seo:        "SEO-optimized angles with high search volume and low competition for a fly fishing and whiskey niche blog",
       };
 
+      const promptFocus = mode === "custom" && customTopic.trim()
+        ? `the specific topic: "${customTopic.trim()}"`
+        : focusMap[focus];
+
       const text = await callAI(
         activeProvider, activeModel,
-        `You are a content strategist for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "Cast at Dawn. Sip at Dusk." Generate fresh, specific, actionable blog post ideas that haven't been covered yet. Return ONLY valid JSON — no markdown, no fences, no explanation. Format: [{"title":"...","angle":"...","type":"article","notes":"..."}] where angle is 1 sentence explaining the unique hook, notes is why this will resonate with the audience. Generate exactly 10 ideas.`,
-        `Focus area: ${focusMap[focus]}\n\nAlready published/drafted (avoid these angles):\n${existingTitles}\n\nGenerate 10 fresh content ideas.`,
-        apiKeys[activeProvider]
+        `You are a content strategist for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "Cast at Dawn. Sip at Dusk." Generate fresh, specific, actionable blog post ideas. Return ONLY valid JSON — no markdown, no fences, no explanation. Format: [{"title":"...","angle":"...","type":"article","notes":"...","outline":["point 1","point 2","point 3"]}] where angle is 1 sentence explaining the unique hook, notes is why this resonates with the audience, outline is 3 talking points. Generate exactly ${ideaCount} ideas.`,
+        `Focus: ${promptFocus}\n\nAlready published/drafted (avoid these angles):\n${existingTitles}\n\nGenerate ${ideaCount} fresh, specific content ideas.`,
+        apiKeys[activeProvider],
+        2000
       );
       const parsed = parseAIJson(text);
-      setIdeas(parsed);
+      setIdeas(Array.isArray(parsed) ? parsed : []);
     } catch(e) {
       setError(e.message || "Generation failed.");
     }
@@ -2232,24 +2271,58 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
         keys={apiKeys}
       />
 
-      {/* Focus selector */}
-      <div style={{ marginBottom:16 }}>
-        <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Focus Area</div>
-        <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-          {FOCUSES.map(f => (
-            <button key={f.id} onClick={() => setFocus(f.id)}
-              style={{ padding:"6px 14px", borderRadius:99, border:focus===f.id?"1px solid var(--amber)":"1px solid var(--border)", background:focus===f.id?"var(--amber-glow)":"transparent", color:focus===f.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-              {f.label}
+      {/* ── Mode selector ── */}
+      <div style={{ display:"flex", gap:6, marginBottom:4 }}>
+        <button onClick={() => setMode("custom")}
+          style={{ padding:"8px 18px", borderRadius:8, border:`1px solid ${mode==="custom"?"var(--amber)":"var(--border)"}`, background:mode==="custom"?"var(--amber-glow)":"transparent", color:mode==="custom"?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:mode==="custom"?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+          ✦ Custom Topic
+        </button>
+        <button onClick={() => setMode("category")}
+          style={{ padding:"8px 18px", borderRadius:8, border:`1px solid ${mode==="category"?"var(--amber)":"var(--border)"}`, background:mode==="category"?"var(--amber-glow)":"transparent", color:mode==="category"?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:mode==="category"?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+          ◈ By Category
+        </button>
+      </div>
+
+      {/* ── Custom topic input ── */}
+      {mode === "custom" && (
+        <div style={{ background:"var(--amber-glow)", border:"1px solid var(--amber)44", borderRadius:10, padding:16, display:"flex", flexDirection:"column", gap:10 }}>
+          <div style={{ fontSize:12, color:"var(--amber)", fontWeight:600 }}>✦ Generate ideas for a specific topic</div>
+          <input style={iS} placeholder='e.g. "fly fishing tips and techniques" or "bourbon cocktail recipes for the outdoors" or "best drift boats for beginners"'
+            value={customTopic} onChange={e => setCustomTopic(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && generate()}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        </div>
+      )}
+
+      {/* ── Category focus selector ── */}
+      {mode === "category" && (
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Focus Area</div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+            {FOCUSES.map(f => (
+              <button key={f.id} onClick={() => setFocus(f.id)}
+                style={{ padding:"6px 14px", borderRadius:99, border:focus===f.id?"1px solid var(--amber)":"1px solid var(--border)", background:focus===f.id?"var(--amber-glow)":"transparent", color:focus===f.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Count + generate ── */}
+      <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+          <span style={{ fontSize:11, color:"var(--muted)" }}>How many:</span>
+          {[5, 8, 10, 15].map(n => (
+            <button key={n} onClick={() => setIdeaCount(n)}
+              style={{ width:32, height:28, borderRadius:6, border:`1px solid ${ideaCount===n?"var(--amber)":"var(--border)"}`, background:ideaCount===n?"var(--amber-glow)":"transparent", color:ideaCount===n?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:ideaCount===n?700:400, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {n}
             </button>
           ))}
         </div>
-      </div>
-
-      {/* Generate button */}
-      <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom: ideas.length ? 20 : 0 }}>
-        <button onClick={generate} disabled={loading}
-          style={{ padding:"10px 24px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
-          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating 10 ideas…</> : `${provider.logo} Generate Ideas`}
+        <button onClick={generate} disabled={loading || (mode==="custom" && !customTopic.trim())}
+          style={{ padding:"10px 24px", borderRadius:8, border:"none", background:loading||(mode==="custom"&&!customTopic.trim())?"var(--bg-elevated)":provider.color, color:loading||(mode==="custom"&&!customTopic.trim())?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading||(mode==="custom"&&!customTopic.trim())?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating {ideaCount} ideas…</> : `${provider.logo} Generate Ideas`}
         </button>
         {ideas.length > 0 && (
           <button onClick={saveAll}
@@ -2269,7 +2342,16 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
               <div style={{ flex:1, minWidth:0 }}>
                 <div style={{ fontWeight:600, fontSize:13, marginBottom:4 }}>{idea.title}</div>
                 <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:4, fontStyle:"italic" }}>{idea.angle}</div>
-                {idea.notes && <div style={{ fontSize:11, color:"var(--muted)" }}>💡 {idea.notes}</div>}
+                {idea.notes && <div style={{ fontSize:11, color:"var(--muted)", marginBottom: idea.outline?.length ? 6 : 0 }}>💡 {idea.notes}</div>}
+                {idea.outline?.length > 0 && (
+                  <div style={{ display:"flex", flexDirection:"column", gap:2, paddingTop:6, borderTop:"1px solid var(--border)" }}>
+                    {idea.outline.map((pt, j) => (
+                      <div key={j} style={{ fontSize:11, color:"var(--text-secondary)", display:"flex", gap:6 }}>
+                        <span style={{ color:"var(--amber)", flexShrink:0 }}>{j+1}.</span>{pt}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               <div style={{ display:"flex", gap:6, flexShrink:0 }}>
                 <button onClick={() => saveIdea(idea, i)} disabled={saved[i]}
@@ -5551,6 +5633,37 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 </div>
               ))}
 
+              {/* Per-platform hashtag limits */}
+              {(() => {
+                const count = hashtags.selected.split(/\s+/).filter(Boolean).length;
+                const warnings = selectedPlatforms
+                  .filter(p => p.hashtagLimit > 0 && count > p.hashtagLimit)
+                  .map(p => `${p.label}: ${count}/${p.hashtagLimit} (over by ${count - p.hashtagLimit})`);
+                const infos = selectedPlatforms
+                  .filter(p => p.hashtagLimit > 0 && count <= p.hashtagLimit)
+                  .map(p => `${p.label}: ${count}/${p.hashtagLimit}`);
+                return (
+                  <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                    {warnings.length > 0 && (
+                      <div style={{ padding:"8px 12px", borderRadius:7, background:"var(--red)11", border:"1px solid var(--red)33", fontSize:11, color:"var(--red)" }}>
+                        ⚠ Over limit: {warnings.join(" · ")}
+                      </div>
+                    )}
+                    <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                      {selectedPlatforms.filter(p => p.hashtagLimit >= 0).map(p => {
+                        const isOver = p.hashtagLimit > 0 && count > p.hashtagLimit;
+                        const isNone = p.hashtagLimit === 0;
+                        return (
+                          <span key={p.id} style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:isOver?"var(--red)15":isNone?"var(--bg-elevated)":"#5cba6c15", color:isOver?"var(--red)":isNone?"var(--muted)":"#5cba6c", border:`1px solid ${isOver?"var(--red)33":isNone?"var(--border)":"#5cba6c33"}`, fontWeight:600 }}>
+                            {p.icon} {p.label}: {isNone ? "no hashtags" : `${count}/${p.hashtagLimit}`}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Selected set count + clear */}
               <div style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                 <span style={{ fontSize:12, color:"var(--text-secondary)", flex:1 }}>
@@ -5561,11 +5674,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   Clear all
                 </button>
                 <button onClick={() => {
-                  const all = [
-                    ...(hashtags.sets.primary || []),
-                    ...(hashtags.sets.niche || []),
-                    ...(hashtags.sets.branded || []),
-                  ];
+                  const all = [...(hashtags.sets.primary||[]),...(hashtags.sets.niche||[]),...(hashtags.sets.branded||[])];
                   setHashtags(h => ({...h, selected: [...new Set(all)].join(" ")}));
                 }}
                   style={{ padding:"3px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -5757,6 +5866,24 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                     </div>
                   );
                 })()}
+
+                {/* Best post times */}
+                <div style={{ background:"var(--bg-elevated)", border:"1px solid #5cba6c33", borderRadius:10, padding:14 }}>
+                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>⏰ Best Times to Post</div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:8 }}>
+                    {selectedPlatforms.map(p => (
+                      <div key={p.id} style={{ padding:"8px 10px", borderRadius:7, background:"var(--bg-surface)", border:"1px solid var(--border)" }}>
+                        <div style={{ fontSize:11, fontWeight:700, color:p.color, marginBottom:3 }}>{p.icon} {p.label}</div>
+                        {(p.bestTimes||[]).map((t,i) => (
+                          <div key={i} style={{ fontSize:11, color:"var(--text-secondary)" }}>· {t}</div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--muted)", marginTop:8 }}>
+                    These are general best times for lifestyle/outdoor content. Your audience analytics may differ — check Analytics → Social for your specific peak times.
+                  </div>
+                </div>
 
                 {/* Action mode selector */}
                 <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:18 }}>
@@ -7758,6 +7885,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
     { id:"overview", label:"Overview",    icon:"◈" },
     { id:"seo",      label:"SEO",         icon:"◎", highlight:true },
     { id:"search",   label:"Search Data", icon:"📊" },
+    { id:"connect",  label:"🔌 Fetch Data",icon:"",  highlight: !gscData },
     { id:"social",   label:"Social",      icon:"▣" },
     { id:"content",  label:"Content",     icon:"▤" },
   ];
@@ -7869,6 +7997,20 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
           </button>
         ))}
       </div>
+
+      {/* ── FETCH DATA ── */}
+      {tab === "connect" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:0 }}>Fetch Analytics Data</h3>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.7 }}>
+            Fetch fresh data from Google Search Console without going to Settings. You can also configure your GSC connection here.
+          </p>
+          <GSCPanel onDataLoaded={(data) => {
+            // Bubble up to parent — triggers re-render with fresh gscData
+            if (onConnectGSC) onConnectGSC(data);
+          }} />
+        </div>
+      )}
 
       {/* ── SEO ── */}
       {tab === "seo" && (
