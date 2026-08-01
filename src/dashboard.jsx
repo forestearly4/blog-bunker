@@ -6893,6 +6893,7 @@ function MediaLibrary({ userId }) {
   const [restyleResult,  setRestyleResult]  = useState(null);
   const [restyleError,   setRestyleError]   = useState("");
   const [restyleOpen,    setRestyleOpen]    = useState(false);
+  const [overlayOpen,    setOverlayOpen]    = useState(false);
   const [restyleStrength,setRestyleStrength]= useState(0.65); // 0=keep original, 1=full restyle
   const fileInput = useRef(null);
 
@@ -6933,26 +6934,56 @@ function MediaLibrary({ userId }) {
 
       const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
 
-      // Route through server-side proxy to avoid CORS
-      const callImageProxy = async (provider, extraBody = {}) => {
-        const key = provider === "openai" ? apiKeys.openai : provider === "gemini" ? apiKeys.gemini : apiKeys.stability;
-        if (!key) throw new Error(`No ${provider} API key — add it in Settings → API Keys`);
-        const res = await fetch("/api/image-generate", {
+      if (apiKeys.openai) {
+        // Use OpenAI gpt-image-2 edit endpoint — actually transforms the uploaded image
+        // Convert base64 to blob for multipart upload
+        const byteChars = atob(base64Image);
+        const byteArr   = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+        const imageBlob = new Blob([byteArr], { type: "image/png" });
+
+        const formData = new FormData();
+        formData.append("model", "gpt-image-2");
+        formData.append("image", imageBlob, "image.png");
+        formData.append("prompt", `${restylePrompt}. Maintain the original scene, composition and subjects. Only change the visual style, lighting, and atmosphere.`);
+        formData.append("n", "1");
+        formData.append("size", "1024x1024");
+
+        const res = await fetch("https://api.openai.com/v1/images/edits", {
           method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ provider, prompt: restylePrompt + ". Fly fishing and whiskey lifestyle photography, high quality, professional.", apiKey: key, ...extraBody }),
+          headers: { "Authorization": `Bearer ${apiKeys.openai}` },
+          body:    formData,
         });
         const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        return `data:${data.mimeType || "image/png"};base64,${data.b64}`;
-      };
+        if (data.error) throw new Error(`OpenAI: ${data.error.message}`);
+        const b64 = data.data?.[0]?.b64_json;
+        if (!b64) throw new Error("No image data returned from OpenAI");
+        setRestyleResult(`data:image/png;base64,${b64}`);
 
-      if (apiKeys.openai) {
-        setRestyleResult(await callImageProxy("openai"));
       } else if (apiKeys.gemini) {
-        setRestyleResult(await callImageProxy("gemini"));
-      } else if (apiKeys.stability) {
-        setRestyleResult(await callImageProxy("stability", { imageBase64: base64Image, strength: restyleStrength }));
+        // Gemini — image editing via inline data
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${apiKeys.gemini}`,
+          {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { inline_data: { mime_type: "image/png", data: base64Image } },
+                  { text: `Transform this image in the following style while keeping the same composition and subjects: ${restylePrompt}` },
+                ],
+              }],
+              generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+            }),
+          }
+        );
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+        if (!part) throw new Error("No image returned from Gemini");
+        setRestyleResult(`data:${part.inlineData.mimeType};base64,${part.inlineData.data}`);
+
       } else {
         throw new Error("Add an OpenAI or Gemini API key in Settings → API Keys to use AI Restyle.");
       }
@@ -7295,9 +7326,13 @@ function MediaLibrary({ userId }) {
                     <button onClick={() => download(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                       ↓ Download
                     </button>
-                    <button onClick={() => { setRestyleOpen(o=>!o); setRestyleResult(null); setRestyleError(""); }}
+                    <button onClick={() => { setRestyleOpen(o=>!o); setOverlayOpen(false); setRestyleResult(null); setRestyleError(""); }}
                       style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${restyleOpen?"var(--amber)":"var(--border)"}`, background:restyleOpen?"var(--amber-glow)":"transparent", color:restyleOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:restyleOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
                       ✦ AI Restyle
+                    </button>
+                    <button onClick={() => { setOverlayOpen(o=>!o); setRestyleOpen(false); }}
+                      style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${overlayOpen?"var(--amber)":"var(--border)"}`, background:overlayOpen?"var(--amber-glow)":"transparent", color:overlayOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:overlayOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                      ✎ Text Overlay
                     </button>
                   </div>
                 </div>
@@ -7388,6 +7423,20 @@ function MediaLibrary({ userId }) {
                     </button>
                   )}
                 </div>
+              )}
+
+              {/* ── TEXT OVERLAY EDITOR ── */}
+              {overlayOpen && selected && (
+                <ImageTextOverlayEditor
+                  imageUrl={selected.url || selected.dataUrl}
+                  imageName={selected.name}
+                  userId={resolvedUserId}
+                  onSave={(newItem) => {
+                    setItems(prev => [newItem, ...prev]);
+                    setOverlayOpen(false);
+                    setSelected(newItem);
+                  }}
+                />
               )}
             </div>
           )}
@@ -8213,6 +8262,152 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
             />
           ) : (
             <>
+              {/* Refresh button */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <div>
+                  <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>Social Analytics</h3>
+                  <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Last 28 days · pulled from Meta API</p>
+                </div>
+                <button onClick={fetchSocialInsights} disabled={loadingInsights}
+                  style={{ padding:"8px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                  {loadingInsights ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Loading…</> : "↻ Refresh"}
+                </button>
+              </div>
+
+              {insightError && (
+                <div style={{ padding:"12px 16px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>
+                  {insightError}
+                </div>
+              )}
+
+              {loadingInsights && (
+                <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13 }}>
+                  <span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>
+                  Fetching insights from Meta…
+                </div>
+              )}
+
+              {socialInsights && (
+                <>
+                  {/* Platform overview cards */}
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+                    {socialInsights.facebook && (
+                      <div style={{ background:"var(--bg-surface)", border:"1px solid #1877f233", borderRadius:12, padding:20 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:"#1877f2", marginBottom:14, display:"flex", alignItems:"center", gap:6 }}>
+                          👍 Facebook Page
+                        </div>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                          {[
+                            { key:"page_fans",             label:"Fans",         icon:"❤" },
+                            { key:"page_impressions",      label:"Impressions",   icon:"👁" },
+                            { key:"page_post_engagements", label:"Engagements",   icon:"💬" },
+                            { key:"page_views_total",      label:"Page Views",    icon:"🔗" },
+                          ].map(({ key, label, icon }) => socialInsights.facebook[key] != null && (
+                            <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                              <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:3 }}>{icon} {label}</div>
+                              <div style={{ fontSize:22, fontWeight:700, color:"#1877f2" }}>{socialInsights.facebook[key]?.toLocaleString()}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {socialInsights.instagram && (
+                      <div style={{ background:"var(--bg-surface)", border:"1px solid #e1306c33", borderRadius:12, padding:20 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:"#e1306c", marginBottom:14, display:"flex", alignItems:"center", gap:6 }}>
+                          📸 Instagram
+                        </div>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                          {[
+                            { key:"follower_count", label:"Followers",     icon:"👤" },
+                            { key:"impressions",    label:"Impressions",   icon:"👁" },
+                            { key:"reach",          label:"Reach",         icon:"📡" },
+                            { key:"profile_views",  label:"Profile Views", icon:"🔗" },
+                          ].map(({ key, label, icon }) => socialInsights.instagram[key] != null && (
+                            <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                              <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:3 }}>{icon} {label}</div>
+                              <div style={{ fontSize:22, fontWeight:700, color:"#e1306c" }}>{socialInsights.instagram[key]?.toLocaleString()}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Engagement rate */}
+                  {socialInsights.facebook && (
+                    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                      <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📈 Engagement Breakdown</div>
+                      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))", gap:10 }}>
+                        {[
+                          { key:"page_actions_post_reactions_like_total", label:"Likes",    color:"#1877f2" },
+                          { key:"page_actions_post_reactions_love_total", label:"Love",     color:"#e05555" },
+                          { key:"page_posts_impressions",                 label:"Post Reach",color:"#5cba6c" },
+                          { key:"page_fans_online_per_day",               label:"Online Now",color:"var(--amber)" },
+                        ].filter(m => socialInsights.facebook[m.key] != null).map(m => (
+                          <div key={m.key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", textAlign:"center" }}>
+                            <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>{m.label}</div>
+                            <div style={{ fontSize:18, fontWeight:700, color:m.color }}>{socialInsights.facebook[m.key]?.toLocaleString?.() ?? socialInsights.facebook[m.key]}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {!loadingInsights && !socialInsights && !insightError && (
+                <div style={{ textAlign:"center", padding:40 }}>
+                  <div style={{ fontSize:32, marginBottom:12 }}>📊</div>
+                  <p style={{ fontSize:13, color:"var(--muted)", marginBottom:20 }}>Pull live data from your Facebook and Instagram accounts.</p>
+                  <button onClick={fetchSocialInsights}
+                    style={{ padding:"10px 28px", borderRadius:8, border:"none", background:"#1877f2", color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    Load Social Analytics
+                  </button>
+                </div>
+              )}
+
+              {/* Published posts with engagement */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>
+                  Published Social Posts ({socialPosts.filter(p=>p.status==="published").length})
+                </div>
+                {socialPosts.filter(p=>p.status==="published").length === 0 ? (
+                  <div style={{ fontSize:13, color:"var(--muted)", textAlign:"center", padding:20 }}>No published posts yet.</div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                    {socialPosts.filter(p=>p.status==="published").slice(0,10).map((post,i) => {
+                      const caption = Object.values(post.captions||{})[0];
+                      const text = typeof caption === "string" ? caption : caption?.text || "";
+                      return (
+                        <div key={i} style={{ display:"flex", gap:12, alignItems:"flex-start", padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                          {post.imageUrl && <img src={post.imageUrl} alt="" style={{ width:52, height:52, borderRadius:6, objectFit:"cover", flexShrink:0 }} />}
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:12, color:"var(--text)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginBottom:4 }}>{text.slice(0,100)}</div>
+                            <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+                              {post.platforms?.map(p => {
+                                const platCfg = SOCIAL_PLATFORMS.find(sp => sp.id === p);
+                                return platCfg ? <span key={p} style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:platCfg.color+"15", color:platCfg.color, border:`1px solid ${platCfg.color}33` }}>{platCfg.icon} {platCfg.name}</span> : null;
+                              })}
+                              <span style={{ fontSize:10, color:"var(--muted)", marginLeft:"auto" }}>
+                                {post.publishedAt ? new Date(post.publishedAt).toLocaleDateString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}) : ""}
+                              </span>
+                              {post.results && Object.values(post.results).some(r=>r.success) && (
+                                <span style={{ fontSize:10, color:"#5cba6c", fontWeight:600 }}>✓ Published</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+            <>
               {loadingInsights && (
                 <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13 }}>
                   <span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>
@@ -8271,42 +8466,17 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
               )}
 
               {!loadingInsights && !socialInsights && !insightError && (
-                <button onClick={fetchSocialInsights}
-                  style={{ padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start" }}>
-                  Load Social Insights
-                </button>
+                <div style={{ textAlign:"center", padding:40 }}>
+                  <div style={{ fontSize:32, marginBottom:12 }}>📊</div>
+                  <p style={{ fontSize:13, color:"var(--muted)", marginBottom:20 }}>Pull live data from your Facebook and Instagram accounts.</p>
+                  <button onClick={fetchSocialInsights}
+                    style={{ padding:"10px 28px", borderRadius:8, border:"none", background:"#1877f2", color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    Load Social Analytics
+                  </button>
+                </div>
               )}
-
-              {/* Published social posts list */}
-              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Published Social Posts</div>
-                {socialPosts.filter(p=>p.status==="published").length === 0 ? (
-                  <div style={{ fontSize:13, color:"var(--muted)" }}>No published posts yet.</div>
-                ) : (
-                  <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                    {socialPosts.filter(p=>p.status==="published").slice(0,8).map((post,i) => {
-                      const caption = Object.values(post.captions||{})[0];
-                      const text = typeof caption === "string" ? caption : caption?.text || "";
-                      return (
-                        <div key={i} style={{ display:"flex", gap:12, alignItems:"flex-start", padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)" }}>
-                          {post.imageUrl && <img src={post.imageUrl} alt="" style={{ width:48, height:48, borderRadius:6, objectFit:"cover", flexShrink:0 }} />}
-                          <div style={{ flex:1, minWidth:0 }}>
-                            <div style={{ fontSize:12, color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{text.slice(0,80)}…</div>
-                            <div style={{ display:"flex", gap:8, marginTop:4 }}>
-                              {post.platforms?.map(p => <span key={p} style={{ fontSize:10, color:"var(--muted)" }}>{p}</span>)}
-                              <span style={{ fontSize:10, color:"#5cba6c", marginLeft:"auto" }}>{post.publishedAt ? new Date(post.publishedAt).toLocaleDateString() : "Published"}</span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
             </>
           )}
-        </div>
-      )}
 
       {/* ── CONTENT ── */}
       {tab === "content" && (
@@ -9100,6 +9270,218 @@ function SocialPlatformSettings() {
         Social platform connections are now managed through <strong style={{color:"var(--text)"}}>Buffer</strong>. Configure your Buffer API key in <strong style={{color:"var(--amber)"}}>Settings → Buffer</strong> to connect X, TikTok, Pinterest, Instagram, Facebook, Reddit, Threads, Bluesky, and YouTube all at once.
       </div>
       <BufferSettings />
+    </div>
+  );
+}
+
+// ─── IMAGE TEXT OVERLAY EDITOR ───────────────────────────────────────────────
+
+
+// ─── IMAGE TEXT OVERLAY EDITOR ───────────────────────────────────────────────
+
+function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
+  const canvasRef = useRef(null);
+  const imgRef    = useRef(null);
+  const [layers,  setLayers]  = useState([{
+    id:1, text:"Your text here", x:50, y:85, fontSize:36,
+    fontFamily:"Georgia, serif", color:"#ffffff", align:"center",
+    shadow:true, shadowColor:"#000000", shadowBlur:6, bold:true, italic:false, bgBox:false, bgColor:"#000000aa",
+  }]);
+  const [sel,     setSel]     = useState(0);
+  const [loaded,  setLoaded]  = useState(false);
+  const [saving,  setSaving]  = useState(false);
+
+  const FONTS = [
+    { label:"Georgia (Serif)",  value:"Georgia, serif"             },
+    { label:"Times New Roman",  value:"'Times New Roman', serif"   },
+    { label:"Arial",            value:"Arial, sans-serif"          },
+    { label:"Impact",           value:"Impact, sans-serif"         },
+    { label:"Courier",          value:"'Courier New', monospace"   },
+  ];
+
+  const layer = layers[sel] || layers[0];
+
+  const draw = () => {
+    const canvas = canvasRef.current;
+    const img    = imgRef.current;
+    if (!canvas || !img || !loaded) return;
+    const ctx = canvas.getContext("2d");
+    canvas.width  = img.naturalWidth  || 1024;
+    canvas.height = img.naturalHeight || 1024;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    for (const l of layers) {
+      if (!l.text.trim()) continue;
+      const x = (l.x / 100) * canvas.width;
+      const y = (l.y / 100) * canvas.height;
+      ctx.font = `${l.italic?"italic ":""}${l.bold?"bold ":""}${l.fontSize}px ${l.fontFamily}`;
+      ctx.textAlign    = l.align;
+      ctx.textBaseline = "middle";
+      const tw = ctx.measureText(l.text).width;
+      if (l.bgBox) {
+        const pad = 14;
+        const bx  = l.align==="center" ? x-tw/2-pad : l.align==="right" ? x-tw-pad : x-pad;
+        ctx.fillStyle = l.bgColor;
+        ctx.fillRect(bx, y-l.fontSize*0.65, tw+pad*2, l.fontSize*1.3);
+      }
+      if (l.shadow) {
+        ctx.shadowColor = l.shadowColor; ctx.shadowBlur = l.shadowBlur;
+        ctx.shadowOffsetX = 2; ctx.shadowOffsetY = 2;
+      }
+      ctx.fillStyle = l.color;
+      ctx.fillText(l.text, x, y);
+      ctx.shadowColor = "transparent"; ctx.shadowBlur = 0;
+      ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+    }
+  };
+
+  useEffect(() => { if (loaded) draw(); }, [layers, loaded]);
+
+  const upd = (patch) => setLayers(p => p.map((l,i) => i===sel ? {...l,...patch} : l));
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const dataUrl = canvasRef.current.toDataURL("image/png", 0.92);
+      const res  = await fetch("/api/gcs", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ userId, dataUrl, name:`${imageName||"image"}-overlay`, tags:["overlay","edited"], source:"edited" }),
+      });
+      const data = await res.json();
+      if (data.item) onSave(data.item);
+    } catch(e) { console.error(e); }
+    setSaving(false);
+  };
+
+  const iS = { width:"100%", padding:"7px 10px", borderRadius:7, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  return (
+    <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✎ Text Overlay Editor</span>
+        <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Add text directly to your image — click image to reposition</span>
+      </div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 280px", gap:14 }}>
+        {/* Canvas */}
+        <div>
+          <img ref={imgRef} src={imageUrl} crossOrigin="anonymous" style={{ display:"none" }} onLoad={() => { setLoaded(true); }} />
+          <canvas ref={canvasRef} onClick={e => {
+            const r = e.currentTarget.getBoundingClientRect();
+            upd({ x: Math.round((e.clientX-r.left)/r.width*100), y: Math.round((e.clientY-r.top)/r.height*100) });
+          }} style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", cursor:"crosshair", display:"block" }} />
+          <div style={{ fontSize:10, color:"var(--muted)", marginTop:4, textAlign:"center" }}>Click to reposition · drag sliders for precise control</div>
+        </div>
+
+        {/* Controls */}
+        <div style={{ display:"flex", flexDirection:"column", gap:10, maxHeight:520, overflow:"auto" }}>
+          {/* Layers */}
+          <div>
+            <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Layers</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+              {layers.map((l,i) => (
+                <div key={l.id} style={{ display:"flex", gap:3 }}>
+                  <button onClick={() => setSel(i)} style={{ flex:1, padding:"5px 8px", borderRadius:6, border:`1px solid ${sel===i?"var(--amber)":"var(--border)"}`, background:sel===i?"var(--amber-glow)":"transparent", color:sel===i?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", textAlign:"left", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    {l.text.slice(0,18)||"Empty"}
+                  </button>
+                  {layers.length>1 && <button onClick={() => { setLayers(p=>p.filter((_,j)=>j!==i)); setSel(Math.max(0,i-1)); }} style={{ padding:"4px 7px", borderRadius:5, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer" }}>✕</button>}
+                </div>
+              ))}
+              <button onClick={() => { setLayers(p=>[...p,{...p[0],id:Date.now(),text:"New text",y:30}]); setSel(layers.length); }} style={{ padding:"4px", borderRadius:6, border:"1px dashed var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer" }}>+ Add Layer</button>
+            </div>
+          </div>
+
+          {/* Text */}
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Text</label>
+            <textarea value={layer.text} onChange={e=>upd({text:e.target.value})} rows={2} style={{...iS, resize:"none"}} />
+          </div>
+
+          {/* Font + Size */}
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Font</label>
+            <select value={layer.fontFamily} onChange={e=>upd({fontFamily:e.target.value})} style={iS}>
+              {FONTS.map(f=><option key={f.value} value={f.value}>{f.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Size: {layer.fontSize}px</label>
+            <input type="range" min={12} max={200} value={layer.fontSize} onChange={e=>upd({fontSize:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
+          </div>
+
+          {/* Color + Align */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Color</label>
+              <input type="color" value={layer.color} onChange={e=>upd({color:e.target.value})} style={{ width:"100%", height:30, borderRadius:6, border:"1px solid var(--border)", cursor:"pointer" }} />
+            </div>
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Align</label>
+              <div style={{ display:"flex", gap:3 }}>
+                {["left","center","right"].map(a=>(
+                  <button key={a} onClick={()=>upd({align:a})} style={{ flex:1, padding:"4px", borderRadius:5, border:`1px solid ${layer.align===a?"var(--amber)":"var(--border)"}`, background:layer.align===a?"var(--amber-glow)":"transparent", color:layer.align===a?"var(--amber)":"var(--muted)", fontSize:11, cursor:"pointer" }}>
+                    {a==="left"?"←":a==="center"?"↔":"→"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Style toggles */}
+          <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+            {[{k:"bold",label:"Bold"},{k:"italic",label:"Italic"},{k:"shadow",label:"Shadow"},{k:"bgBox",label:"BG Box"}].map(t=>(
+              <button key={t.k} onClick={()=>upd({[t.k]:!layer[t.k]})} style={{ padding:"4px 10px", borderRadius:6, border:`1px solid ${layer[t.k]?"var(--amber)":"var(--border)"}`, background:layer[t.k]?"var(--amber-glow)":"transparent", color:layer[t.k]?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontWeight:layer[t.k]?700:400 }}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {/* BG Color */}
+          {layer.bgBox && (
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Box Color</label>
+              <input type="color" value={layer.bgColor.slice(0,7)} onChange={e=>upd({bgColor:e.target.value+"aa"})} style={{ width:"100%", height:28, borderRadius:6, border:"1px solid var(--border)", cursor:"pointer" }} />
+            </div>
+          )}
+
+          {/* Position sliders */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>X: {layer.x}%</label>
+              <input type="range" min={0} max={100} value={layer.x} onChange={e=>upd({x:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
+            </div>
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Y: {layer.y}%</label>
+              <input type="range" min={0} max={100} value={layer.y} onChange={e=>upd({y:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
+            </div>
+          </div>
+
+          {/* Presets */}
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Quick Presets</label>
+            {[
+              { label:"Site tagline",   text:"Cast at Dawn. Sip at Dusk.",  y:87, fontSize:28 },
+              { label:"URL watermark",  text:"caskandstream.com",            y:95, fontSize:16 },
+              { label:"Quote style",    text:'"The river knows."',           y:50, fontSize:40 },
+              { label:"CTA bottom",     text:"Link in bio →",               y:91, fontSize:22 },
+            ].map((p,i)=>(
+              <button key={i} onClick={()=>upd({text:p.text, y:p.y, fontSize:p.fontSize})} style={{ display:"block", width:"100%", padding:"4px 8px", marginBottom:3, borderRadius:5, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", textAlign:"left" }}>
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Save */}
+          <div style={{ display:"flex", flexDirection:"column", gap:5, paddingTop:6, borderTop:"1px solid var(--border)" }}>
+            <button onClick={save} disabled={saving} style={{ padding:"9px", borderRadius:8, border:"none", background:saving?"var(--bg-elevated)":"#5cba6c", color:saving?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:saving?"not-allowed":"pointer" }}>
+              {saving ? "Saving…" : "✓ Save to Library"}
+            </button>
+            <button onClick={()=>{ const a=document.createElement("a"); a.href=canvasRef.current.toDataURL(); a.download=`${imageName||"image"}-overlay.png`; a.click(); }} style={{ padding:"9px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer" }}>
+              ↓ Download PNG
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
