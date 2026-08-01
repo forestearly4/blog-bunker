@@ -6914,68 +6914,60 @@ function MediaLibrary({ userId }) {
     if (!selected || !restylePrompt.trim()) return;
     setRestyleLoading(true); setRestyleError(""); setRestyleResult(null);
     try {
-      // Get the image as base64
       const imageUrl = selected.url || selected.dataUrl;
+      if (!imageUrl) throw new Error("No image URL found for selected item");
       let base64Image;
 
       if (imageUrl.startsWith("data:")) {
         base64Image = imageUrl.split(",")[1];
       } else {
-        // Fetch from GCS URL
-        const res  = await fetch(imageUrl);
-        const blob = await res.blob();
-        const reader = new FileReader();
-        base64Image = await new Promise((resolve, reject) => {
-          reader.onload  = () => resolve(reader.result.split(",")[1]);
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
+        // Fetch from GCS — try with mode cors, fall back to no-cors via proxy
+        try {
+          const res  = await fetch(imageUrl, { mode:"cors", credentials:"omit" });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
+          base64Image = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload  = () => resolve(reader.result.split(",")[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        } catch(fetchErr) {
+          // If direct fetch fails, try via /api/gcs proxy
+          const proxyRes = await fetch(`/api/gcs?proxyUrl=${encodeURIComponent(imageUrl)}`);
+          if (!proxyRes.ok) throw new Error("Could not load image for restyle — try downloading and re-uploading it");
+          const blob = await proxyRes.blob();
+          base64Image = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload  = () => resolve(reader.result.split(",")[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        }
       }
 
+      if (!base64Image) throw new Error("Could not load image data");
       const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
 
       if (apiKeys.openai) {
-        // OpenAI /edits requires a PNG with alpha channel (RGBA)
-        // Convert via canvas to ensure correct format
-        const pngBase64 = await new Promise((resolve, reject) => {
-          const img = new Image();
-          img.crossOrigin = "anonymous";
-          img.onload = () => {
-            const canvas = document.createElement("canvas");
-            canvas.width  = img.width;
-            canvas.height = img.height;
-            const ctx = canvas.getContext("2d");
-            ctx.drawImage(img, 0, 0);
-            // Export as PNG (RGBA) — required by OpenAI edits endpoint
-            const dataUrl = canvas.toDataURL("image/png");
-            resolve(dataUrl.split(",")[1]);
-          };
-          img.onerror = reject;
-          img.src = `data:image/png;base64,${base64Image}`;
-        });
-
-        const byteChars = atob(pngBase64);
-        const byteArr   = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
-        const imageBlob = new Blob([byteArr], { type: "image/png" });
-
-        const formData = new FormData();
-        formData.append("model",  "gpt-image-2");
-        formData.append("image",  imageBlob, "image.png");
-        formData.append("prompt", `${restylePrompt}. Keep the same scene, subjects, and composition. Only change the visual style, lighting, color grading, and atmosphere.`);
-        formData.append("n",      "1");
-        formData.append("size",   "1024x1024");
-
-        const res = await fetch("https://api.openai.com/v1/images/edits", {
+        // Route through server proxy — handles PNG conversion and multipart properly
+        const res = await fetch("/api/image-generate", {
           method:  "POST",
-          headers: { "Authorization": `Bearer ${apiKeys.openai}` },
-          body:    formData,
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({
+            provider:     "openai-edit",
+            prompt:       `${restylePrompt}. Keep the same scene, subjects, and composition. Only change the visual style, lighting, color grading, and atmosphere.`,
+            apiKey:       apiKeys.openai,
+            imageBase64:  base64Image,
+            size:         "1024x1024",
+          }),
         });
-        const data = await res.json();
-        if (data.error) throw new Error(`OpenAI: ${data.error.message}`);
-        const b64 = data.data?.[0]?.b64_json;
-        if (!b64) throw new Error("No image data returned from OpenAI");
-        setRestyleResult(`data:image/png;base64,${b64}`);
+        const text = await res.text();
+        if (text.trimStart().startsWith("<")) throw new Error("Server timeout — try again");
+        const data = JSON.parse(text);
+        if (data.error) throw new Error(`OpenAI: ${data.error}`);
+        if (!data.b64) throw new Error("No image data returned");
+        setRestyleResult(`data:image/png;base64,${data.b64}`);
 
       } else if (apiKeys.gemini) {
         // Gemini — image editing via inline data
@@ -7961,41 +7953,82 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
     if (!metaConfig?.connected || !metaConfig?.pages?.length) return;
     setLoadingInsights(true); setInsightError("");
     try {
-      const page    = metaConfig.pages[0];
-      const token   = page.access_token;
-      const pageId  = page.id;
-      const igId    = page.instagram_id;
+      const page   = metaConfig.pages[0];
+      const token  = page.access_token;
+      const pageId = page.id;
+      const igId   = page.instagram_id;
       const results = {};
 
-      // Facebook Page insights
-      const fbRes = await fetch(
-        `https://graph.facebook.com/v19.0/${pageId}/insights?metric=page_impressions,page_post_engagements,page_fans,page_views_total&period=week&access_token=${token}`
-      );
-      const fbData = await fbRes.json();
-      if (!fbData.error) {
-        results.facebook = {};
-        (fbData.data || []).forEach(m => {
-          const latest = m.values?.[m.values.length - 1]?.value;
-          results.facebook[m.name] = latest;
-        });
-      }
+      // Facebook Page insights — use separate calls per metric with correct periods
+      const fbMetrics = [
+        { metric: "page_fans",             period: "lifetime" },
+        { metric: "page_impressions",      period: "week"     },
+        { metric: "page_post_engagements", period: "week"     },
+        { metric: "page_views_total",      period: "week"     },
+      ];
 
-      // Instagram insights
-      if (igId) {
-        const igRes = await fetch(
-          `https://graph.facebook.com/v19.0/${igId}/insights?metric=impressions,reach,profile_views,follower_count&period=week&access_token=${token}`
-        );
-        const igData = await igRes.json();
-        if (!igData.error) {
-          results.instagram = {};
-          (igData.data || []).forEach(m => {
-            const latest = m.values?.[m.values.length - 1]?.value;
-            results.instagram[m.name] = latest;
-          });
+      results.facebook = {};
+      await Promise.all(fbMetrics.map(async ({ metric, period }) => {
+        try {
+          const res  = await fetch(
+            `https://graph.facebook.com/v19.0/${pageId}/insights?metric=${metric}&period=${period}&access_token=${token}`
+          );
+          const data = await res.json();
+          if (!data.error && data.data?.length) {
+            const vals = data.data[0]?.values;
+            results.facebook[metric] = vals?.[vals.length - 1]?.value ?? null;
+          }
+        } catch {}
+      }));
+
+      // Also get page fan count directly (more reliable)
+      try {
+        const fanRes  = await fetch(`https://graph.facebook.com/v19.0/${pageId}?fields=fan_count,followers_count&access_token=${token}`);
+        const fanData = await fanRes.json();
+        if (!fanData.error) {
+          if (fanData.fan_count       != null) results.facebook.page_fans      = fanData.fan_count;
+          if (fanData.followers_count != null) results.facebook.followers_count = fanData.followers_count;
         }
+      } catch {}
+
+      // Instagram — get follower count from account endpoint, insights from insights
+      if (igId) {
+        results.instagram = {};
+
+        // Follower count from IG account directly
+        try {
+          const igAccRes  = await fetch(`https://graph.facebook.com/v19.0/${igId}?fields=followers_count,media_count,name,username&access_token=${token}`);
+          const igAccData = await igAccRes.json();
+          if (!igAccData.error) {
+            if (igAccData.followers_count != null) results.instagram.follower_count = igAccData.followers_count;
+            if (igAccData.media_count     != null) results.instagram.media_count    = igAccData.media_count;
+          }
+        } catch {}
+
+        // IG insights
+        try {
+          const igRes  = await fetch(
+            `https://graph.facebook.com/v19.0/${igId}/insights?metric=impressions,reach,profile_views&period=week&access_token=${token}`
+          );
+          const igData = await igRes.json();
+          if (!igData.error) {
+            (igData.data || []).forEach(m => {
+              const vals = m.values;
+              results.instagram[m.name] = vals?.[vals.length - 1]?.value ?? null;
+            });
+          }
+        } catch {}
       }
 
-      setSocialInsights(results);
+      // Only set insights if we got some data
+      const hasFBData = Object.values(results.facebook || {}).some(v => v != null);
+      const hasIGData = Object.values(results.instagram || {}).some(v => v != null);
+
+      if (!hasFBData && !hasIGData) {
+        setInsightError("No data returned — your Facebook Page may need 'Insights' permission or have insufficient activity. Make sure you're connected as a Page Admin.");
+      } else {
+        setSocialInsights(results);
+      }
     } catch(e) { setInsightError(e.message); }
     setLoadingInsights(false);
   };
@@ -9227,8 +9260,9 @@ function SocialPlatformSettings() {
 // ─── IMAGE TEXT OVERLAY EDITOR ───────────────────────────────────────────────
 
 function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
-  const canvasRef  = useRef(null);
-  const [dataUrl,  setDataUrl]  = useState(null); // local data URL, avoids CORS
+  const [canvasEl, setCanvasEl] = useState(null); // callback ref — know when canvas is mounted
+  const canvasRef = useCallback(node => { if (node) setCanvasEl(node); }, []);
+  const [dataUrl,  setDataUrl]  = useState(null);
   const [layers,   setLayers]   = useState([{
     id:1, text:"Your text here", x:50, y:85, fontSize:36,
     fontFamily:"Georgia, serif", color:"#ffffff", align:"center",
@@ -9246,37 +9280,60 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
     { label:"Courier",          value:"'Courier New', monospace" },
   ];
 
-  // Load image via fetch to avoid CORS issues with GCS URLs
+  // Load image — try fetch first, fall back to img element with crossOrigin
   useEffect(() => {
     setLoadErr("");
+    setDataUrl(null);
     (async () => {
       try {
         if (imageUrl.startsWith("data:")) { setDataUrl(imageUrl); return; }
-        const res  = await fetch(imageUrl);
-        const blob = await res.blob();
-        const reader = new FileReader();
-        reader.onload = e => setDataUrl(e.target.result);
-        reader.readAsDataURL(blob);
+
+        // Try fetch with no-cors handling
+        try {
+          const res  = await fetch(imageUrl, { mode: "cors", credentials: "omit" });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
+          const reader = new FileReader();
+          reader.onload = e => setDataUrl(e.target.result);
+          reader.readAsDataURL(blob);
+        } catch {
+          // Fetch failed (CORS) — load via Image element instead
+          // Canvas will be tainted but we can still display it
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => {
+            const canvas = document.createElement("canvas");
+            canvas.width  = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            try {
+              canvas.getContext("2d").drawImage(img, 0, 0);
+              setDataUrl(canvas.toDataURL("image/png"));
+            } catch {
+              // Canvas tainted — just use the URL directly for display
+              setDataUrl(imageUrl);
+            }
+          };
+          img.onerror = () => setLoadErr("Could not load image — try downloading it first and re-uploading.");
+          img.src = imageUrl + "?_=" + Date.now(); // cache bust
+        }
       } catch(e) { setLoadErr("Could not load image: " + e.message); }
     })();
   }, [imageUrl]);
 
-  // Draw whenever dataUrl or layers change
+  // Draw whenever dataUrl, layers, or canvas element changes
   useEffect(() => {
-    if (!dataUrl || !canvasRef.current) return;
+    if (!dataUrl || !canvasEl) return;
     const img = new Image();
     img.onload = () => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      canvas.width  = img.width;
-      canvas.height = img.height;
+      const ctx = canvasEl.getContext("2d");
+      canvasEl.width  = img.width;
+      canvasEl.height = img.height;
       ctx.drawImage(img, 0, 0);
 
       for (const l of layers) {
         if (!l.text.trim()) continue;
-        const x = (l.x / 100) * canvas.width;
-        const y = (l.y / 100) * canvas.height;
+        const x = (l.x / 100) * canvasEl.width;
+        const y = (l.y / 100) * canvasEl.height;
         ctx.font = `${l.italic?"italic ":""}${l.bold?"bold ":""}${l.fontSize}px ${l.fontFamily}`;
         ctx.textAlign    = l.align;
         ctx.textBaseline = "middle";
@@ -9289,7 +9346,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
           ctx.fillRect(bx, y-l.fontSize*0.65, tw+pad*2, l.fontSize*1.3);
         }
         ctx.shadowColor   = l.shadow ? l.shadowColor : "transparent";
-        ctx.shadowBlur    = l.shadow ? l.shadowBlur : 0;
+        ctx.shadowBlur    = l.shadow ? l.shadowBlur  : 0;
         ctx.shadowOffsetX = l.shadow ? 2 : 0;
         ctx.shadowOffsetY = l.shadow ? 2 : 0;
         ctx.fillStyle = l.color;
@@ -9299,15 +9356,16 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
       }
     };
     img.src = dataUrl;
-  }, [dataUrl, layers]);
+  }, [dataUrl, layers, canvasEl]);
 
   const layer = layers[sel] || layers[0];
   const upd   = (patch) => setLayers(p => p.map((l,i) => i===sel ? {...l,...patch} : l));
 
   const save = async () => {
+    if (!canvasEl) return;
     setSaving(true);
     try {
-      const exportUrl = canvasRef.current.toDataURL("image/png", 0.92);
+      const exportUrl = canvasEl.toDataURL("image/png", 0.92);
       const res  = await fetch("/api/gcs", {
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({ userId, dataUrl: exportUrl, name:`${imageName||"image"}-overlay`, tags:["overlay","edited"], source:"edited" }),
@@ -9345,7 +9403,6 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
                 upd({ x: Math.round((e.clientX-r.left)/r.width*100), y: Math.round((e.clientY-r.top)/r.height*100) });
               }}
               style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", cursor:"crosshair", display:"block" }} />
-            <div style={{ fontSize:10, color:"var(--muted)", marginTop:4, textAlign:"center" }}>Click image to reposition · use sliders for precision</div>
           </div>
 
           {/* Controls */}
@@ -9444,7 +9501,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
               <button onClick={save} disabled={saving} style={{ padding:"9px", borderRadius:8, border:"none", background:saving?"var(--bg-elevated)":"#5cba6c", color:saving?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:saving?"not-allowed":"pointer" }}>
                 {saving ? "Saving…" : "✓ Save to Library"}
               </button>
-              <button onClick={()=>{ const a=document.createElement("a"); a.href=canvasRef.current.toDataURL("image/png"); a.download=`${imageName||"image"}-overlay.png`; a.click(); }} style={{ padding:"9px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer" }}>
+              <button onClick={()=>{ if(!canvasEl) return; const a=document.createElement("a"); a.href=canvasEl.toDataURL("image/png"); a.download=`${imageName||"image"}-overlay.png`; a.click(); }} style={{ padding:"9px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer" }}>
                 ↓ Download PNG
               </button>
             </div>
