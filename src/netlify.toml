@@ -3,6 +3,7 @@
   command   = "npm run build"
   publish   = "dist"
   functions = "netlify/functions"
+  ignore    = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- src/ netlify/ netlify.toml package.json vite.config.js"
 
 [build.environment]
   NODE_VERSION = "20"
@@ -12,7 +13,7 @@
   external_node_modules = ["@netlify/blobs"]
 
 [functions.social-scheduler]
-  schedule = "*/15 * * * *"
+  schedule = "0 * * * *"
 
 # Claude AI proxy
 [[redirects]]
