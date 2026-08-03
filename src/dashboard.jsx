@@ -10553,7 +10553,7 @@ export default function Dashboard({ user, workspace }) {
   const [wsSettings,  setWsSettings]  = useState(() => { try { const s = localStorage.getItem("bb_ws_settings"); return s ? JSON.parse(s) : null; } catch { return null; } });
 
   // ── Cloud sync (Netlify Blobs) — survives localStorage clearing ──────────
-  const userId = user?.id || user?.email || "anonymous";
+  const userId = user?.email || user?.id || "anonymous";
   // Make userId available to components deep in tree (HeadlineImagePanel etc.)
   window.__bbUserId = userId;
   const [cloudSynced, setCloudSynced] = useState(false);
