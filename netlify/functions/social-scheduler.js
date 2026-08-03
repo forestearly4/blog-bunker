@@ -10,7 +10,7 @@
 
 import { getStore } from "@netlify/blobs";
 
-export const config = { schedule: "*/15 * * * *" };
+export const config = { schedule: "0 * * * *" };
 
 async function ensurePublicImageUrl(imageUrl) {
   if (!imageUrl) return null;
