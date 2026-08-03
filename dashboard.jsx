@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { useAuth } from "./auth";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
@@ -264,6 +265,9 @@ function loadKeys() {
 }
 function saveKeys(keys) {
   try { localStorage.setItem(KEYS_STORAGE, JSON.stringify(keys)); } catch {}
+  // Push to cloud
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("api_keys", uid, keys);
 }
 function loadModels() {
   try { return JSON.parse(localStorage.getItem(MODEL_STORAGE) || "{}"); } catch { return {}; }
@@ -335,6 +339,7 @@ const SOCIAL_PLATFORMS = [
     color: "#e1306c",
     charLimit: 2200,
     hashtagLimit: 30,
+    bestTimes: ["Tue–Fri 11am–1pm", "Mon–Fri 7–9pm"],
     tone: "visual, aspirational, lifestyle-focused",
     format: "Hook line, 3-4 short paragraphs, line breaks between each, 10-15 relevant hashtags at end",
     placeholder: "Share to Instagram feed",
@@ -347,6 +352,7 @@ const SOCIAL_PLATFORMS = [
     color: "#1877f2",
     charLimit: 63206,
     hashtagLimit: 5,
+    bestTimes: ["Wed 11am–1pm", "Thu–Fri 1–4pm"],
     tone: "conversational, community-friendly, story-driven",
     format: "Engaging opening question or statement, 2-3 paragraphs, call to action, 2-3 hashtags optional",
     placeholder: "Share to Facebook page",
@@ -359,6 +365,7 @@ const SOCIAL_PLATFORMS = [
     color: "#fe2c55",
     charLimit: 2200,
     hashtagLimit: 10,
+    bestTimes: ["Tue–Thu 7–9pm", "Fri–Sun 6–9pm"],
     tone: "punchy, energetic, trend-aware, Gen Z/Millennial",
     format: "Hook in first line (no more than 8 words), ultra-short sentences, 3-5 trending hashtags",
     placeholder: "Write TikTok caption",
@@ -371,6 +378,7 @@ const SOCIAL_PLATFORMS = [
     color: "#ff4500",
     charLimit: 40000,
     hashtagLimit: 0,
+    bestTimes: ["Mon–Fri 9am–12pm", "Sat 10am–12pm"],
     tone: "authentic, community-first, no marketing speak, conversational",
     format: "Title line, then body as genuine post. No hashtags. No salesy language. Share value first, mention the blog naturally if relevant.",
     placeholder: "Write Reddit post",
@@ -383,10 +391,24 @@ const SOCIAL_PLATFORMS = [
     color: "#000000",
     charLimit: 280,
     hashtagLimit: 2,
+    bestTimes: ["Mon–Fri 8–10am", "Wed 5–6pm"],
     tone: "sharp, witty, opinionated, punchy",
     format: "Single punchy statement or question. Max 280 chars. 1-2 hashtags max. No filler.",
     placeholder: "Write a tweet",
     urlNote: "URLs count as ~23 chars — account for that in length",
+  },
+  {
+    id: "pinterest",
+    name: "Pinterest",
+    icon: "📌",
+    color: "#e60023",
+    charLimit: 500,
+    hashtagLimit: 5,
+    bestTimes: ["Sat–Sun 2–4pm", "Fri 3–5pm"],
+    tone: "inspirational, keyword-rich, search-friendly",
+    format: "2-3 sentences with keywords, CTA, 3-5 relevant hashtags",
+    placeholder: "Write Pinterest pin description",
+    urlNote: "Pin links directly to your blog post for traffic",
   },
 ];
 
@@ -434,125 +456,251 @@ function getAvailableImageProviders(apiKeys) {
 async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
   const provider = forceProvider || getImageProvider(apiKeys);
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
+  if (!provider) throw new Error("No image provider connected. Add an OpenAI or Gemini key in Settings → API Keys.");
+  const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
+  const apiKey = apiKeys[keyMap[provider]];
+  if (!apiKey) throw new Error(`${getImageProviderLabel(provider)} key not set. Add it in Settings → API Keys.`);
+  const sizeMap = { "1:1":"1024x1024", "3:2":"1536x1024", "2:3":"1024x1536", "16:9":"1536x1024" };
+  const size = sizeMap[spec.ratio] || "1024x1024";
 
-  if (!provider) {
-    throw new Error("No image provider connected. Add a Stability AI, OpenAI, or Gemini key in Settings → API Keys.");
-  }
-  if (forceProvider) {
-    const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
-    if (!apiKeys[keyMap[forceProvider]]) {
-      throw new Error(`${getImageProviderLabel(forceProvider)} key not set. Add it in Settings → API Keys.`);
-    }
-  }
-
-  if (provider === "stability") {
-    const formData = new FormData();
-    formData.append("prompt", prompt);
-    formData.append("output_format", "webp");
-    formData.append("aspect_ratio", spec.ratio);
-    const res = await fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${apiKeys["stability"]}`, "Accept": "image/*" },
-      body: formData,
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err?.message || `Stability AI error: ${res.status}`);
-    }
-    const blob = await res.blob();
-    return URL.createObjectURL(blob);
-  }
-
+  // OpenAI — call directly from browser (avoids Netlify 10s timeout, OpenAI supports CORS for images)
   if (provider === "dalle") {
-    // gpt-image-1 replaced dall-e-3 (retired March 2026)
-    // gpt-image-1 returns base64 data, not URLs
-    const sizeMap = { "1:1":"1024x1024", "3:2":"1536x1024", "2:3":"1024x1536", "16:9":"1536x1024" };
-    const size = sizeMap[spec.ratio] || "1024x1024";
     const res = await fetch("https://api.openai.com/v1/images/generations", {
-      method: "POST",
-      headers: { "Content-Type":"application/json", "Authorization":`Bearer ${apiKeys["openai"]}` },
-      body: JSON.stringify({ model:"gpt-image-1", prompt, n:1, size, quality:"medium" }),
+      method:  "POST",
+      headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model:"gpt-image-2", prompt, n:1, size }),
     });
     const data = await res.json();
-    if (data.error) throw new Error(`OpenAI image error: ${data.error.message}`);
-    // gpt-image-1 returns base64 JSON
+    if (data.error) throw new Error(`OpenAI: ${data.error.message}`);
     const b64 = data.data?.[0]?.b64_json;
-    if (!b64) throw new Error("OpenAI returned no image data.");
-    const byteStr = atob(b64);
-    const bytes = new Uint8Array(byteStr.length);
-    for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
-    const blob = new Blob([bytes], { type:"image/png" });
-    return URL.createObjectURL(blob);
+    if (!b64) throw new Error("No image data returned from OpenAI");
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    return URL.createObjectURL(new Blob([bytes], { type:"image/png" }));
   }
 
+  // Gemini — call directly from browser
   if (provider === "gemini-image") {
-    // Gemini image generation — retry up to 3 times on overload errors
-    const GEMINI_IMAGE_MODELS = [
-      "gemini-3.1-flash-image-preview",
-      "gemini-2.5-flash-image",
-    ];
+    const models = ["gemini-3.1-flash-image-preview", "gemini-2.5-flash-image"];
     let lastErr = "";
-    for (const model of GEMINI_IMAGE_MODELS) {
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const res = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKeys["gemini"]}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
-                generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
-              }),
-            }
-          );
-          const data = await res.json();
-          if (data.error) {
-            const msg = data.error.message || "";
-            // On overload or rate limit, wait and retry
-            if (msg.includes("overloaded") || msg.includes("RESOURCE_EXHAUSTED") || res.status === 503 || res.status === 429) {
-              lastErr = `Gemini overloaded (attempt ${attempt}) — retrying…`;
-              await new Promise(r => setTimeout(r, 2000 * attempt));
-              continue;
-            }
-            lastErr = `Gemini Image error (${model}): ${msg}`;
-            break; // Try next model
+    for (const model of models) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
+              generationConfig: { responseModalities: ["IMAGE","TEXT"] },
+            }),
           }
-          const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-          if (!part?.inlineData) {
-            lastErr = `Gemini Image (${model}): no image data returned`;
-            break;
-          }
-          const byteStr = atob(part.inlineData.data);
-          const bytes = new Uint8Array(byteStr.length);
-          for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
-          const blob = new Blob([bytes], { type: part.inlineData.mimeType || "image/png" });
-          return URL.createObjectURL(blob);
-        } catch(e) {
-          lastErr = e.message;
-        }
-      }
+        );
+        const data = await res.json();
+        if (data.error) { lastErr = data.error.message; continue; }
+        const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+        if (!part) { lastErr = "No image data returned"; continue; }
+        const bytes = Uint8Array.from(atob(part.inlineData.data), c => c.charCodeAt(0));
+        return URL.createObjectURL(new Blob([bytes], { type: part.inlineData.mimeType || "image/png" }));
+      } catch(e) { lastErr = e.message; }
     }
-    throw new Error(`Gemini Image failed: ${lastErr}`);
+    throw new Error(`Gemini image failed: ${lastErr}`);
   }
 
-  throw new Error("Unknown image provider");
+  // Stability AI — still needs proxy (no CORS support)
+  const res = await fetch("/api/image-generate", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider:"stability", prompt, apiKey, size }),
+  });
+  const text = await res.text();
+  if (text.trimStart().startsWith("<")) throw new Error("Image generation timed out — try again");
+  const data = JSON.parse(text);
+  if (data.error) throw new Error(data.error);
+  const bytes = Uint8Array.from(atob(data.b64), c => c.charCodeAt(0));
+  return URL.createObjectURL(new Blob([bytes], { type:"image/png" }));
 }
 
-function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", style: extraStyle = {} }) {
-  const [saved, setSaved] = useState(false);
-  const [saving, setSaving] = useState(false);
+function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated", userId, style: extraStyle = {} }) {
+  const resolvedUserId = userId || window.__bbUserId || "anonymous";
+  const [saved,   setSaved]   = useState(false);
+  const [saving,  setSaving]  = useState(false);
+  const [saveErr, setSaveErr] = useState("");
+
   const handle = async () => {
-    setSaving(true);
-    try { await saveToMediaLibrary(imageUrl, `${name}-${Date.now()}`, tags); setSaved(true); setTimeout(() => setSaved(false), 2500); }
-    catch(e) { console.error(e); }
+    if (!imageUrl) return;
+    setSaving(true); setSaveErr("");
+    try {
+      let dataUrl;
+      if (imageUrl.startsWith("blob:")) {
+        const res  = await fetch(imageUrl);
+        if (!res.ok) throw new Error(`Could not read image (${res.status})`);
+        const blob = await res.blob();
+        dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("FileReader failed"));
+          reader.readAsDataURL(blob);
+        });
+      } else if (imageUrl.startsWith("data:")) {
+        dataUrl = imageUrl;
+      } else {
+        const res  = await fetch(imageUrl);
+        const blob = await res.blob();
+        dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("FileReader failed"));
+          reader.readAsDataURL(blob);
+        });
+      }
+      // Compress if over 4MB
+      if (dataUrl.length > 4_000_000) {
+        dataUrl = await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement("canvas");
+            const scale = Math.sqrt(4_000_000 / dataUrl.length) * 0.9;
+            c.width  = Math.round(img.width  * scale);
+            c.height = Math.round(img.height * scale);
+            c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+            resolve(c.toDataURL("image/jpeg", 0.85));
+          };
+          img.onerror = () => reject(new Error("Compression failed"));
+          img.src = dataUrl;
+        });
+      }
+      // Upload to cloud
+      const res = await fetch("/api/gcs", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId: resolvedUserId, dataUrl, name: `${name}-${Date.now()}`, tags, source: "generated" }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Upload failed (${res.status})`);
+      }
+      window.dispatchEvent(new CustomEvent("bb-media-updated"));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch(e) {
+      console.error("Save to library failed:", e);
+      setSaveErr(e.message.slice(0, 60));
+      setTimeout(() => setSaveErr(""), 4000);
+    }
     setSaving(false);
   };
+
   return (
-    <button onClick={handle} disabled={saving}
-      style={{ padding:"6px 14px", borderRadius:6, border:"none", background:saved?"rgba(92,186,108,0.85)":saving?"rgba(0,0,0,0.5)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:saving?"not-allowed":"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)", ...extraStyle }}>
-      {saved ? "✓ Saved" : saving ? "◌" : "🖼 Save"}
-    </button>
+    <div style={{ display:"inline-flex", flexDirection:"column", gap:3 }}>
+      <button onClick={handle} disabled={saving}
+        style={{ padding:"6px 14px", borderRadius:6, border:"none", background:saved?"rgba(92,186,108,0.85)":saving?"rgba(0,0,0,0.5)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:saving?"not-allowed":"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)", ...extraStyle }}>
+        {saved ? "✓ Saved" : saving ? "◌ Saving…" : "🖼 Save"}
+      </button>
+      {saveErr && <div style={{ fontSize:10, color:"var(--red)", maxWidth:130, lineHeight:1.3 }}>{saveErr}</div>}
+    </div>
+  );
+}
+
+// ─── IMAGE SAVE PANEL ────────────────────────────────────────────────────────
+// Shows the generated image with download + save controls and visible status
+
+function ImageSavePanel({ imageUrl, tags = ["generated"], name = "generated" }) {
+  const [saving,  setSaving]  = useState(false);
+  const [saved,   setSaved]   = useState(false);
+  const [status,  setStatus]  = useState("");
+
+  const saveToLibrary = async () => {
+    const userId = window.__bbUserId || "anonymous";
+    setSaving(true); setSaved(false);
+    setStatus(`Saving… (user: ${userId})`);
+
+    try {
+      // Convert blob: URL to base64
+      let dataUrl = imageUrl;
+      if (imageUrl.startsWith("blob:")) {
+        setStatus("Reading image…");
+        const res  = await fetch(imageUrl);
+        if (!res.ok) throw new Error(`Could not read image blob (${res.status})`);
+        const blob = await res.blob();
+        setStatus(`Encoding ${Math.round(blob.size/1024)}KB image…`);
+        dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("FileReader failed"));
+          reader.readAsDataURL(blob);
+        });
+      }
+
+      // Compress if over 4MB
+      if (dataUrl.length > 4_000_000) {
+        setStatus(`Compressing large image (${Math.round(dataUrl.length/1024)}KB)…`);
+        dataUrl = await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement("canvas");
+            const scale = Math.sqrt(4_000_000 / dataUrl.length) * 0.9;
+            c.width  = Math.round(img.width  * scale);
+            c.height = Math.round(img.height * scale);
+            c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+            resolve(c.toDataURL("image/jpeg", 0.85));
+          };
+          img.onerror = () => reject(new Error("Canvas compression failed"));
+          img.src = dataUrl;
+        });
+      }
+
+      setStatus(`Uploading to cloud (${Math.round(dataUrl.length/1024)}KB)…`);
+      const res = await fetch("/api/gcs", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          userId,
+          dataUrl,
+          name:   `${name}-${Date.now()}`,
+          tags,
+          source: "generated",
+        }),
+      });
+
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); }
+      catch { throw new Error(`Server returned non-JSON (${res.status}): ${text.slice(0,100)}`); }
+
+      if (!res.ok || data.error) throw new Error(data.error || `Upload failed (${res.status})`);
+
+      window.dispatchEvent(new CustomEvent("bb-media-updated"));
+      setSaved(true);
+      setStatus(`✓ Saved to library!`);
+      setTimeout(() => setStatus(""), 4000);
+
+    } catch(e) {
+      setStatus(`✗ ${e.message}`);
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div style={{ borderRadius:12, overflow:"hidden", border:"1px solid var(--border)" }}>
+      <div style={{ position:"relative" }}>
+        <img src={imageUrl} alt="Generated" style={{ width:"100%", display:"block" }} />
+        <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
+          <button onClick={() => { const a=document.createElement("a"); a.href=imageUrl; a.download=`${name}-${Date.now()}.jpg`; a.click(); }}
+            style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+            ↓ Download
+          </button>
+          <button onClick={saveToLibrary} disabled={saving}
+            style={{ padding:"6px 14px", borderRadius:6, border:"none", background:saved?"rgba(92,186,108,0.9)":saving?"rgba(0,0,0,0.5)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:saving?"not-allowed":"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+            {saving ? "◌" : saved ? "✓ Saved" : "🖼 Save to Library"}
+          </button>
+        </div>
+      </div>
+      {status && (
+        <div style={{ padding:"8px 12px", background:status.startsWith("✗")?"var(--red)11":status.startsWith("✓")?"#5cba6c11":"var(--bg-elevated)", fontSize:11, color:status.startsWith("✗")?"var(--red)":status.startsWith("✓")?"#5cba6c":"var(--text-secondary)", borderTop:"1px solid var(--border)" }}>
+          {status}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -668,7 +816,7 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
     if (!imageUrl) return;
     const a = document.createElement("a");
     a.href = imageUrl;
-    a.download = `cask-stream-${platId}-${Date.now()}.webp`;
+    a.download = `cask-stream-${platId}-${Date.now()}.jpg`;
     a.click();
   };
 
@@ -936,6 +1084,18 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig 
                 rows={plat.id === "twitter" ? 4 : 9}
                 style={{ width:"100%", padding:"14px", borderRadius:8, border:`1px solid ${isOver(plat.id)?"var(--red)":"var(--border)"}`, background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box", resize:"vertical", lineHeight:1.7 }}
               />
+
+              {/* Twitter hard char limit warning */}
+              {plat.id === "twitter" && (
+                <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                  <div style={{ flex:1, height:4, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
+                    <div style={{ height:"100%", width:`${Math.min(100,(charCount(plat.id)/280)*100)}%`, background:charCount(plat.id)>280?"var(--red)":charCount(plat.id)>240?"var(--amber)":"#5cba6c", borderRadius:99, transition:"width 0.2s" }} />
+                  </div>
+                  <span style={{ fontSize:12, fontWeight:700, color:charCount(plat.id)>280?"var(--red)":charCount(plat.id)>240?"var(--amber)":"var(--muted)", flexShrink:0 }}>
+                    {280 - charCount(plat.id)} chars left
+                  </span>
+                </div>
+              )}
 
               {/* Image panel — shown for visual platforms */}
               {plat.id !== "reddit" && (
@@ -1923,9 +2083,16 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
 
 // ─── SETTINGS: GENERAL ───────────────────────────────────────────────────────
 
+const LOGO_STORAGE = "bb_workspace_logo";
+function loadLogo() { try { return localStorage.getItem(LOGO_STORAGE) || null; } catch { return null; } }
+function saveLogo(data) { try { localStorage.setItem(LOGO_STORAGE, data); } catch {} }
+
 function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
-  const [form,  setForm]  = useState({ name:wsName, url:wsUrl, tagline:wsTagline });
-  const [saved, setSaved] = useState(false);
+  const [form,       setForm]       = useState({ name:wsName, url:wsUrl, tagline:wsTagline });
+  const [saved,      setSaved]      = useState(false);
+  const [logo,       setLogo]       = useState(loadLogo);
+  const [logoStatus, setLogoStatus] = useState("");
+  const logoInput = useRef(null);
 
   const handleSave = () => {
     onSave(form);
@@ -1933,18 +2100,84 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
     setTimeout(() => setSaved(false), 2000);
   };
 
+  const handleLogoUpload = (file) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setLogoStatus("Only image files supported"); return; }
+    if (file.size > 2 * 1024 * 1024) { setLogoStatus("Logo too large — max 2MB"); return; }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target.result;
+      // Resize via canvas to max 200px height for sidebar
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const maxH   = 80;
+        const scale  = Math.min(1, maxH / img.height);
+        canvas.width  = Math.round(img.width  * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        const resized = canvas.toDataURL("image/png", 0.9);
+        saveLogo(resized);
+        setLogo(resized);
+        // Trigger re-render of sidebar logo
+        window.dispatchEvent(new CustomEvent("bb-logo-updated", { detail: resized }));
+        setLogoStatus("✓ Logo saved");
+        setTimeout(() => setLogoStatus(""), 3000);
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const removeLogo = () => {
+    saveLogo("");
+    setLogo(null);
+    window.dispatchEvent(new CustomEvent("bb-logo-updated", { detail: null }));
+  };
+
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
-      <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:0 }}>Workspace Settings</h3>
-      {[{label:"Blog Name",key:"name"},{label:"Blog URL",key:"url"},{label:"Tagline",key:"tagline"}].map(f => (
-        <div key={f.label}>
-          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
-          <input style={inputSt} value={form[f.key]} onChange={e => setForm(prev => ({ ...prev, [f.key]: e.target.value }))} />
+    <div style={{ display:"flex", flexDirection:"column", gap:24 }}>
+      {/* Logo Upload */}
+      <div>
+        <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Brand Logo</h3>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 16px" }}>Appears in the sidebar and on exported content. PNG or SVG recommended.</p>
+        <div style={{ display:"flex", alignItems:"center", gap:16 }}>
+          <div style={{ width:120, height:60, borderRadius:8, border:"2px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden" }}>
+            {logo ? (
+              <img src={logo} alt="Logo" style={{ maxWidth:"100%", maxHeight:"100%", objectFit:"contain" }} />
+            ) : (
+              <span style={{ fontSize:11, color:"var(--muted)", textAlign:"center", padding:8 }}>No logo yet</span>
+            )}
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            <button onClick={() => logoInput.current?.click()}
+              style={{ padding:"7px 16px", borderRadius:7, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {logo ? "↑ Replace Logo" : "↑ Upload Logo"}
+            </button>
+            {logo && (
+              <button onClick={removeLogo}
+                style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                Remove Logo
+              </button>
+            )}
+            {logoStatus && <span style={{ fontSize:11, color:"#5cba6c" }}>{logoStatus}</span>}
+          </div>
         </div>
-      ))}
-      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-        <button onClick={handleSave} style={{ ...btnP, alignSelf:"flex-start" }}>Save Changes</button>
-        {saved && <span style={{ fontSize:12, color:"var(--green)" }}>✓ Saved</span>}
+        <input ref={logoInput} type="file" accept="image/*" style={{ display:"none" }} onChange={e => handleLogoUpload(e.target.files[0])} />
+      </div>
+
+      <div style={{ borderTop:"1px solid var(--border)", paddingTop:24 }}>
+        <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 16px" }}>Workspace Settings</h3>
+        {[{label:"Blog Name",key:"name"},{label:"Blog URL",key:"url"},{label:"Tagline",key:"tagline"}].map(f => (
+          <div key={f.label} style={{ marginBottom:14 }}>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{f.label}</label>
+            <input style={inputSt} value={form[f.key]} onChange={e => setForm(prev => ({ ...prev, [f.key]: e.target.value }))} />
+          </div>
+        ))}
+        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+          <button onClick={handleSave} style={{ ...btnP, alignSelf:"flex-start" }}>Save Changes</button>
+          {saved && <span style={{ fontSize:12, color:"var(--green)" }}>✓ Saved</span>}
+        </div>
       </div>
     </div>
   );
@@ -1953,12 +2186,16 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
 // ─── AI IDEA GENERATOR ───────────────────────────────────────────────────────
 
 function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activeModel, apiKeys, dark, onProviderChange, onModelChange }) {
-  const [loading,   setLoading]   = useState(false);
-  const [ideas,     setIdeas]     = useState([]);
-  const [error,     setError]     = useState("");
-  const [saved,     setSaved]     = useState({});
-  const [focus,     setFocus]     = useState("mixed");
+  const [loading,    setLoading]    = useState(false);
+  const [ideas,      setIdeas]      = useState([]);
+  const [error,      setError]      = useState("");
+  const [saved,      setSaved]      = useState({});
+  const [focus,      setFocus]      = useState("mixed");
+  const [customTopic,setCustomTopic]= useState("");
+  const [ideaCount,  setIdeaCount]  = useState(10);
+  const [mode,       setMode]       = useState("category"); // "category" | "custom"
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
 
   const FOCUSES = [
     { id:"mixed",      label:"Mixed",          desc:"All angles" },
@@ -1980,14 +2217,19 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
         seo:        "SEO-optimized angles with high search volume and low competition for a fly fishing and whiskey niche blog",
       };
 
+      const promptFocus = mode === "custom" && customTopic.trim()
+        ? `the specific topic: "${customTopic.trim()}"`
+        : focusMap[focus];
+
       const text = await callAI(
         activeProvider, activeModel,
-        `You are a content strategist for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "Cast at Dawn. Sip at Dusk." Generate fresh, specific, actionable blog post ideas that haven't been covered yet. Return ONLY valid JSON — no markdown, no fences, no explanation. Format: [{"title":"...","angle":"...","type":"article","notes":"..."}] where angle is 1 sentence explaining the unique hook, notes is why this will resonate with the audience. Generate exactly 10 ideas.`,
-        `Focus area: ${focusMap[focus]}\n\nAlready published/drafted (avoid these angles):\n${existingTitles}\n\nGenerate 10 fresh content ideas.`,
-        apiKeys[activeProvider]
+        `You are a content strategist for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "Cast at Dawn. Sip at Dusk." Generate fresh, specific, actionable blog post ideas. Return ONLY valid JSON — no markdown, no fences, no explanation. Format: [{"title":"...","angle":"...","type":"article","notes":"...","outline":["point 1","point 2","point 3"]}] where angle is 1 sentence explaining the unique hook, notes is why this resonates with the audience, outline is 3 talking points. Generate exactly ${ideaCount} ideas.`,
+        `Focus: ${promptFocus}\n\nAlready published/drafted (avoid these angles):\n${existingTitles}\n\nGenerate ${ideaCount} fresh, specific content ideas.`,
+        apiKeys[activeProvider],
+        2000
       );
       const parsed = parseAIJson(text);
-      setIdeas(parsed);
+      setIdeas(Array.isArray(parsed) ? parsed : []);
     } catch(e) {
       setError(e.message || "Generation failed.");
     }
@@ -2029,24 +2271,58 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
         keys={apiKeys}
       />
 
-      {/* Focus selector */}
-      <div style={{ marginBottom:16 }}>
-        <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Focus Area</div>
-        <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-          {FOCUSES.map(f => (
-            <button key={f.id} onClick={() => setFocus(f.id)}
-              style={{ padding:"6px 14px", borderRadius:99, border:focus===f.id?"1px solid var(--amber)":"1px solid var(--border)", background:focus===f.id?"var(--amber-glow)":"transparent", color:focus===f.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-              {f.label}
+      {/* ── Mode selector ── */}
+      <div style={{ display:"flex", gap:6, marginBottom:4 }}>
+        <button onClick={() => setMode("custom")}
+          style={{ padding:"8px 18px", borderRadius:8, border:`1px solid ${mode==="custom"?"var(--amber)":"var(--border)"}`, background:mode==="custom"?"var(--amber-glow)":"transparent", color:mode==="custom"?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:mode==="custom"?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+          ✦ Custom Topic
+        </button>
+        <button onClick={() => setMode("category")}
+          style={{ padding:"8px 18px", borderRadius:8, border:`1px solid ${mode==="category"?"var(--amber)":"var(--border)"}`, background:mode==="category"?"var(--amber-glow)":"transparent", color:mode==="category"?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:mode==="category"?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+          ◈ By Category
+        </button>
+      </div>
+
+      {/* ── Custom topic input ── */}
+      {mode === "custom" && (
+        <div style={{ background:"var(--amber-glow)", border:"1px solid var(--amber)44", borderRadius:10, padding:16, display:"flex", flexDirection:"column", gap:10 }}>
+          <div style={{ fontSize:12, color:"var(--amber)", fontWeight:600 }}>✦ Generate ideas for a specific topic</div>
+          <input style={iS} placeholder='e.g. "fly fishing tips and techniques" or "bourbon cocktail recipes for the outdoors" or "best drift boats for beginners"'
+            value={customTopic} onChange={e => setCustomTopic(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && generate()}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        </div>
+      )}
+
+      {/* ── Category focus selector ── */}
+      {mode === "category" && (
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Focus Area</div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+            {FOCUSES.map(f => (
+              <button key={f.id} onClick={() => setFocus(f.id)}
+                style={{ padding:"6px 14px", borderRadius:99, border:focus===f.id?"1px solid var(--amber)":"1px solid var(--border)", background:focus===f.id?"var(--amber-glow)":"transparent", color:focus===f.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Count + generate ── */}
+      <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+          <span style={{ fontSize:11, color:"var(--muted)" }}>How many:</span>
+          {[5, 8, 10, 15].map(n => (
+            <button key={n} onClick={() => setIdeaCount(n)}
+              style={{ width:32, height:28, borderRadius:6, border:`1px solid ${ideaCount===n?"var(--amber)":"var(--border)"}`, background:ideaCount===n?"var(--amber-glow)":"transparent", color:ideaCount===n?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:ideaCount===n?700:400, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              {n}
             </button>
           ))}
         </div>
-      </div>
-
-      {/* Generate button */}
-      <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom: ideas.length ? 20 : 0 }}>
-        <button onClick={generate} disabled={loading}
-          style={{ padding:"10px 24px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
-          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating 10 ideas…</> : `${provider.logo} Generate Ideas`}
+        <button onClick={generate} disabled={loading || (mode==="custom" && !customTopic.trim())}
+          style={{ padding:"10px 24px", borderRadius:8, border:"none", background:loading||(mode==="custom"&&!customTopic.trim())?"var(--bg-elevated)":provider.color, color:loading||(mode==="custom"&&!customTopic.trim())?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading||(mode==="custom"&&!customTopic.trim())?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating {ideaCount} ideas…</> : `${provider.logo} Generate Ideas`}
         </button>
         {ideas.length > 0 && (
           <button onClick={saveAll}
@@ -2066,7 +2342,16 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
               <div style={{ flex:1, minWidth:0 }}>
                 <div style={{ fontWeight:600, fontSize:13, marginBottom:4 }}>{idea.title}</div>
                 <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:4, fontStyle:"italic" }}>{idea.angle}</div>
-                {idea.notes && <div style={{ fontSize:11, color:"var(--muted)" }}>💡 {idea.notes}</div>}
+                {idea.notes && <div style={{ fontSize:11, color:"var(--muted)", marginBottom: idea.outline?.length ? 6 : 0 }}>💡 {idea.notes}</div>}
+                {idea.outline?.length > 0 && (
+                  <div style={{ display:"flex", flexDirection:"column", gap:2, paddingTop:6, borderTop:"1px solid var(--border)" }}>
+                    {idea.outline.map((pt, j) => (
+                      <div key={j} style={{ fontSize:11, color:"var(--text-secondary)", display:"flex", gap:6 }}>
+                        <span style={{ color:"var(--amber)", flexShrink:0 }}>{j+1}.</span>{pt}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               <div style={{ display:"flex", gap:6, flexShrink:0 }}>
                 <button onClick={() => saveIdea(idea, i)} disabled={saved[i]}
@@ -2104,23 +2389,39 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
   const scanCompetitor = async (comp) => {
     setScanTarget(comp.name); setScanning(true); setError("");
     try {
-      const text = await callAI(
-        activeProvider, activeModel,
-        `You are a content intelligence analyst. When given a competitor blog, generate realistic recent post ideas they likely published recently based on their known style and focus. Return ONLY valid JSON array, no markdown fences: [{"title":"...","date":"...","angle":"...","opportunity":"..."}] where opportunity is how Cask & Stream could counter or complement this with their fly fishing + whiskey angle. Generate 5 recent posts. Use today's date context: May 2026.`,
-        `Competitor: ${comp.name} (${comp.url})\nKnown focus: ${comp.strengths}\nThreat level: ${comp.threat}\n\nGenerate 5 posts they likely published recently and the counter-opportunity for Cask & Stream.`,
-        apiKeys[activeProvider]
-      );
-      const posts = parseAIJson(text);
+      const response = await fetch("/api/scan-competitor", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ name: comp.name, url: comp.url }),
+      });
+
+      const text = await response.text();
+
+      // Check if Netlify returned an HTML timeout/error page
+      if (text.trimStart().startsWith("<")) {
+        throw new Error(`Server timeout — try again in a moment (${response.status})`);
+      }
+
+      let data;
+      try { data = JSON.parse(text); }
+      catch { throw new Error("Invalid response from server — try again"); }
+
+      if (data.error) throw new Error(data.error);
+
+      const posts = Array.isArray(data.posts) ? data.posts : [];
+
       const updated = {
         ...tracking,
         [comp.name]: {
-          posts,
-          scannedAt: new Date().toISOString(),
-          url: comp.url,
-        }
+          posts:     posts.slice(0, 8),
+          scannedAt: data.scannedAt || new Date().toISOString(),
+          url:       comp.url,
+          realData:  true,
+        },
       };
       setTracking(updated);
       saveTrackerData(updated);
+
     } catch(e) {
       setError(`Scan failed for ${comp.name}: ${e.message}`);
     }
@@ -2197,10 +2498,26 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
                 </div>
               </div>
               <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-                {data && <span style={{ fontSize:11, color:"var(--muted)" }}>Scanned {formatScanTime(data.scannedAt)}</span>}
+                {data && (
+              <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                {data.realData && (
+                  <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99,
+                    background: data.source==="rss" ? "#5cba6c15" : "#7c3aed15",
+                    color:      data.source==="rss" ? "#5cba6c"   : "#7c3aed",
+                    border:    `1px solid ${data.source==="rss" ? "#5cba6c33" : "#7c3aed33"}`,
+                    fontWeight:600 }}>
+                    {data.source==="rss" ? "● RSS feed" : "● Web search"}
+                  </span>
+                )}
+                {!data.realData && (
+                  <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:"var(--red)11", color:"var(--red)", border:"1px solid var(--red)22" }}>⚠ Estimated</span>
+                )}
+                <span style={{ fontSize:11, color:"var(--muted)" }}>Scanned {formatScanTime(data.scannedAt)}</span>
+              </div>
+                )}
                 <button onClick={() => scanCompetitor(comp)} disabled={scanning}
                   style={{ padding:"5px 14px", borderRadius:6, border:`1px solid ${threatColor}44`, background:"transparent", color:threatColor, fontSize:11, fontWeight:600, cursor:scanning?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5 }}>
-                  {isScanning ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Scanning</> : "↻ Scan"}
+                  {isScanning ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Searching web…</> : "↻ Scan"}
                 </button>
               </div>
             </div>
@@ -2211,7 +2528,14 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
                 {data.posts.map((post, i) => (
                   <div key={i} style={{ padding:"12px 20px", borderBottom: i < data.posts.length-1 ? "1px solid var(--border)" : "none", display:"flex", gap:12, alignItems:"flex-start" }}>
                     <div style={{ flex:1 }}>
-                      <div style={{ fontSize:13, fontWeight:600, marginBottom:3 }}>{post.title}</div>
+                      <div style={{ fontSize:13, fontWeight:600, marginBottom:3 }}>
+                        {post.url ? (
+                          <a href={post.url} target="_blank" rel="noopener" style={{ color:"var(--text)", textDecoration:"none" }}
+                            onMouseEnter={e=>e.target.style.color="var(--amber)"} onMouseLeave={e=>e.target.style.color="var(--text)"}>
+                            {post.title} ↗
+                          </a>
+                        ) : post.title}
+                      </div>
                       <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:4 }}>{post.date}</div>
                       {post.opportunity && (
                         <div style={{ fontSize:11, color:"var(--amber)", display:"flex", gap:4 }}>
@@ -2231,12 +2555,13 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
 
             {!data && !isScanning && (
               <div style={{ padding:"16px 20px", fontSize:12, color:"var(--muted)" }}>
-                Not scanned yet — click ↻ Scan to check recent posts.
+                Not scanned yet — click ↻ Scan to search for their recent posts using live web search.
               </div>
             )}
             {isScanning && (
               <div style={{ padding:"16px 20px", fontSize:12, color:"var(--muted)", display:"flex", alignItems:"center", gap:8 }}>
                 <span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>
+                Searching the web for recent posts on {comp.name}…
                 Analyzing {comp.name} with {provider.name}…
               </div>
             )}
@@ -2337,13 +2662,22 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const [error,   setError]     = useState("");
   const [success, setSuccess]   = useState("");
   const [savedAt, setSavedAt]   = useState(saved?.savedAt || null);
+  const [saveStatus, setSaveStatus] = useState(""); // "saving" | "saved" | ""
+  const autosaveTimer = useRef(null);
 
-  // Auto-save pipeline state to localStorage whenever it changes
+  // Debounced auto-save — waits 1.5s after last change before writing
   useEffect(() => {
-    if (!brief.topic && !draft.title) return; // don't save empty state
-    const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, savedAt: new Date().toISOString() };
-    savePipelineDraft(data);
-    setSavedAt(data.savedAt);
+    if (!brief.topic && !draft.title && !draft.body) return;
+    setSaveStatus("saving");
+    clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, savedAt: new Date().toISOString() };
+      savePipelineDraft(data);
+      setSavedAt(data.savedAt);
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus(""), 2500);
+    }, 1500);
+    return () => clearTimeout(autosaveTimer.current);
   }, [stage, completed, brief, draft, enhance, social.posts, schedule]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
@@ -2372,7 +2706,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
       const system = overridePrompt?.system ?? `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`;
       const user = overridePrompt?.user ?? `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`;
-      const text = await callAI(activeProvider, activeModel, system, user, apiKeys[activeProvider]);
+      const text = await callAI(activeProvider, activeModel, system, user, apiKeys[activeProvider], 4000);
       // Extract title from first # line
       const lines  = text.split("\n");
       const titleLine = lines.find(l => l.startsWith("# "));
@@ -2400,7 +2734,8 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       const text = await callAI(activeProvider, activeModel,
         `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write in markdown. # title, ## sections. 800+ words. Literary, evocative voice.`,
         `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\n\nWrite a fresh version of the full post.`,
-        apiKeys[activeProvider]
+        apiKeys[activeProvider],
+        4000
       );
       const lines = text.split("\n");
       const titleLine = lines.find(l => l.startsWith("# "));
@@ -2414,25 +2749,46 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   // ── STAGE 3: ENHANCE ────────────────────────────────────────────────────────
 
   const runEnhancement = async () => {
-    setLoading(true); setLoadMsg("Running SEO analysis…"); setError("");
+    setLoading(true); setLoadMsg("Analyzing your post…"); setError("");
     try {
-      // SEO analysis
-      const seoText = await callAI(activeProvider, activeModel,
-        `${brandCtx}You are an SEO expert for Cask & Stream. Return ONLY valid JSON (no fences): {"metaTitle":"...","metaDescription":"...","primaryKeyword":"...","secondaryKeywords":["..."],"suggestions":["..."],"score":85}. metaTitle ≤60 chars, metaDescription ≤160 chars, score 0-100.`,
-        `Analyze and optimize:\nTitle: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0,1000)}`,
-        apiKeys[activeProvider]
+      const brandCtxLocal = buildBrandContext(loadBrandGuide());
+      const text = await callAI(activeProvider, activeModel,
+        `${brandCtxLocal}You are an SEO expert for Cask & Stream (fly fishing + whiskey lifestyle blog). Return ONLY valid JSON (no fences):
+{
+  "primaryKeyword": "best target keyword",
+  "secondaryKeywords": ["kw1","kw2","kw3"],
+  "titles": [
+    {"text":"title option 1 (≤60 chars)","score":85,"why":"reason CTR is good","charCount":52},
+    {"text":"title option 2 (≤60 chars)","score":78,"why":"reason","charCount":48},
+    {"text":"title option 3 (≤60 chars)","score":72,"why":"reason","charCount":55}
+  ],
+  "descriptions": [
+    {"text":"meta description option 1 (≤160 chars)","score":88,"why":"why this converts","charCount":145},
+    {"text":"meta description option 2 (≤160 chars)","score":80,"why":"reason","charCount":138},
+    {"text":"meta description option 3 (≤160 chars)","score":74,"why":"reason","charCount":152}
+  ],
+  "readabilityScore": 82,
+  "readabilityNotes": "brief note on readability",
+  "suggestions": ["actionable tip 1","actionable tip 2","actionable tip 3"],
+  "overallScore": 80
+}
+Titles and descriptions MUST be under their character limits. Score each on: keyword inclusion, CTR potential, length, clarity.`,
+        `Title: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0, 1200)}`,
+        apiKeys[activeProvider],
+        2000
       );
-      const seo = parseAIJson(seoText);
-
-      setLoadMsg("Generating headline options…");
-      const hlText = await callAI(activeProvider, activeModel,
-        `${brandCtx}Generate 5 headline variations for this Cask & Stream blog post. Return ONLY a JSON array of 5 strings. No fences.`,
-        `Original title: ${draft.title}\nTopic: ${brief.topic}`,
-        apiKeys[activeProvider]
-      );
-      const headlines = parseAIJson(hlText);
-
-      setEnhance({ ...seo, headlines, improved: seo.metaTitle });
+      const seo = parseAIJson(text);
+      // Pick best by default
+      const bestTitle = seo.titles?.sort((a,b)=>b.score-a.score)[0]?.text || draft.title;
+      const bestDesc  = seo.descriptions?.sort((a,b)=>b.score-a.score)[0]?.text || "";
+      setEnhance({
+        ...seo,
+        metaTitle:       bestTitle,
+        metaDescription: bestDesc,
+        selectedTitle:   0,
+        selectedDesc:    0,
+        headlines:       seo.titles?.map(t=>t.text) || [],
+      });
       markDone("enhance");
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
@@ -2630,6 +2986,22 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
               <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Your Draft</h3>
               <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                {/* Autosave indicator */}
+                {saveStatus === "saving" && (
+                  <span style={{ fontSize:11, color:"var(--muted)", display:"flex", alignItems:"center", gap:4 }}>
+                    <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>Saving…
+                  </span>
+                )}
+                {saveStatus === "saved" && (
+                  <span style={{ fontSize:11, color:"#5cba6c", display:"flex", alignItems:"center", gap:4 }}>
+                    ✓ Saved
+                  </span>
+                )}
+                {!saveStatus && savedAt && (
+                  <span style={{ fontSize:11, color:"var(--muted)" }}>
+                    Saved {new Date(savedAt).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}
+                  </span>
+                )}
                 <span style={{ fontSize:11, color:"var(--muted)" }}>{draft.body.split(" ").filter(Boolean).length} words</span>
                 <button onClick={regenerateDraft} disabled={loading} style={{ padding:"5px 12px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
                   ↻ Regenerate
@@ -2659,7 +3031,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
               <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
                 Body
               </label>
-              <RichTextEditor value={draft.body} onChange={(md)=>setDraft(d=>({...d,body:md}))} minHeight={380} />
+              <RichTextEditor value={draft.body} onChange={(md)=>setDraft(d=>({...d,body:md}))} minHeight={380} activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys} />
             </div>
           </div>
           <div style={{ display:"flex", gap:10 }}>
@@ -2676,6 +3048,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
               activeProvider={activeProvider}
               activeModel={activeModel}
               apiKeys={apiKeys}
+              onImageSaved={(url) => setDraft(d => ({ ...d, headlineImageUrl: url }))}
             />
           )}
         </div>
@@ -2684,61 +3057,171 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       {/* ── STAGE 3: ENHANCE ── */}
       {stage === "enhance" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-          {!enhance.metaTitle ? (
+          {!enhance.titles ? (
             <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:32, textAlign:"center" }}>
               <div style={{ fontSize:32, marginBottom:12 }}>✦</div>
-              <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8 }}>Enhance with AI</h3>
-              <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24, maxWidth:400, margin:"0 auto 24px" }}>
-                Run SEO analysis, generate meta tags, check readability, and get 5 alternative headlines — all in one click.
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8 }}>SEO Enhance</h3>
+              <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:8, maxWidth:440, margin:"0 auto 8px", lineHeight:1.7 }}>
+                AI generates <strong>3 title options</strong> and <strong>3 meta descriptions</strong>, each scored and explained so you can pick the best one. Plus a live Google preview.
               </p>
+              <p style={{ fontSize:12, color:"var(--muted)", marginBottom:24 }}>One click — takes about 10 seconds.</p>
               <button onClick={runEnhancement} disabled={loading} style={btnA}>
-                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Run Enhancement`}
+                {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Run SEO Enhance`}
               </button>
             </div>
           ) : (
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
-              {/* SEO panel */}
-              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--green)" }}>✓ SEO Analysis</div>
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Meta Title</label>
-                  <input style={{ ...iS, fontFamily:"monospace", fontSize:12 }} value={enhance.metaTitle} onChange={e=>setEnhance(en=>({...en,metaTitle:e.target.value}))} />
-                  <div style={{ fontSize:10, color: enhance.metaTitle.length > 60 ? "var(--red)" : "var(--muted)", marginTop:3, textAlign:"right" }}>{enhance.metaTitle.length}/60</div>
-                </div>
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Meta Description</label>
-                  <textarea rows={2} style={{ ...iS, resize:"none", fontFamily:"monospace", fontSize:12 }} value={enhance.metaDescription} onChange={e=>setEnhance(en=>({...en,metaDescription:e.target.value}))} />
-                  <div style={{ fontSize:10, color: enhance.metaDescription?.length > 160 ? "var(--red)" : "var(--muted)", marginTop:3, textAlign:"right" }}>{enhance.metaDescription?.length||0}/160</div>
-                </div>
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Primary Keyword</label>
-                  <div style={{ padding:"6px 12px", borderRadius:99, background:"var(--amber)22", color:"var(--amber)", fontSize:12, fontWeight:600, display:"inline-block" }}>{enhance.primaryKeyword}</div>
-                </div>
-                {enhance.suggestions?.length > 0 && (
-                  <div>
-                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Suggestions</label>
-                    {enhance.suggestions.map((s,i)=><div key={i} style={{ fontSize:12, color:"var(--text-secondary)", padding:"4px 0", borderBottom:i<enhance.suggestions.length-1?"1px solid var(--border)":"none" }}>· {s}</div>)}
-                  </div>
-                )}
-                <button onClick={runEnhancement} disabled={loading} style={{ ...btnS, fontSize:11, padding:"6px 14px" }}>↻ Re-run Analysis</button>
-              </div>
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
 
-              {/* Headlines panel */}
-              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:12 }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)" }}>Headline Options</div>
-                {enhance.headlines?.map((h,i) => (
-                  <div key={i} style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 12px", borderRadius:8, background: draft.title===h?"var(--amber-glow)":"var(--bg-elevated)", border: draft.title===h?"1px solid var(--amber)":"1px solid var(--border)", cursor:"pointer" }}
-                    onClick={()=>setDraft(d=>({...d,title:h}))}>
-                    <span style={{ fontSize:12, flex:1 }}>{h}</span>
-                    {draft.title===h && <span style={{ fontSize:10, color:"var(--amber)", fontWeight:700 }}>Selected</span>}
+              {/* Overall score + keyword */}
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+                {[
+                  { label:"Overall SEO Score", value:`${enhance.overallScore}/100`, color: enhance.overallScore>=80?"#5cba6c":enhance.overallScore>=60?"var(--amber)":"var(--red)" },
+                  { label:"Readability Score",  value:`${enhance.readabilityScore}/100`, color:"#7c3aed" },
+                  { label:"Primary Keyword",   value:enhance.primaryKeyword, color:"var(--amber)" },
+                ].map(s => (
+                  <div key={s.label} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:"14px 16px" }}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>{s.label}</div>
+                    <div style={{ fontSize:20, fontWeight:700, color:s.color }}>{s.value}</div>
                   </div>
                 ))}
               </div>
+
+              {/* Title options */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>
+                  Title Options — pick one (Google shows ~60 chars)
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {(enhance.titles || []).map((t, i) => {
+                    const selected = enhance.selectedTitle === i;
+                    const over = t.charCount > 60 || t.text?.length > 60;
+                    const score = t.score || 0;
+                    const scoreColor = score >= 80 ? "#5cba6c" : score >= 65 ? "var(--amber)" : "var(--red)";
+                    return (
+                      <div key={i} onClick={() => setEnhance(e => ({ ...e, selectedTitle:i, metaTitle:t.text }))}
+                        style={{ padding:"12px 14px", borderRadius:9, border:`2px solid ${selected?"var(--amber)":"var(--border)"}`, background:selected?"var(--amber-glow)":"var(--bg-elevated)", cursor:"pointer", transition:"all 0.15s" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
+                          <div style={{ flex:1 }}>
+                            <div style={{ fontSize:13, fontWeight:selected?700:400, color:"var(--text)", marginBottom:4, lineHeight:1.4 }}>{t.text}</div>
+                            <div style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.5 }}>💡 {t.why}</div>
+                          </div>
+                          <div style={{ display:"flex", gap:8, flexShrink:0, alignItems:"center" }}>
+                            <span style={{ fontSize:10, color:over?"var(--red)":"var(--muted)" }}>{t.text?.length || t.charCount}/60</span>
+                            <span style={{ fontSize:12, fontWeight:700, color:scoreColor, padding:"2px 8px", borderRadius:6, background:scoreColor+"15" }}>{score}</span>
+                            {selected && <span style={{ fontSize:10, fontWeight:700, color:"var(--amber)" }}>✓ Selected</span>}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Editable selected title */}
+                <div style={{ marginTop:12 }}>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Edit selected title</label>
+                  <input value={enhance.metaTitle || ""} onChange={e => setEnhance(en => ({ ...en, metaTitle:e.target.value }))}
+                    style={{ ...iS, fontSize:13 }}
+                    onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                  <div style={{ fontSize:10, color:enhance.metaTitle?.length>60?"var(--red)":"var(--muted)", marginTop:3, textAlign:"right" }}>
+                    {enhance.metaTitle?.length || 0}/60 chars {enhance.metaTitle?.length>60?"— too long, Google will cut it off":""}
+                  </div>
+                </div>
+              </div>
+
+              {/* Description options */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>
+                  Meta Description Options — pick one (Google shows ~160 chars)
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {(enhance.descriptions || []).map((d, i) => {
+                    const selected = enhance.selectedDesc === i;
+                    const over = d.charCount > 160 || d.text?.length > 160;
+                    const score = d.score || 0;
+                    const scoreColor = score >= 80 ? "#5cba6c" : score >= 65 ? "var(--amber)" : "var(--red)";
+                    return (
+                      <div key={i} onClick={() => setEnhance(e => ({ ...e, selectedDesc:i, metaDescription:d.text }))}
+                        style={{ padding:"12px 14px", borderRadius:9, border:`2px solid ${selected?"var(--amber)":"var(--border)"}`, background:selected?"var(--amber-glow)":"var(--bg-elevated)", cursor:"pointer", transition:"all 0.15s" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
+                          <div style={{ flex:1 }}>
+                            <div style={{ fontSize:12, color:"var(--text)", marginBottom:4, lineHeight:1.5 }}>{d.text}</div>
+                            <div style={{ fontSize:11, color:"var(--text-secondary)" }}>💡 {d.why}</div>
+                          </div>
+                          <div style={{ display:"flex", gap:8, flexShrink:0, alignItems:"center" }}>
+                            <span style={{ fontSize:10, color:over?"var(--red)":"var(--muted)" }}>{d.text?.length || d.charCount}/160</span>
+                            <span style={{ fontSize:12, fontWeight:700, color:scoreColor, padding:"2px 8px", borderRadius:6, background:scoreColor+"15" }}>{score}</span>
+                            {selected && <span style={{ fontSize:10, fontWeight:700, color:"var(--amber)" }}>✓ Selected</span>}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ marginTop:12 }}>
+                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Edit selected description</label>
+                  <textarea value={enhance.metaDescription || ""} onChange={e => setEnhance(en => ({ ...en, metaDescription:e.target.value }))}
+                    rows={2} style={{ ...iS, resize:"none", fontSize:12, lineHeight:1.5 }}
+                    onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                  <div style={{ fontSize:10, color:enhance.metaDescription?.length>160?"var(--red)":"var(--muted)", marginTop:3, textAlign:"right" }}>
+                    {enhance.metaDescription?.length || 0}/160 chars {enhance.metaDescription?.length>160?"— too long":""}
+                  </div>
+                </div>
+              </div>
+
+              {/* Live SERP Preview */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>
+                  🔍 Google Search Preview
+                </div>
+                <div style={{ background:"#fff", borderRadius:8, padding:"16px 20px", fontFamily:"Arial, sans-serif" }}>
+                  <div style={{ fontSize:12, color:"#202124", marginBottom:2, opacity:0.6 }}>
+                    caskandstream.com › blog
+                  </div>
+                  <div style={{ fontSize:18, color:"#1a0dab", marginBottom:4, lineHeight:1.3, fontWeight:400, maxWidth:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                    {enhance.metaTitle || draft.title}
+                  </div>
+                  <div style={{ fontSize:13, color:"#4d5156", lineHeight:1.6, maxWidth:600 }}>
+                    {(enhance.metaDescription || "").slice(0,160)}{enhance.metaDescription?.length > 160 ? "…" : ""}
+                  </div>
+                </div>
+                <div style={{ marginTop:8, fontSize:11, color:"var(--muted)" }}>
+                  This is exactly how your post appears in Google results. The title {enhance.metaTitle?.length > 60 ? "⚠ is too long and will be cut off" : "✓ fits"} · The description {enhance.metaDescription?.length > 160 ? "⚠ is too long and will be cut off" : "✓ fits"}.
+                </div>
+              </div>
+
+              {/* Secondary keywords + suggestions */}
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                {enhance.secondaryKeywords?.length > 0 && (
+                  <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Secondary Keywords</div>
+                    <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                      {enhance.secondaryKeywords.map((k,i) => (
+                        <span key={i} style={{ padding:"3px 10px", borderRadius:99, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:11, color:"var(--text-secondary)" }}>{k}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {enhance.suggestions?.length > 0 && (
+                  <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Quick Tips</div>
+                    {enhance.suggestions.map((s,i) => (
+                      <div key={i} style={{ fontSize:12, color:"var(--text-secondary)", padding:"3px 0", display:"flex", gap:6 }}>
+                        <span style={{ color:"var(--amber)", flexShrink:0 }}>→</span>{s}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <button onClick={runEnhancement} disabled={loading}
+                style={{ ...btnS, fontSize:11, padding:"6px 14px", alignSelf:"flex-start" }}>
+                ↻ Re-run Analysis
+              </button>
             </div>
           )}
 
           <div style={{ display:"flex", gap:10 }}>
-            <button onClick={()=>{ markDone("enhance"); advanceTo("social"); }} disabled={!enhance.metaTitle} style={{ ...btnA, background:enhance.metaTitle?"var(--amber)":"var(--bg-elevated)", color:enhance.metaTitle?"#0e0f11":"var(--muted)", cursor:enhance.metaTitle?"pointer":"not-allowed" }}>
+            <button onClick={()=>{ markDone("enhance"); advanceTo("social"); }} disabled={!enhance.metaTitle}
+              style={{ ...btnA, background:enhance.metaTitle?"var(--amber)":"var(--bg-elevated)", color:enhance.metaTitle?"#0e0f11":"var(--muted)", cursor:enhance.metaTitle?"pointer":"not-allowed" }}>
               Continue to Social →
             </button>
             <button onClick={()=>setStage("draft")} style={btnS}>← Back to Draft</button>
@@ -2790,7 +3273,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
                       {social.images[plat.id] && (
                         <div style={{ position:"relative" }}>
                           <img src={social.images[plat.id]} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
-                          <button onClick={()=>{ const a=document.createElement("a"); a.href=social.images[plat.id]; a.download=`cask-stream-${plat.id}.webp`; a.click(); }}
+                          <button onClick={()=>{ const a=document.createElement("a"); a.href=social.images[plat.id]; a.download=`cask-stream-${plat.id}.jpg`; a.click(); }}
                             style={{ position:"absolute", bottom:8, right:8, padding:"4px 10px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.7)", color:"#fff", fontSize:11, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
                             ↓ Download
                           </button>
@@ -2906,25 +3389,18 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
                           onAddCalEvent({ title: finalPost.title, type: finalPost.status, day });
                         }
                         markDone("publish");
-                        // Copy HTML to clipboard
-                        const html = (draft.body || "")
-                          .split("\n\n").filter(Boolean)
-                          .map(block => {
-                            if (block.startsWith("# "))  return `<h1>${block.slice(2)}</h1>`;
-                            if (block.startsWith("## ")) return `<h2>${block.slice(3)}</h2>`;
-                            if (block.startsWith("### "))return `<h3>${block.slice(4)}</h3>`;
-                            if (block.startsWith("- ") || block.startsWith("* ")) {
-                              const items = block.split("\n").map(l => `<li>${l.slice(2)}</li>`).join("");
-                              return `<ul>${items}</ul>`;
-                            }
-                            const formatted = block.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\*(.*?)\*/g, "<em>$1</em>");
-                            return `<p>${formatted}</p>`;
-                          }).join("\n");
-                        navigator.clipboard.writeText(`<h1>${enhance.metaTitle || draft.title}</h1>\n${html}`);
+                        // Copy as plain text — title + body, markdown stripped
+                        const plainText = `${enhance.metaTitle || draft.title}\n\n${(draft.body || "")
+                          .replace(/^#{1,3}\s+/gm, "")
+                          .replace(/\*\*(.*?)\*\*/g, "$1")
+                          .replace(/\*(.*?)\*/g, "$1")
+                          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+                          .trim()}`;
+                        navigator.clipboard.writeText(plainText);
                         setSuccess(`✓ Copied! Post saved to Posts tab as "${finalPost.status}".`);
                       }}
                         style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                        📋 Copy as HTML
+                        📋 Copy Post Text
                       </button>
                       <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
                         style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -3045,152 +3521,259 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
 
 // ─── GOOGLE SEARCH CONSOLE INTEGRATION ───────────────────────────────────────
 
-const GSC_STORAGE = "bb_gsc_config";
+const GSC_STORAGE      = "bb_gsc_config";
 const GSC_DATA_STORAGE = "bb_gsc_data";
 
 function loadGSCConfig() { try { return JSON.parse(localStorage.getItem(GSC_STORAGE) || "{}"); } catch { return {}; } }
-function saveGSCConfig(d) { try { localStorage.setItem(GSC_STORAGE, JSON.stringify(d)); } catch {} }
+function saveGSCConfig(d) {
+  try { localStorage.setItem(GSC_STORAGE, JSON.stringify(d)); } catch {}
+  // Also push to cloud if we have a userId
+  const uid = window.__bbUserId;
+  if (uid && d?.refreshToken) cloudSet("gsc_config", uid, d);
+}
 function loadGSCData()   { try { return JSON.parse(localStorage.getItem(GSC_DATA_STORAGE) || "null"); } catch { return null; } }
 function saveGSCData(d)  { try { localStorage.setItem(GSC_DATA_STORAGE, JSON.stringify(d)); } catch {} }
 
-// Fetch GSC data via the Netlify edge function (CORS proxy)
+// Get a valid access token — auto-refreshes if expired
+async function getGSCAccessToken(cfg) {
+  if (!cfg?.refreshToken) throw new Error("Not connected — please reconnect Search Console.");
+
+  // If token still valid (>5 min left), use it
+  if (cfg.accessToken && cfg.expiry && Date.now() < cfg.expiry - 300_000) {
+    return cfg.accessToken;
+  }
+
+  // Refresh it
+  const res  = await fetch("/api/gsc-refresh", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ refreshToken: cfg.refreshToken }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(`Token refresh failed: ${data.error}`);
+
+  // Save updated token
+  const updated = { ...cfg, accessToken: data.access_token, expiry: data.expiry };
+  saveGSCConfig(updated);
+  return data.access_token;
+}
+
+// Fetch GSC data using a valid access token
 async function fetchGSCData(accessToken, siteUrl, days = 28) {
   const endDate   = new Date().toISOString().split("T")[0];
   const startDate = new Date(Date.now() - days * 86400000).toISOString().split("T")[0];
-
-  const body = {
-    startDate,
-    endDate,
-    dimensions: ["query", "page"],
-    rowLimit: 100,
-    startRow: 0,
-  };
-
   const res = await fetch(
     `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
     {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
+      headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ startDate, endDate, dimensions: ["query","page"], rowLimit: 100 }),
     }
   );
-
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err?.error?.message || `GSC error ${res.status}`);
   }
-
   return await res.json();
 }
 
 function GSCPanel({ onDataLoaded }) {
-  const [cfg,       setCfg]       = useState(loadGSCConfig);
-  const [token,     setToken]     = useState(cfg.accessToken || "");
-  const [siteUrl,   setSiteUrl]   = useState(cfg.siteUrl || "https://caskandstream.com/");
-  const [loading,   setLoading]   = useState(false);
-  const [error,     setError]     = useState("");
-  const [lastFetch, setLastFetch] = useState(cfg.lastFetch || null);
+  const [cfg,      setCfg]      = useState(loadGSCConfig);
+  const [siteUrl,  setSiteUrl]  = useState(() => loadGSCConfig().siteUrl || "");
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState("");
+  const [success,  setSuccess]  = useState("");
+  const [sites,    setSites]    = useState([]);
+  const [loadingSites, setLoadingSites] = useState(false);
 
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
 
+  // Fetch all sites this account has access to
+  const fetchSites = async () => {
+    setLoadingSites(true); setError("");
+    try {
+      const accessToken = await getGSCAccessToken(cfg);
+      const res = await fetch("https://www.googleapis.com/webmasters/v3/sites", {
+        headers: { "Authorization": `Bearer ${accessToken}` },
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      const siteList = (data.siteEntry || []).map(s => s.siteUrl);
+      setSites(siteList);
+      if (siteList.length === 0) setError("No sites found for this account in Search Console.");
+      else if (siteList.length === 1) { setSiteUrl(siteList[0]); }
+    } catch(e) { setError(e.message); }
+    setLoadingSites(false);
+  };
+
+  const connectGSC = () => {
+    if (!cfg.clientId?.trim()) { setError("Enter your Google OAuth Client ID first."); return; }
+    const params = new URLSearchParams({
+      client_id:     cfg.clientId.trim(),
+      redirect_uri:  "https://blogbunker.netlify.app/api/gsc-callback",
+      response_type: "code",
+      scope:         "https://www.googleapis.com/auth/webmasters.readonly",
+      access_type:   "offline",
+      prompt:        "consent",
+    });
+    window.open(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, "gsc_auth", "width=500,height=650,scrollbars=yes");
+    const handler = (e) => {
+      if (e.data?.type === "gsc-auth-success") {
+        window.removeEventListener("message", handler);
+        const tokens = e.data.tokens;
+        const newCfg = { ...cfg, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiry: tokens.expiry, siteUrl: siteUrl.trim(), connected: true };
+        saveGSCConfig(newCfg); setCfg(newCfg);
+        setSuccess("✓ Connected! Click Fetch Data to load your Search Console analytics.");
+        setError("");
+      }
+      if (e.data?.type === "gsc-auth-error") {
+        window.removeEventListener("message", handler);
+        setError(e.data.error);
+      }
+    };
+    window.addEventListener("message", handler);
+  };
+
   const fetchData = async () => {
-    if (!token.trim() || !siteUrl.trim()) return;
+    if (!siteUrl.trim()) return;
     setLoading(true); setError("");
     try {
-      const raw   = await fetchGSCData(token.trim(), siteUrl.trim());
-      const rows  = raw.rows || [];
-
-      // Aggregate by query
-      const queryMap = {};
-      const pageMap  = {};
+      const accessToken = await getGSCAccessToken(cfg);
+      const raw  = await fetchGSCData(accessToken, siteUrl.trim());
+      const rows = raw.rows || [];
+      const queryMap = {}, pageMap = {};
       let totalClicks = 0, totalImpressions = 0;
-
       for (const row of rows) {
         const [query, page] = row.keys;
-        totalClicks      += row.clicks;
-        totalImpressions += row.impressions;
-
-        if (!queryMap[query]) queryMap[query] = { query, clicks:0, impressions:0, ctr:0, position:0, count:0 };
-        queryMap[query].clicks      += row.clicks;
-        queryMap[query].impressions += row.impressions;
-        queryMap[query].position    += row.position;
-        queryMap[query].count++;
-
+        totalClicks += row.clicks; totalImpressions += row.impressions;
+        if (!queryMap[query]) queryMap[query] = { query, clicks:0, impressions:0, position:0, count:0 };
+        queryMap[query].clicks += row.clicks; queryMap[query].impressions += row.impressions;
+        queryMap[query].position += row.position; queryMap[query].count++;
         if (!pageMap[page]) pageMap[page] = { page, clicks:0, impressions:0 };
-        pageMap[page].clicks      += row.clicks;
-        pageMap[page].impressions += row.impressions;
+        pageMap[page].clicks += row.clicks; pageMap[page].impressions += row.impressions;
       }
-
       const keywords = Object.values(queryMap)
-        .map(k => ({ ...k, ctr: k.impressions > 0 ? k.clicks/k.impressions*100 : 0, position: k.count > 0 ? k.position/k.count : 0 }))
-        .sort((a,b) => b.clicks - a.clicks)
-        .slice(0, 20);
-
-      const topPages = Object.values(pageMap)
-        .sort((a,b) => b.clicks - a.clicks)
-        .slice(0, 10);
-
-      const data = { keywords, topPages, totalClicks, totalImpressions, fetchedAt: new Date().toISOString(), siteUrl, days:28 };
+        .map(k => ({ ...k, ctr: k.impressions>0?k.clicks/k.impressions*100:0, position: k.count>0?k.position/k.count:0 }))
+        .sort((a,b) => b.clicks - a.clicks).slice(0,20);
+      const topPages = Object.values(pageMap).sort((a,b) => b.clicks - a.clicks).slice(0,10);
+      const data = { keywords, topPages, totalClicks, totalImpressions, fetchedAt: new Date().toISOString(), siteUrl: siteUrl.trim(), days: 28 };
       saveGSCData(data);
-      const newCfg = { accessToken: token.trim(), siteUrl: siteUrl.trim(), lastFetch: data.fetchedAt };
-      saveGSCConfig(newCfg);
-      setCfg(newCfg);
-      setLastFetch(data.fetchedAt);
+      const newCfg = { ...cfg, siteUrl: siteUrl.trim(), lastFetch: data.fetchedAt };
+      saveGSCConfig(newCfg); setCfg(newCfg);
       onDataLoaded(data);
-    } catch(e) { setError(e.message); }
+      setSuccess(`✓ Fetched ${rows.length} rows of data.`);
+    } catch(e) {
+      setError(e.message);
+      if (e.message.includes("refresh") || e.message.includes("401")) {
+        const newCfg = { ...cfg, connected: false, accessToken: null, refreshToken: null };
+        saveGSCConfig(newCfg); setCfg(newCfg);
+      }
+    }
     setLoading(false);
   };
+
+  const disconnect = () => { const empty = { siteUrl, clientId: cfg.clientId }; saveGSCConfig(empty); setCfg(empty); setSuccess(""); setError(""); };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
       <div>
         <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Google Search Console</h3>
         <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
-          Connect to see real keyword rankings, clicks, and impressions for caskandstream.com.
+          See which keywords drive traffic, your Google rankings, and which posts perform best in search.
         </p>
       </div>
 
-      {lastFetch && (
-        <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c0a", border:"1px solid #5cba6c44", fontSize:12, color:"#5cba6c" }}>
-          ✓ Last synced: {new Date(lastFetch).toLocaleString()}
-        </div>
-      )}
+      {success && <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c0a", border:"1px solid #5cba6c44", fontSize:12, color:"#5cba6c" }}>{success}</div>}
+      {error   && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)0a", border:"1px solid var(--red)44", fontSize:12, color:"var(--red)" }}>{error}</div>}
 
+      {/* OAuth Client ID input */}
       <div>
         <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-          Access Token
+          Google OAuth Client ID
         </label>
-        <input type="password" style={iS} placeholder="Paste your Google OAuth access token…" value={token} onChange={e=>setToken(e.target.value)}
+        <input style={iS} placeholder="123456789-abc.apps.googleusercontent.com" value={cfg.clientId || ""}
+          onChange={e => { const n = {...cfg, clientId: e.target.value}; setCfg(n); saveGSCConfig(n); }}
           onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
-        <div style={{ marginTop:8, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
-          <strong style={{color:"var(--text)"}}>How to get your token:</strong><br/>
-          1. Go to <a href="https://developers.google.com/oauthplayground" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>Google OAuth Playground</a><br/>
-          2. In Step 1, find and select <strong style={{color:"var(--text)"}}>Search Console API v3</strong> → check <code>https://www.googleapis.com/auth/webmasters.readonly</code><br/>
-          3. Click <strong style={{color:"var(--text)"}}>Authorize APIs</strong> → sign in with your Google account<br/>
-          4. Click <strong style={{color:"var(--text)"}}>Exchange authorization code for tokens</strong><br/>
-          5. Copy the <strong style={{color:"var(--text)"}}>Access token</strong> and paste it above<br/>
-          <span style={{color:"var(--amber)"}}>⚠ Tokens expire after 1 hour — re-fetch when needed.</span>
-        </div>
+        <p style={{ fontSize:11, color:"var(--muted)", marginTop:4, lineHeight:1.6 }}>
+          From Google Cloud Console → APIs & Services → Credentials → your OAuth 2.0 Client ID.
+          Make sure <code>https://blogbunker.netlify.app/api/gsc-callback</code> is added as an Authorized Redirect URI.
+        </p>
       </div>
 
       <div>
         <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-          Site URL (exactly as it appears in Search Console)
+          Property / Site URL
         </label>
-        <input style={iS} placeholder="https://caskandstream.com/" value={siteUrl} onChange={e=>setSiteUrl(e.target.value)}
-          onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
-        <p style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>Must match exactly — try both with and without trailing slash if it fails.</p>
+
+        {/* If connected, show a fetch-sites button and dropdown */}
+        {cfg.connected ? (
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            <div style={{ display:"flex", gap:8 }}>
+              <button onClick={fetchSites} disabled={loadingSites}
+                style={{ padding:"8px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:6 }}>
+                {loadingSites ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Loading…</> : "↓ Load my GSC properties"}
+              </button>
+              {siteUrl && <div style={{ fontSize:12, color:"#5cba6c", alignSelf:"center", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>✓ {siteUrl}</div>}
+            </div>
+            {sites.length > 0 && (
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                <div style={{ fontSize:11, color:"var(--muted)" }}>Select your property:</div>
+                {sites.map(s => (
+                  <button key={s} onClick={() => setSiteUrl(s)}
+                    style={{ padding:"9px 14px", borderRadius:8, border:`1px solid ${siteUrl===s?"var(--amber)":"var(--border)"}`, background:siteUrl===s?"var(--amber-glow)":"var(--bg-elevated)", color:siteUrl===s?"var(--amber)":"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textAlign:"left", fontWeight:siteUrl===s?700:400 }}>
+                    {siteUrl===s ? "✓ " : ""}{s}
+                  </button>
+                ))}
+                <div style={{ fontSize:11, color:"var(--muted)", lineHeight:1.6 }}>
+                  Tip: If you see both <code>sc-domain:caskandstream.com</code> and <code>https://caskandstream.com/</code> — pick the one that shows data in Search Console. Domain properties (sc-domain:) usually have more complete data.
+                </div>
+              </div>
+            )}
+            {!sites.length && !loadingSites && !siteUrl && (
+              <input style={iS} placeholder="or type manually: sc-domain:caskandstream.com"
+                value={siteUrl} onChange={e => setSiteUrl(e.target.value)}
+                onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            )}
+          </div>
+        ) : (
+          <input style={iS} placeholder="Connect first, then load your properties"
+            value={siteUrl} onChange={e => setSiteUrl(e.target.value)}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        )}
       </div>
 
-      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-        <button onClick={fetchData} disabled={!token.trim() || !siteUrl.trim() || loading}
-          style={{ padding:"10px 24px", borderRadius:8, border:"none", background:token.trim()&&siteUrl.trim()&&!loading?"var(--amber)":"var(--bg-elevated)", color:token.trim()&&siteUrl.trim()&&!loading?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:token.trim()&&siteUrl.trim()&&!loading?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
-          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Fetching…</> : "↓ Fetch Analytics Data"}
-        </button>
-        {error && <span style={{ fontSize:12, color:"var(--red)" }}>{error}</span>}
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+        {!cfg.connected ? (
+          <button onClick={connectGSC} disabled={!cfg.clientId?.trim()}
+            style={{ padding:"10px 24px", borderRadius:8, border:"none", background:cfg.clientId?.trim()?"#4285f4":"var(--bg-elevated)", color:cfg.clientId?.trim()?"#fff":"var(--muted)", fontSize:13, fontWeight:700, cursor:cfg.clientId?.trim()?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
+            <svg width="16" height="16" viewBox="0 0 18 18"><path fill="#fff" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/><path fill="#ffffffaa" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/><path fill="#ffffffaa" d="M3.97 10.72A5.41 5.41 0 0 1 3.69 9c0-.6.1-1.18.28-1.72V4.95H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.05l3.01-2.33z"/><path fill="#ffffffaa" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg>
+            Sign in with Google
+          </button>
+        ) : (
+          <>
+            <button onClick={fetchData} disabled={loading}
+              style={{ padding:"10px 24px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":"var(--amber)", color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
+              {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Fetching…</> : "↓ Fetch Analytics Data"}
+            </button>
+            <button onClick={disconnect}
+              style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+              Disconnect
+            </button>
+            <span style={{ fontSize:12, color:"#5cba6c", alignSelf:"center" }}>● Connected{cfg.lastFetch ? ` · Last synced ${new Date(cfg.lastFetch).toLocaleString()}` : ""}</span>
+          </>
+        )}
+      </div>
+
+      {/* Setup instructions */}
+      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.8 }}>
+        <div style={{ fontWeight:700, color:"var(--text)", marginBottom:8 }}>Setup (one-time, 5 minutes):</div>
+        1. <a href="https://console.cloud.google.com" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>Google Cloud Console</a> → select your project → <strong>APIs & Services → Library</strong> → enable <strong>Google Search Console API</strong><br/>
+        2. <strong>APIs & Services → Credentials → Create Credentials → OAuth Client ID</strong><br/>
+        3. Application type: <strong>Web application</strong><br/>
+        4. Add Authorized Redirect URI: <code style={{background:"var(--bg-surface)",padding:"1px 4px",borderRadius:3}}>https://blogbunker.netlify.app/api/gsc-callback</code><br/>
+        5. Copy the <strong>Client ID</strong> → paste above<br/>
+        6. In <strong>Netlify → Environment Variables</strong> add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code><br/>
+        7. Redeploy → click <strong>Sign in with Google</strong> above
       </div>
     </div>
   );
@@ -3210,7 +3793,7 @@ function GSCAnalyticsView({ data, onRefresh }) {
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
       {/* Summary cards */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:16 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:16 }}>
         {[
           { label:"Total Clicks",       value:totalClicks.toLocaleString(),       sub:`Last ${days} days` },
           { label:"Total Impressions",  value:totalImpressions.toLocaleString(),  sub:"Search appearances" },
@@ -3392,39 +3975,49 @@ function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, s
 
 const META_STORAGE = "bb_meta_config";
 function loadMetaConfig() { try { return JSON.parse(localStorage.getItem(META_STORAGE) || "{}"); } catch { return {}; } }
-function saveMetaConfig(d) { try { localStorage.setItem(META_STORAGE, JSON.stringify(d)); } catch {} }
+function saveMetaConfig(d) {
+  try { localStorage.setItem(META_STORAGE, JSON.stringify(d)); } catch {}
+  // Also push to cloud if connected
+  const uid = window.__bbUserId;
+  if (uid && d?.connected) cloudSet("meta_config", uid, d);
+}
 
 // Converts a blob: URL (from generated images) into a publicly fetchable URL.
 // Required for Instagram, which needs a real https:// URL it can fetch server-side.
 async function ensurePublicImageUrl(imageUrl) {
   if (!imageUrl) return null;
-  if (!imageUrl.startsWith("blob:")) return imageUrl; // already public (e.g. http url)
+  if (imageUrl.startsWith("https://")) return imageUrl; // already public
 
-  // Fetch the blob and convert to base64 data URL, compressing if needed
-  const blobRes = await fetch(imageUrl);
-  if (!blobRes.ok) throw new Error(`Could not read generated image (${blobRes.status})`);
-  const blob = await blobRes.blob();
+  let dataUrl;
 
-  let dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload  = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error("Failed to encode image"));
-    reader.readAsDataURL(blob);
-  });
+  if (imageUrl.startsWith("blob:")) {
+    // Fetch the blob from browser memory and convert to base64
+    const blobRes = await fetch(imageUrl);
+    if (!blobRes.ok) throw new Error(`Could not read generated image (${blobRes.status})`);
+    const blob = await blobRes.blob();
+    dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload  = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error("Failed to encode image"));
+      reader.readAsDataURL(blob);
+    });
+  } else if (imageUrl.startsWith("data:")) {
+    dataUrl = imageUrl; // already base64, use directly
+  } else {
+    throw new Error(`Cannot convert URL to public format: ${imageUrl.slice(0, 60)}`);
+  }
 
   // If too large for the function's request limit, recompress via canvas
-  const MAX_LEN = 4_000_000; // ~4MB base64 — safe margin under Netlify's 6MB cap
+  const MAX_LEN = 4_000_000;
   if (dataUrl.length > MAX_LEN) {
     dataUrl = await new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement("canvas");
-        // Scale down proportionally until under target size
         let scale = Math.sqrt(MAX_LEN / dataUrl.length) * 0.9;
         canvas.width  = Math.round(img.width * scale);
         canvas.height = Math.round(img.height * scale);
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
         resolve(canvas.toDataURL("image/jpeg", 0.85));
       };
       img.onerror = () => reject(new Error("Failed to load image for compression"));
@@ -3432,7 +4025,7 @@ async function ensurePublicImageUrl(imageUrl) {
     });
   }
 
-  // Upload to Netlify Blobs, get back a public URL
+  // Upload to Netlify Blobs → get back a public https:// URL
   let res;
   try {
     res = await fetch("/api/upload-image", {
@@ -3447,7 +4040,7 @@ async function ensurePublicImageUrl(imageUrl) {
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); }
-  catch { throw new Error(`Image upload failed (${res.status}): server returned non-JSON — ${text.slice(0,150) || "(empty response — likely a gateway/size error)"}`); }
+  catch { throw new Error(`Image upload failed (${res.status}): ${text.slice(0,150) || "(empty response)"}`); }
 
   if (!res.ok || data.error) throw new Error(`Image upload failed: ${data.error || res.status}`);
   if (!data.url) throw new Error("Image upload succeeded but no URL was returned");
@@ -3456,8 +4049,9 @@ async function ensurePublicImageUrl(imageUrl) {
 
 async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, link, platforms }) {
   let finalImageUrl = imageUrl;
-  // Instagram requires a publicly fetchable URL — convert blob: URLs
-  if (platforms.includes("instagram") && imageUrl?.startsWith("blob:")) {
+  // Any blob: or data: URL must be uploaded to get a public https:// URL
+  // before sending to meta-post.js (server can't fetch browser-local URLs)
+  if (imageUrl && (imageUrl.startsWith("blob:") || imageUrl.startsWith("data:"))) {
     finalImageUrl = await ensurePublicImageUrl(imageUrl);
   }
   const res = await fetch("/api/meta-post", {
@@ -3585,7 +4179,7 @@ class MarketingErrorBoundary extends React.Component {
   }
 }
 
-function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost }) {
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous" }) {
   const [tab, setTab] = useState("pipeline");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const scheduledCount = socialPosts.filter(p => p.status === "scheduled").length;
@@ -3594,6 +4188,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
     { id:"pipeline",   label:"Social Pipeline",  icon:"◈", highlight:true },
     { id:"scheduled",  label:"Social Posts",      icon:"▤", badge: socialPosts.length || null },
     { id:"media",      label:"Media Library",     icon:"🖼" },
+    { id:"video",      label:"Video Planning",    icon:"🎬" },
     { id:"create",     label:"Quick Post",        icon:"✎" },
     { id:"email",      label:"Email",             icon:"✉" },
     { id:"pinterest",  label:"Pinterest",         icon:"📌" },
@@ -3628,9 +4223,20 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
         ))}
       </div>
 
+      {/* ── VIDEO PLANNING ── */}
+      {tab === "video" && (
+        <VideoPlanningStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          userId={userId}
+        />
+      )}
+
       {/* ── MEDIA LIBRARY ── */}
       {tab === "media" && (
-        <MediaLibrary />
+        <MediaLibrary userId={userId} />
       )}
 
       {/* ── SCHEDULED POSTS ── */}
@@ -3763,12 +4369,56 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
 // ─── SOCIAL RESEARCH ──────────────────────────────────────────────────────────
 
 function SocialResearch({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
-  const [topic,   setTopic]   = useState("");
-  const [results, setResults] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState("");
+  const [topic,      setTopic]      = useState("");
+  const [results,    setResults]    = useState(null);
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState("");
+  // Post ideas generator
+  const [ideaTopic,  setIdeaTopic]  = useState("");
+  const [ideas,      setIdeas]      = useState(null);
+  const [ideaCount,  setIdeaCount]  = useState(5);
+  const [ideaType,   setIdeaType]   = useState("mixed"); // blog | social | mixed
+  const [loadIdeas,  setLoadIdeas]  = useState(false);
+  const [ideaError,  setIdeaError]  = useState("");
+  const [saved,      setSaved]      = useState({});
+
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  const generateIdeas = async () => {
+    if (!ideaTopic.trim()) return;
+    setLoadIdeas(true); setIdeaError(""); setIdeas(null); setSaved({});
+    try {
+      const typeLabel = ideaType === "blog" ? "blog post" : ideaType === "social" ? "social media post" : "blog post or social media post";
+      const text = await callAI(activeProvider, activeModel,
+        `You are a content strategist for Cask & Stream — a fly fishing and whiskey/bourbon lifestyle blog. Generate specific, compelling ${typeLabel} ideas. Return ONLY valid JSON array (no fences, no prose):
+[
+  {
+    "title": "specific post title or hook",
+    "type": "blog" or "social",
+    "platform": "instagram" or "facebook" or "blog" or "tiktok" or "pinterest",
+    "angle": "unique angle or hook in one sentence",
+    "why": "why this will resonate with fly fishing / whiskey audience",
+    "outline": ["point 1", "point 2", "point 3"]
+  }
+]
+Be specific and actionable. Use real fly fishing and whiskey terminology. Vary the angles — educational, storytelling, tips, gear, recipes, locations, seasonal.`,
+        `Generate ${ideaCount} ${typeLabel} ideas for the topic: "${ideaTopic}"\n\nExisting posts to avoid repeating: ${posts.slice(0,8).map(p=>p.title).join("; ")}`,
+        apiKeys[activeProvider],
+        2000
+      );
+      const parsed = parseAIJson(text);
+      setIdeas(Array.isArray(parsed) ? parsed : []);
+    } catch(e) { setIdeaError(e.message); }
+    setLoadIdeas(false);
+  };
+
+  const saveIdea = (idea, i) => {
+    if (onAddInspiration) {
+      onAddInspiration({ id: Date.now() + i, title: idea.title, note: `${idea.angle}\n\nWhy: ${idea.why}\n\nOutline: ${idea.outline?.join(", ")}`, type: idea.type, platform: idea.platform });
+      setSaved(s => ({ ...s, [i]: true }));
+    }
+  };
 
   const research = async () => {
     if (!topic.trim()) return;
@@ -3791,8 +4441,108 @@ function SocialResearch({ activeProvider, activeModel, apiKeys, posts, inspirati
     setLoading(false);
   };
 
+  const IDEA_COUNTS = [3, 5, 8, 10, 15];
+  const IDEA_TYPES = [
+    { id:"mixed",  label:"Blog + Social", icon:"✦" },
+    { id:"blog",   label:"Blog Posts",    icon:"▤" },
+    { id:"social", label:"Social Posts",  icon:"▣" },
+  ];
+  const PLATFORM_COLORS = { blog:"var(--amber)", instagram:"#e1306c", facebook:"#1877f2", tiktok:"#010101", pinterest:"#e60023", twitter:"#1da1f2" };
+
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+
+      {/* ── POST IDEAS GENERATOR ── */}
+      <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}>
+          <span style={{ fontSize:16 }}>✦</span>
+          <div style={{ fontSize:13, fontWeight:700, color:"var(--amber)" }}>Post Ideas Generator</div>
+          <div style={{ fontSize:12, color:"var(--text-secondary)" }}>— get specific ideas for any topic</div>
+        </div>
+
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          <input style={iS} placeholder='e.g. "fly fishing tips and techniques" or "bourbon pairing with wild game" or "best rivers in Georgia"'
+            value={ideaTopic} onChange={e=>setIdeaTopic(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&generateIdeas()}
+            onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+
+          <div style={{ display:"flex", gap:12, alignItems:"center", flexWrap:"wrap" }}>
+            {/* Type selector */}
+            <div style={{ display:"flex", gap:5 }}>
+              {IDEA_TYPES.map(t => (
+                <button key={t.id} onClick={()=>setIdeaType(t.id)}
+                  style={{ padding:"6px 12px", borderRadius:7, border:`1px solid ${ideaType===t.id?"var(--amber)":"var(--border)"}`, background:ideaType===t.id?"var(--amber-glow)":"transparent", color:ideaType===t.id?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:ideaType===t.id?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:4 }}>
+                  {t.icon} {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Count selector */}
+            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+              <span style={{ fontSize:11, color:"var(--muted)" }}>How many:</span>
+              {IDEA_COUNTS.map(n => (
+                <button key={n} onClick={()=>setIdeaCount(n)}
+                  style={{ width:32, height:28, borderRadius:6, border:`1px solid ${ideaCount===n?"var(--amber)":"var(--border)"}`, background:ideaCount===n?"var(--amber-glow)":"transparent", color:ideaCount===n?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:ideaCount===n?700:400, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  {n}
+                </button>
+              ))}
+            </div>
+
+            <button onClick={generateIdeas} disabled={!ideaTopic.trim()||loadIdeas}
+              style={{ padding:"8px 20px", borderRadius:8, border:"none", background:ideaTopic.trim()&&!loadIdeas?"var(--amber)":"var(--bg-elevated)", color:ideaTopic.trim()&&!loadIdeas?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:ideaTopic.trim()&&!loadIdeas?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, marginLeft:"auto" }}>
+              {loadIdeas ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : `${provider.logo} Generate Ideas`}
+            </button>
+          </div>
+        </div>
+
+        {ideaError && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:6, background:"var(--red)11", border:"1px solid var(--red)33", marginTop:12 }}>{ideaError}</div>}
+
+        {ideas && (
+          <div style={{ marginTop:16, display:"flex", flexDirection:"column", gap:10 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--muted)" }}>{ideas.length} ideas for "{ideaTopic}"</div>
+              <button onClick={generateIdeas}
+                style={{ fontSize:11, color:"var(--text-secondary)", background:"none", border:"none", cursor:"pointer", display:"flex", alignItems:"center", gap:4 }}>
+                ↻ Regenerate
+              </button>
+            </div>
+            {ideas.map((idea, i) => (
+              <div key={i} style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", display:"flex", flexDirection:"column", gap:8 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ display:"flex", gap:6, alignItems:"center", marginBottom:6 }}>
+                      <span style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:(PLATFORM_COLORS[idea.platform]||"var(--amber)")+"15", color:PLATFORM_COLORS[idea.platform]||"var(--amber)", border:`1px solid ${PLATFORM_COLORS[idea.platform]||"var(--amber)"}33`, fontWeight:600, textTransform:"capitalize" }}>
+                        {idea.platform || idea.type}
+                      </span>
+                    </div>
+                    <div style={{ fontSize:14, fontWeight:700, marginBottom:4, lineHeight:1.4 }}>{idea.title}</div>
+                    <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6, marginBottom:4 }}>{idea.angle}</div>
+                    <div style={{ fontSize:11, color:"var(--muted)", fontStyle:"italic" }}>Why it works: {idea.why}</div>
+                  </div>
+                  <button onClick={() => saveIdea(idea, i)} disabled={saved[i]}
+                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:saved[i]?"#5cba6c":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[i]?"default":"pointer", fontFamily:"var(--font-body)", flexShrink:0, whiteSpace:"nowrap" }}>
+                    {saved[i] ? "✓ Saved" : "+ Save Idea"}
+                  </button>
+                </div>
+                {idea.outline?.length > 0 && (
+                  <div style={{ paddingTop:8, borderTop:"1px solid var(--border)" }}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Outline</div>
+                    <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+                      {idea.outline.map((point, j) => (
+                        <div key={j} style={{ fontSize:11, color:"var(--text-secondary)", display:"flex", gap:8 }}>
+                          <span style={{ color:"var(--amber)", flexShrink:0 }}>{j+1}.</span>{point}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── SOCIAL RESEARCH ── */}
       <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
         <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Research Topic or Niche</div>
         <div style={{ display:"flex", gap:10 }}>
@@ -3940,7 +4690,7 @@ primary = 5 high-volume (100k-1M posts), niche = 8 medium-volume (10k-100k), tre
       {results && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           {/* Tag groups */}
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:12 }}>
             {[
               { key:"primary",  label:"High Volume",  color:"var(--amber)" },
               { key:"niche",    label:"Niche Focus",  color:"#5cba6c"      },
@@ -4114,20 +4864,7 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
 
       {/* Image output */}
       {imageUrl && (
-        <div style={{ position:"relative", borderRadius:12, overflow:"hidden", border:"1px solid var(--border)" }}>
-          <img src={imageUrl} alt="Generated" style={{ width:"100%", display:"block" }} />
-          <div style={{ position:"absolute", bottom:12, right:12, display:"flex", gap:6 }}>
-            <button onClick={() => { const a=document.createElement("a"); a.href=imageUrl; a.download=`social-${platform}-${Date.now()}.webp`; a.click(); }}
-              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
-              ↓ Download
-            </button>
-            <button onClick={openPromptPreview}
-              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
-              ↻ New
-            </button>
-            <SaveToLibraryButton imageUrl={imageUrl} tags={[platform, "generated"]} name={`${platform}-${topic.slice(0,20)}`} />
-          </div>
-        </div>
+        <ImageSavePanel imageUrl={imageUrl} tags={[platform, "generated"]} name={`${platform}-${topic.slice(0,20)}`} />
       )}
 
       {previewOpen && (
@@ -4347,6 +5084,8 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
     { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
     { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
+    { id:"pinterest", label:"Pinterest", color:"#e60023", icon:"📌" },
+    { id:"reddit",    label:"Reddit",    color:"#ff4500", icon:"🤖" },
   ];
 
   // idea.platforms is now an ARRAY — supports multi-select
@@ -4371,7 +5110,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   // Auto-save draft
   useEffect(() => {
     if (!idea.topic && Object.keys(captions).length === 0) return;
-    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url:null }, schedule, savedAt:new Date().toISOString() };
+    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url: imageData.url?.startsWith("https://") ? imageData.url : null }, schedule, savedAt:new Date().toISOString() };
     saveSocialPipelineDraft(data);
     setSavedAt(data.savedAt);
   }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, schedule]);
@@ -4524,21 +5263,53 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     clearSocialPipelineDraft();
   };
 
-  const handleSchedule = () => {
+  const handleSchedule = async () => {
+    setLoading(true); setError(""); setLoadMsg("Preparing post…");
+
+    // Ensure image is in GCS before scheduling (blob: URLs won't survive the cron)
+    let finalImageUrl = imageData.url;
+    if (finalImageUrl?.startsWith("blob:") || finalImageUrl?.startsWith("data:")) {
+      setLoadMsg("Uploading image to cloud…");
+      try {
+        const userId = window.__bbUserId || "anonymous";
+        let dataUrl  = finalImageUrl;
+        if (finalImageUrl.startsWith("blob:")) {
+          const res  = await fetch(finalImageUrl);
+          const blob = await res.blob();
+          dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload  = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        }
+        const uploadRes  = await fetch("/api/gcs", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ userId, dataUrl, name:`social-${Date.now()}`, tags:["social","scheduled"], source:"generated" }),
+        });
+        const uploadData = await uploadRes.json();
+        if (uploadData.url) finalImageUrl = uploadData.url;
+      } catch(e) { console.warn("Image GCS upload failed:", e.message); }
+    }
+
     const post = buildSocialPostRecord("scheduled", scheduleDate);
+    post.imageUrl = finalImageUrl; // use GCS URL
     if (onSaveSocialPost) onSaveSocialPost(post);
     setSuccess(`✓ Scheduled for ${new Date(scheduleDate).toLocaleString([], {dateStyle:"medium",timeStyle:"short"})}`);
     markDone("publish");
     clearSocialPipelineDraft();
+    setLoading(false); setLoadMsg("");
   };
 
   const handlePublish = async () => {
     setLoading(true); setError(""); setSuccess(""); setPublishResults({});
     const results = {};
+    const bufferCfg = loadBufferConfig();
 
     for (const plat of selectedPlatforms) {
       const captionText = captions[plat.id]?.text || "";
-      const fullMessage = `${captionText}\n\n${hashtags.selected}`;
+      const fullMessage = [captionText, hashtags.selected].filter(Boolean).join("\n\n");
       setLoadMsg(`Publishing to ${plat.label}…`);
 
       try {
@@ -4555,6 +5326,60 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
           if (!res.instagram?.success) throw new Error(res.instagram?.error || "Instagram post failed");
           results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
 
+        } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
+          // Buffer platforms — image must be a public https:// GCS URL
+          let publicImageUrl = imageData.url;
+
+          // If we have a blob: URL, upload it to GCS first
+          if (publicImageUrl?.startsWith("blob:") || publicImageUrl?.startsWith("data:")) {
+            setLoadMsg(`Uploading image to cloud for ${plat.label}…`);
+            try {
+              const userId = window.__bbUserId || "anonymous";
+              let dataUrl = publicImageUrl;
+              if (publicImageUrl.startsWith("blob:")) {
+                const res  = await fetch(publicImageUrl);
+                const blob = await res.blob();
+                dataUrl = await new Promise((resolve, reject) => {
+                  const reader = new FileReader();
+                  reader.onload  = () => resolve(reader.result);
+                  reader.onerror = reject;
+                  reader.readAsDataURL(blob);
+                });
+              }
+              const uploadRes = await fetch("/api/gcs", {
+                method:  "POST",
+                headers: { "Content-Type": "application/json" },
+                body:    JSON.stringify({ userId, dataUrl, name:`social-${Date.now()}`, tags:["social","generated"], source:"generated" }),
+              });
+              const uploadData = await uploadRes.json();
+              if (uploadData.url) publicImageUrl = uploadData.url;
+            } catch(e) {
+              console.warn("Image upload to GCS failed:", e.message);
+              publicImageUrl = null;
+            }
+          }
+
+          // Ensure we have a valid public URL
+          if (!publicImageUrl?.startsWith("https://")) publicImageUrl = null;
+
+          const channelId = bufferCfg.mapping[plat.id];
+          setLoadMsg(`Publishing to ${plat.label} via Buffer…`);
+          const res = await fetch("/api/buffer-post", {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify({
+              apiKey:    bufferCfg.apiKey,
+              action:    "createPost",
+              channelId,
+              text:      fullMessage,
+              imageUrl:  publicImageUrl || "",
+              scheduledAt: null,
+            }),
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          results[plat.id] = { success: true, message: `✓ Sent to Buffer → ${plat.label}` };
+
         } else {
           results[plat.id] = { success: "manual", message: `Not connected — copy & paste manually` };
         }
@@ -4569,7 +5394,6 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
     const allOk = selectedPlatforms.every(p => results[p.id]?.success === true || results[p.id]?.success === "manual");
     if (allOk) {
-      // Save a "published" record
       const post = buildSocialPostRecord("published");
       post.publishedAt = new Date().toISOString();
       post.results = results;
@@ -4809,6 +5633,37 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 </div>
               ))}
 
+              {/* Per-platform hashtag limits */}
+              {(() => {
+                const count = hashtags.selected.split(/\s+/).filter(Boolean).length;
+                const warnings = selectedPlatforms
+                  .filter(p => p.hashtagLimit > 0 && count > p.hashtagLimit)
+                  .map(p => `${p.label}: ${count}/${p.hashtagLimit} (over by ${count - p.hashtagLimit})`);
+                const infos = selectedPlatforms
+                  .filter(p => p.hashtagLimit > 0 && count <= p.hashtagLimit)
+                  .map(p => `${p.label}: ${count}/${p.hashtagLimit}`);
+                return (
+                  <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                    {warnings.length > 0 && (
+                      <div style={{ padding:"8px 12px", borderRadius:7, background:"var(--red)11", border:"1px solid var(--red)33", fontSize:11, color:"var(--red)" }}>
+                        ⚠ Over limit: {warnings.join(" · ")}
+                      </div>
+                    )}
+                    <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                      {selectedPlatforms.filter(p => p.hashtagLimit >= 0).map(p => {
+                        const isOver = p.hashtagLimit > 0 && count > p.hashtagLimit;
+                        const isNone = p.hashtagLimit === 0;
+                        return (
+                          <span key={p.id} style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:isOver?"var(--red)15":isNone?"var(--bg-elevated)":"#5cba6c15", color:isOver?"var(--red)":isNone?"var(--muted)":"#5cba6c", border:`1px solid ${isOver?"var(--red)33":isNone?"var(--border)":"#5cba6c33"}`, fontWeight:600 }}>
+                            {p.icon} {p.label}: {isNone ? "no hashtags" : `${count}/${p.hashtagLimit}`}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Selected set count + clear */}
               <div style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                 <span style={{ fontSize:12, color:"var(--text-secondary)", flex:1 }}>
@@ -4819,11 +5674,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   Clear all
                 </button>
                 <button onClick={() => {
-                  const all = [
-                    ...(hashtags.sets.primary || []),
-                    ...(hashtags.sets.niche || []),
-                    ...(hashtags.sets.branded || []),
-                  ];
+                  const all = [...(hashtags.sets.primary||[]),...(hashtags.sets.niche||[]),...(hashtags.sets.branded||[])];
                   setHashtags(h => ({...h, selected: [...new Set(all)].join(" ")}));
                 }}
                   style={{ padding:"3px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -4886,7 +5737,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)" }}>
                   <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
                   <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
-                    <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-post-${Date.now()}.webp`; a.click(); }}
+                    <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-post-${Date.now()}.jpg`; a.click(); }}
                       style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                       ↓ Download
                     </button>
@@ -4898,7 +5749,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                       style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                       ✕ Remove
                     </button>
-                    <SaveToLibraryButton imageUrl={imageData.url} tags={[...idea.platforms, "generated"]} name={idea.topic?.slice(0,30) || "social-post"} />
+                    <SaveToLibraryButton imageUrl={imageData.url} tags={[...idea.platforms, "generated"]} name={idea.topic?.slice(0,30) || "social-post"} userId={window.__bbUserId || "anonymous"} />
                   </div>
                 </div>
                 {/* Allow swapping even with image selected */}
@@ -4906,7 +5757,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               </div>
             )}
 
-            {imageData.prompt && imageData.prompt !== "from library" && (
+            {imageData.url && imageData.prompt && imageData.prompt !== "from library" && (
               <div>
                 <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Prompt (editable)</label>
                 <div style={{ display:"flex", gap:8 }}>
@@ -4968,17 +5819,20 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
                 <div style={{ display:"flex", flexDirection:"column", gap:14, marginBottom:20 }}>
                   {selectedPlatforms.map(plat => {
-                    const isConnected = (plat.id==="facebook" && metaConfig?.connected && metaConfig?.pages?.length>0) ||
-                                        (plat.id==="instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id));
+                    const bufferCfg = loadBufferConfig();
+                    const isMetaConnected = (plat.id==="facebook" && metaConfig?.connected && metaConfig?.pages?.length>0) ||
+                                           (plat.id==="instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id));
+                    const isBufferConnected = bufferCfg?.connected && !!bufferCfg?.mapping?.[plat.id];
+                    const isConnected = isMetaConnected || isBufferConnected;
+                    const connectionLabel = isMetaConnected ? "● Direct" : isBufferConnected ? "● Buffer" : "Manual";
+                    const connectionColor = isMetaConnected ? "#5cba6c" : isBufferConnected ? "#1da1f2" : "var(--muted)";
                     const prevResult = publishResults[plat.id];
                     return (
                       <div key={plat.id} style={{ display:"grid", gridTemplateColumns: imageData.url ? "auto 1fr 120px" : "auto 1fr", gap:14, alignItems:"flex-start", padding:14, borderRadius:10, background:"var(--bg-elevated)", border:`1px solid ${isConnected?"#5cba6c33":"var(--border)"}` }}>
                         <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4, width:70 }}>
                           <span style={{ fontSize:20 }}>{plat.icon}</span>
                           <span style={{ fontSize:10, fontWeight:700, color:plat.color }}>{plat.label}</span>
-                          {isConnected
-                            ? <span style={{ fontSize:9, color:"#5cba6c" }}>● Live</span>
-                            : <span style={{ fontSize:9, color:"var(--muted)" }}>Manual</span>}
+                          <span style={{ fontSize:9, color:connectionColor, fontWeight:600 }}>{connectionLabel}</span>
                         </div>
                         <div style={{ fontSize:12, lineHeight:1.6, whiteSpace:"pre-wrap", color:"var(--text-secondary)" }}>
                           {captions[plat.id]?.text}
@@ -4995,10 +5849,40 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   })}
                 </div>
 
-                <div style={{ padding:14, borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)" }}>
-                  {selectedPlatforms.some(p => (p.id==="facebook"||p.id==="instagram") && metaConfig?.connected)
-                    ? "● Connected platforms publish directly. Others copy to clipboard for manual posting."
-                    : "⚠ No platforms connected for direct publishing — captions will copy to clipboard. Connect in Settings → Facebook & Instagram."}
+                {(() => {
+                  const bufferCfg = loadBufferConfig();
+                  const hasMetaDirect = selectedPlatforms.some(p => (p.id==="facebook"||p.id==="instagram") && metaConfig?.connected);
+                  const hasBuffer = selectedPlatforms.some(p => !["facebook","instagram"].includes(p.id) && bufferCfg?.connected && bufferCfg?.mapping?.[p.id]);
+                  const hasManual = selectedPlatforms.some(p => {
+                    const isMeta = (p.id==="facebook"&&metaConfig?.connected) || (p.id==="instagram"&&metaConfig?.connected);
+                    const isBuffer = bufferCfg?.connected && bufferCfg?.mapping?.[p.id];
+                    return !isMeta && !isBuffer;
+                  });
+                  return (
+                    <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
+                      {hasMetaDirect && <div>● <strong style={{color:"var(--text)"}}>Facebook/Instagram</strong> — posts directly</div>}
+                      {hasBuffer     && <div style={{color:"#1da1f2"}}>● <strong>Buffer platforms</strong> — adds to Buffer queue immediately</div>}
+                      {hasManual     && <div style={{color:"var(--amber)"}}>⚠ Some platforms not connected — caption copied to clipboard for manual posting. Connect in <strong>Settings → Buffer</strong>.</div>}
+                    </div>
+                  );
+                })()}
+
+                {/* Best post times */}
+                <div style={{ background:"var(--bg-elevated)", border:"1px solid #5cba6c33", borderRadius:10, padding:14 }}>
+                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>⏰ Best Times to Post</div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:8 }}>
+                    {selectedPlatforms.map(p => (
+                      <div key={p.id} style={{ padding:"8px 10px", borderRadius:7, background:"var(--bg-surface)", border:"1px solid var(--border)" }}>
+                        <div style={{ fontSize:11, fontWeight:700, color:p.color, marginBottom:3 }}>{p.icon} {p.label}</div>
+                        {(p.bestTimes||[]).map((t,i) => (
+                          <div key={i} style={{ fontSize:11, color:"var(--text-secondary)" }}>· {t}</div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--muted)", marginTop:8 }}>
+                    These are general best times for lifestyle/outdoor content. Your audience analytics may differ — check Analytics → Social for your specific peak times.
+                  </div>
                 </div>
 
                 {/* Action mode selector */}
@@ -5943,156 +6827,344 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
 }
 
 // ─── MEDIA LIBRARY ────────────────────────────────────────────────────────────
-// Local image store — upload files or save generated images.
-// Images are stored as base64 in localStorage (up to ~5MB each).
+// Images stored in Netlify Blobs — works across all devices.
+// localStorage used only as a cache for offline display.
 
-const MEDIA_STORAGE = "bb_media_library";
+const MEDIA_STORAGE = "bb_media_library_cache";
 
-function loadMediaLibrary() {
+function loadMediaLibraryCache() {
   try { return JSON.parse(localStorage.getItem(MEDIA_STORAGE) || "[]"); }
   catch { return []; }
 }
 
-function saveMediaLibraryToStorage(items) {
-  try { localStorage.setItem(MEDIA_STORAGE, JSON.stringify(items)); } catch(e) {
-    console.error("Media library storage failed:", e);
-  }
-}
-
-// Global helper — save a blob: URL or data URL into the media library
-async function saveToMediaLibrary(url, name = "generated", tags = ["generated"]) {
+function saveMediaLibraryCache(items) {
   try {
-    let dataUrl = url;
-    if (url.startsWith("blob:")) {
-      const res  = await fetch(url);
-      const blob = await res.blob();
-      dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload  = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    }
-    const item = {
-      id:        Date.now() + Math.random(),
-      dataUrl,
-      name,
-      type:      dataUrl.match(/data:([^;]+)/)?.[1] || "image/png",
-      size:      Math.round(dataUrl.length * 0.75), // approx base64 decoded size
-      tags,
-      notes:     "",
-      source:    "generated",
-      createdAt: new Date().toISOString(),
-    };
-    const current = loadMediaLibrary();
-    saveMediaLibraryToStorage([item, ...current]);
-    return item;
-  } catch(e) {
-    console.error("saveToMediaLibrary failed:", e);
-    throw e;
-  }
+    // Strip dataUrl before caching to save localStorage space
+    const lite = items.map(({ dataUrl, ...rest }) => rest);
+    localStorage.setItem(MEDIA_STORAGE, JSON.stringify(lite));
+    window.dispatchEvent(new CustomEvent("bb-media-updated"));
+  } catch(e) { /* cache full — ignore */ }
 }
 
-function MediaLibrary() {
-  const [items,    setItems]    = useState(loadMediaLibrary);
-  const [filter,   setFilter]   = useState("all");
-  const [selected, setSelected] = useState(null);
-  const [uploading,setUploading]= useState(false);
-  const [search,   setSearch]   = useState("");
-  const [editTag,  setEditTag]  = useState("");
-  const [copied,   setCopied]   = useState("");
-  const [dragOver, setDragOver] = useState(false);
+// Upload image to Blobs and return the item record with a public URL
+async function saveToMediaLibrary(url, name = "generated", tags = ["generated"], userId = "anonymous") {
+  let dataUrl = url;
+
+  if (url.startsWith("blob:")) {
+    const res  = await fetch(url);
+    const blob = await res.blob();
+    dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload  = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  const res = await fetch("/api/gcs", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ userId, dataUrl, name, tags, source: "generated" }),
+  });
+  if (!res.ok) throw new Error(`Media save failed: ${res.status}`);
+  const data = await res.json();
+  window.dispatchEvent(new CustomEvent("bb-media-updated"));
+  return data.item;
+}
+
+// localStorage write shim — kept for SaveToLibraryButton compatibility
+function saveMediaLibraryToStorage(items) {
+  saveMediaLibraryCache(items);
+}
+
+function MediaLibrary({ userId }) {
+  const resolvedUserId = userId || window.__bbUserId || "anonymous";
+  const [items,     setItems]     = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [filter,    setFilter]    = useState("all");
+  const [selected,  setSelected]  = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [search,    setSearch]    = useState("");
+  const [copied,    setCopied]    = useState("");
+  const [dragOver,  setDragOver]  = useState(false);
+  // AI restyle state
+  const [restylePrompt,  setRestylePrompt]  = useState("");
+  const [restyleLoading, setRestyleLoading] = useState(false);
+  const [restyleResult,  setRestyleResult]  = useState(null);
+  const [restyleError,   setRestyleError]   = useState("");
+  const [restyleOpen,    setRestyleOpen]    = useState(false);
+  const [overlayOpen,    setOverlayOpen]    = useState(false);
+  const [restyleStrength,setRestyleStrength]= useState(0.65); // 0=keep original, 1=full restyle
   const fileInput = useRef(null);
 
   const TAGS = ["blog headline","instagram","facebook","pinterest","tiktok","brand","product","landscape","portrait","other"];
 
-  const save = (next) => { setItems(next); saveMediaLibraryToStorage(next); };
+  const STYLE_PRESETS = [
+    { label:"Cinematic",      prompt:"cinematic photography, golden hour lighting, professional color grading, shallow depth of field, film grain" },
+    { label:"Magazine",       prompt:"professional magazine editorial photography, crisp lighting, vibrant colors, sharp focus" },
+    { label:"Oil Painting",   prompt:"oil painting, impressionist brushstrokes, rich textures, painterly style" },
+    { label:"Watercolor",     prompt:"watercolor illustration, soft washes, delicate strokes, artistic" },
+    { label:"Moody",          prompt:"moody atmospheric photography, dark tones, dramatic shadows, misty, noir style" },
+    { label:"Golden Hour",    prompt:"golden hour photography, warm sunlight, glowing atmosphere, sun rays, bokeh" },
+    { label:"Foggy Morning",  prompt:"misty morning fog over water, atmospheric haze, soft diffused light, serene" },
+    { label:"Vintage Film",   prompt:"vintage film photography, faded colors, grain, light leaks, 35mm aesthetic" },
+  ];
 
-  const addItem = (item) => save([item, ...items]);
+  const runRestyle = async () => {
+    if (!selected || !restylePrompt.trim()) return;
+    setRestyleLoading(true); setRestyleError(""); setRestyleResult(null);
+    try {
+      const imageUrl = selected.url || selected.dataUrl;
+      if (!imageUrl) throw new Error("No image URL found for selected item");
+      let base64Image;
 
-  const deleteItem = (id) => {
+      if (imageUrl.startsWith("data:")) {
+        base64Image = imageUrl.split(",")[1];
+      } else {
+        // Fetch from GCS — try with mode cors, fall back to no-cors via proxy
+        try {
+          const res  = await fetch(imageUrl, { mode:"cors", credentials:"omit" });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
+          base64Image = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload  = () => resolve(reader.result.split(",")[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        } catch(fetchErr) {
+          // If direct fetch fails, try via /api/gcs proxy
+          const proxyRes = await fetch(`/api/gcs?proxyUrl=${encodeURIComponent(imageUrl)}`);
+          if (!proxyRes.ok) throw new Error("Could not load image for restyle — try downloading and re-uploading it");
+          const blob = await proxyRes.blob();
+          base64Image = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload  = () => resolve(reader.result.split(",")[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        }
+      }
+
+      if (!base64Image) throw new Error("Could not load image data");
+      const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
+
+      if (apiKeys.openai) {
+        // Route through server proxy — handles PNG conversion and multipart properly
+        const res = await fetch("/api/image-generate", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({
+            provider:     "openai-edit",
+            prompt:       `${restylePrompt}. Keep the same scene, subjects, and composition. Only change the visual style, lighting, color grading, and atmosphere.`,
+            apiKey:       apiKeys.openai,
+            imageBase64:  base64Image,
+            size:         "1024x1024",
+          }),
+        });
+        const text = await res.text();
+        if (text.trimStart().startsWith("<")) throw new Error("Server timeout — try again");
+        const data = JSON.parse(text);
+        if (data.error) throw new Error(`OpenAI: ${data.error}`);
+        if (!data.b64) throw new Error("No image data returned");
+        setRestyleResult(`data:image/png;base64,${data.b64}`);
+
+      } else if (apiKeys.gemini) {
+        // Gemini — image editing via inline data
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${apiKeys.gemini}`,
+          {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { inline_data: { mime_type: "image/png", data: base64Image } },
+                  { text: `Transform this image in the following style while keeping the same composition and subjects: ${restylePrompt}` },
+                ],
+              }],
+              generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+            }),
+          }
+        );
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+        if (!part) throw new Error("No image returned from Gemini");
+        setRestyleResult(`data:${part.inlineData.mimeType};base64,${part.inlineData.data}`);
+
+      } else {
+        throw new Error("Add an OpenAI or Gemini API key in Settings → API Keys to use AI Restyle.");
+      }
+    } catch(e) {
+      setRestyleError(e.message);
+    }
+    setRestyleLoading(false);
+  };
+
+  const saveRestyleResult = async () => {
+    if (!restyleResult) return;
+    try {
+      const res = await fetch("/api/gcs", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId:  resolvedUserId,
+          dataUrl: restyleResult,
+          name:    `${selected?.name || "image"}-restyled`,
+          tags:    ["restyled", "generated"],
+          notes:   `Restyled from "${selected?.name}" · Prompt: ${restylePrompt.slice(0,80)}`,
+          source:  "restyled",
+        }),
+      });
+      const data = await res.json();
+      if (data.item) {
+        setItems(prev => [data.item, ...prev]);
+        setRestyleResult(null);
+        setRestyleOpen(false);
+        setRestylePrompt("");
+        setSelected(data.item);
+      }
+    } catch(e) { setRestyleError(e.message); }
+  };
+
+  // Load from cloud on mount
+  const fetchItems = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}`);
+      const data = await res.json();
+      if (data.items) {
+        setItems(data.items);
+        saveMediaLibraryCache(data.items);
+      }
+    } catch(e) {
+      // Fall back to cache
+      setItems(loadMediaLibraryCache());
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchItems(); }, [userId]);
+
+  // Re-sync when SaveToLibraryButton saves
+  useEffect(() => {
+    const sync = () => fetchItems();
+    window.addEventListener("bb-media-updated", sync);
+    return () => window.removeEventListener("bb-media-updated", sync);
+  }, [userId]);
+
+  // Delete from cloud + local state
+  const deleteItem = async (id) => {
     if (!window.confirm("Delete this image?")) return;
-    const next = items.filter(i => i.id !== id);
-    save(next);
+    try {
+      await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}&id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    } catch {}
+    setItems(prev => prev.filter(i => i.id !== id));
     if (selected?.id === id) setSelected(null);
   };
 
-  const updateItem = (id, patch) => {
-    const next = items.map(i => i.id === id ? { ...i, ...patch } : i);
-    save(next);
+  // Update metadata (name, tags, notes)
+  const updateItem = async (id, patch) => {
+    setItems(prev => prev.map(i => i.id === id ? { ...i, ...patch } : i));
     if (selected?.id === id) setSelected(s => ({ ...s, ...patch }));
+    try {
+      await fetch("/api/gcs", {
+        method:  "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId, id, ...patch }),
+      });
+    } catch {}
   };
 
-  // Convert file to base64 and add to library
+  const [uploadProgress, setUploadProgress] = useState({}); // { fileName: 0-100 }
+
+  // Upload file directly to GCS — bypasses Netlify's 6MB body limit
   const processFile = async (file) => {
-    if (!file.type.startsWith("image/")) { alert("Only image files are supported."); return; }
-    if (file.size > 8 * 1024 * 1024) { alert("File too large — max 8MB."); return; }
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const item = {
-          id:        Date.now() + Math.random(),
-          dataUrl:   e.target.result,
-          name:      file.name.replace(/\.[^.]+$/, ""),
-          type:      file.type,
-          size:      file.size,
-          tags:      [],
-          notes:     "",
-          source:    "upload",
-          createdAt: new Date().toISOString(),
+    const isVideo = file.type.startsWith("video/");
+    const isImage = file.type.startsWith("image/");
+    if (!isVideo && !isImage) { alert("Only image and video files are supported."); return; }
+    if (isImage && file.size > 20 * 1024 * 1024) { alert("Image too large — max 20MB."); return; }
+    if (isVideo && file.size > 500 * 1024 * 1024) { alert("Video too large — max 500MB."); return; }
+
+    const key = file.name + file.size;
+    setUploadProgress(prev => ({ ...prev, [key]: 0 }));
+
+    try {
+      // Step 1: get a resumable upload session URL from our server
+      const sessionRes = await fetch("/api/gcs-signed-url", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          userId:   resolvedUserId,
+          fileName: file.name,
+          mimeType: file.type,
+          size:     file.size,
+          name:     file.name.replace(/\.[^.]+$/, ""),
+          tags:     isVideo ? ["video","upload"] : ["upload"],
+          source:   "upload",
+        }),
+      });
+      const { uploadUrl, objectId, item, error: sessionErr } = await sessionRes.json();
+      if (sessionErr || !uploadUrl) throw new Error(sessionErr || "Failed to get upload URL");
+
+      // Step 2: upload directly from browser to GCS with progress tracking
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", uploadUrl);
+        xhr.setRequestHeader("Content-Type", file.type);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            setUploadProgress(prev => ({ ...prev, [key]: pct }));
+          }
         };
-        addItem(item);
-        resolve(item);
-      };
-      reader.readAsDataURL(file);
-    });
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
+        };
+        xhr.onerror = () => reject(new Error("Network error during upload"));
+        xhr.send(file);
+      });
+
+      // Step 3: finalize (make public + update status)
+      await fetch("/api/gcs-finalize", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId: resolvedUserId, objectId }),
+      });
+
+      // Add to local state
+      setItems(prev => [{ ...item, status:"ready" }, ...prev.filter(i => i.id !== objectId)]);
+      setUploadProgress(prev => { const next = {...prev}; delete next[key]; return next; });
+
+    } catch(e) {
+      console.error("Upload failed:", e);
+      alert(`Upload failed: ${e.message}`);
+      setUploadProgress(prev => { const next = {...prev}; delete next[key]; return next; });
+    }
   };
 
   const handleFiles = async (files) => {
     setUploading(true);
-    for (const file of Array.from(files)) await processFile(file);
+    // Upload all files in parallel
+    await Promise.all(Array.from(files).map(file => processFile(file)));
     setUploading(false);
   };
 
-  const handleDrop = (e) => {
-    e.preventDefault(); setDragOver(false);
-    handleFiles(e.dataTransfer.files);
-  };
-
-  // Save a generated image (blob URL) to the library
-  const saveFromBlobUrl = async (blobUrl, name = "generated") => {
-    try {
-      const res = await fetch(blobUrl);
-      const blob = await res.blob();
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        addItem({
-          id:        Date.now() + Math.random(),
-          dataUrl:   e.target.result,
-          name,
-          type:      blob.type || "image/png",
-          size:      blob.size,
-          tags:      ["generated"],
-          notes:     "",
-          source:    "generated",
-          createdAt: new Date().toISOString(),
-        });
-      };
-      reader.readAsDataURL(blob);
-    } catch(e) { console.error("Failed to save image:", e); }
-  };
-
-  const copyUrl = (item) => {
-    navigator.clipboard.writeText(item.dataUrl);
-    setCopied(item.id);
-    setTimeout(() => setCopied(""), 2000);
-  };
+  const handleDrop = (e) => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); };
 
   const download = (item) => {
     const a = document.createElement("a");
-    a.href = item.dataUrl;
-    a.download = `${item.name || "image"}.${item.type?.split("/")[1] || "png"}`;
+    a.href     = item.url || item.dataUrl;
+    a.download = `${item.name || "image"}.${item.type?.split("/")[1] || "jpg"}`;
     a.click();
+  };
+
+  const copyUrl = (item) => {
+    navigator.clipboard.writeText(item.url || item.dataUrl || "");
+    setCopied(item.id);
+    setTimeout(() => setCopied(""), 2000);
   };
 
   const filteredItems = items.filter(item => {
@@ -6101,25 +7173,38 @@ function MediaLibrary() {
     return true;
   });
 
-  const formatSize = (bytes) => bytes > 1024*1024 ? `${(bytes/1024/1024).toFixed(1)}MB` : `${Math.round(bytes/1024)}KB`;
-
   const iS = { padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", width:"100%" };
+  const formatSize = (b) => b > 1024*1024 ? `${(b/1024/1024).toFixed(1)}MB` : `${Math.round(b/1024)}KB`;
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
-      {/* Header */}
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
         <div>
           <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Media Library</h2>
           <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>
-            Upload images or save generated visuals — {items.length} image{items.length!==1?"s":""} stored
+            {loading ? "Loading…" : `${items.length} image${items.length!==1?"s":""} · synced across all devices`}
           </p>
         </div>
-        <button onClick={() => fileInput.current?.click()}
-          style={{ padding:"9px 20px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
-          + Upload Images
-        </button>
-        <input ref={fileInput} type="file" accept="image/*" multiple style={{ display:"none" }} onChange={e=>handleFiles(e.target.files)} />
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+          {items.length === 0 && !loading && (
+            <button onClick={async () => {
+              setLoading(true);
+              try {
+                const res  = await fetch("/api/gcs-restore", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ userId: resolvedUserId }) });
+                const data = await res.json();
+                if (data.items) { setItems(data.items); saveMediaLibraryCache(data.items); }
+                else alert(data.error || "Restore failed");
+              } catch(e) { alert(e.message); }
+              setLoading(false);
+            }}
+              style={{ padding:"7px 14px", borderRadius:8, border:"1px solid var(--amber)", background:"var(--amber-glow)", color:"var(--amber)", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+              ↻ Scan & Restore Images
+            </button>
+          )}
+          <button onClick={fetchItems} style={{ padding:"7px 14px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>↻ Refresh</button>
+          <button onClick={() => fileInput.current?.click()} style={{ padding:"9px 20px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>+ Upload Images</button>
+        </div>
+        <input ref={fileInput} type="file" accept="image/*,video/*" multiple style={{ display:"none" }} onChange={e=>handleFiles(e.target.files)} />
       </div>
 
       {/* Drop zone */}
@@ -6128,25 +7213,39 @@ function MediaLibrary() {
         onDragLeave={()=>setDragOver(false)}
         onDrop={handleDrop}
         onClick={() => fileInput.current?.click()}
-        style={{ border:`2px dashed ${dragOver?"var(--amber)":"var(--border)"}`, borderRadius:12, padding:"28px 20px", textAlign:"center", cursor:"pointer", background:dragOver?"var(--amber-glow)":"transparent", transition:"all 0.2s" }}>
-        {uploading ? (
-          <div style={{ fontSize:13, color:"var(--amber)" }}>
-            <span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>Processing…
+        style={{ border:`2px dashed ${dragOver?"var(--amber)":"var(--border)"}`, borderRadius:12, padding:"24px 20px", textAlign:"center", cursor:"pointer", background:dragOver?"var(--amber-glow)":"transparent", transition:"all 0.2s" }}>
+        {uploading || Object.keys(uploadProgress).length > 0 ? (
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {Object.entries(uploadProgress).map(([name, pct]) => (
+              <div key={name}>
+                <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:4, display:"flex", justifyContent:"space-between" }}>
+                  <span>{name.length > 40 ? name.slice(0,37)+"…" : name}</span>
+                  <span style={{ color:"var(--amber)" }}>{pct}%</span>
+                </div>
+                <div style={{ height:4, borderRadius:99, background:"var(--bg-elevated)" }}>
+                  <div style={{ height:"100%", width:`${pct}%`, background:"var(--amber)", borderRadius:99, transition:"width 0.3s" }} />
+                </div>
+              </div>
+            ))}
+            {uploading && Object.keys(uploadProgress).length === 0 && (
+              <div style={{ fontSize:13, color:"var(--amber)", display:"flex", alignItems:"center", gap:8 }}>
+                <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>Preparing upload…
+              </div>
+            )}
           </div>
         ) : (
           <>
-            <div style={{ fontSize:28, marginBottom:8 }}>🖼</div>
-            <div style={{ fontSize:13, fontWeight:600, color:"var(--text-secondary)", marginBottom:4 }}>
-              {dragOver ? "Drop to upload" : "Drag & drop images here or click to browse"}
-            </div>
-            <div style={{ fontSize:11, color:"var(--muted)" }}>PNG, JPG, WEBP, GIF · Max 8MB each</div>
+            <div style={{ fontSize:24, marginBottom:6 }}>🖼</div>
+            <div style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:3 }}>{dragOver ? "Drop to upload" : "Drag & drop images or videos, or click to browse"}</div>
+            <div style={{ fontSize:11, color:"var(--muted)" }}>Images: PNG, JPG, WEBP (max 8MB) · Videos: MP4, MOV, WebM (max 200MB)</div>
           </>
         )}
       </div>
 
-      {items.length > 0 && (
+      {loading && <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13 }}><span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>Loading from cloud…</div>}
+
+      {!loading && items.length > 0 && (
         <>
-          {/* Search & filter */}
           <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
             <input style={{ ...iS, flex:1, minWidth:200 }} placeholder="Search by name or tag…" value={search} onChange={e=>setSearch(e.target.value)}
               onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
@@ -6154,43 +7253,48 @@ function MediaLibrary() {
               {["all","generated","upload","blog headline","instagram","facebook","pinterest"].map(tag => (
                 <button key={tag} onClick={() => setFilter(tag)}
                   style={{ padding:"5px 12px", borderRadius:99, border:filter===tag?"1px solid var(--amber)":"1px solid var(--border)", background:filter===tag?"var(--amber-glow)":"transparent", color:filter===tag?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", textTransform:"capitalize" }}>
-                  {tag}{tag!=="all"?" ▾":""}
+                  {tag}
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Grid */}
           {filteredItems.length === 0 ? (
-            <div style={{ textAlign:"center", padding:"40px 20px", color:"var(--muted)", fontSize:13 }}>No images match your filter.</div>
+            <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13 }}>No images match your filter.</div>
           ) : (
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))", gap:12 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:12 }}>
               {filteredItems.map(item => (
                 <div key={item.id}
                   onClick={() => setSelected(selected?.id===item.id ? null : item)}
                   style={{ position:"relative", borderRadius:10, overflow:"hidden", border:`2px solid ${selected?.id===item.id?"var(--amber)":"var(--border)"}`, cursor:"pointer", background:"var(--bg-elevated)", transition:"border-color 0.2s" }}>
-                  <img src={item.dataUrl} alt={item.name} style={{ width:"100%", aspectRatio:"1", objectFit:"cover", display:"block" }} />
-                  <div style={{ padding:"8px 10px", background:"var(--bg-surface)" }}>
-                    <div style={{ fontSize:11, fontWeight:600, color:"var(--text)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginBottom:3 }}>{item.name || "Untitled"}</div>
-                    <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+                  {item.mediaType === "video" ? (
+                    <div style={{ width:"100%", aspectRatio:"1", background:"#000", display:"flex", alignItems:"center", justifyContent:"center", position:"relative" }}>
+                      <video src={item.url} style={{ width:"100%", height:"100%", objectFit:"cover" }} preload="metadata" />
+                      <div style={{ position:"absolute", fontSize:24, opacity:0.9 }}>▶</div>
+                    </div>
+                  ) : (
+                    <img src={item.url || item.dataUrl} alt={item.name} style={{ width:"100%", aspectRatio:"1", objectFit:"cover", display:"block" }}
+                      onError={e => { e.target.style.opacity="0.3"; }} />
+                  )}
+                  <div style={{ padding:"6px 8px", background:"var(--bg-surface)" }}>
+                    <div style={{ fontSize:10, fontWeight:600, color:"var(--text)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{item.name || "Untitled"}</div>
+                    <div style={{ display:"flex", gap:3, flexWrap:"wrap", marginTop:3 }}>
                       {(item.tags||[]).slice(0,2).map(tag => (
                         <span key={tag} style={{ fontSize:9, padding:"1px 5px", borderRadius:99, background:"var(--amber-glow)", color:"var(--amber)", border:"1px solid var(--amber)33" }}>{tag}</span>
                       ))}
                     </div>
                   </div>
-                  {/* Quick action overlay */}
-                  <div style={{ position:"absolute", top:6, right:6, display:"flex", gap:4 }}
-                    onClick={e=>e.stopPropagation()}>
-                    <button onClick={() => copyUrl(item)} title="Copy data URL"
-                      style={{ width:26, height:26, borderRadius:6, border:"none", background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:11, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                  <div style={{ position:"absolute", top:4, right:4, display:"flex", gap:3 }} onClick={e=>e.stopPropagation()}>
+                    <button onClick={() => copyUrl(item)} title="Copy URL"
+                      style={{ width:24, height:24, borderRadius:5, border:"none", background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:10, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
                       {copied===item.id ? "✓" : "⎘"}
                     </button>
                     <button onClick={() => download(item)} title="Download"
-                      style={{ width:26, height:26, borderRadius:6, border:"none", background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:11, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      style={{ width:24, height:24, borderRadius:5, border:"none", background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:10, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
                       ↓
                     </button>
                     <button onClick={() => deleteItem(item.id)} title="Delete"
-                      style={{ width:26, height:26, borderRadius:6, border:"none", background:"rgba(180,20,20,0.75)", color:"#fff", fontSize:11, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      style={{ width:24, height:24, borderRadius:5, border:"none", background:"rgba(160,20,20,0.75)", color:"#fff", fontSize:10, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>
                       ✕
                     </button>
                   </div>
@@ -6199,59 +7303,175 @@ function MediaLibrary() {
             </div>
           )}
 
-          {/* Detail panel for selected image */}
           {selected && (
-            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20, display:"grid", gridTemplateColumns:"240px 1fr", gap:20 }}>
-              <img src={selected.dataUrl} alt={selected.name} style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", objectFit:"contain", maxHeight:220 }} />
-              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Name</label>
-                  <input value={selected.name} onChange={e=>{ setSelected(s=>({...s,name:e.target.value})); updateItem(selected.id,{name:e.target.value}); }}
-                    style={iS} />
-                </div>
-
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Tags</label>
-                  <div style={{ display:"flex", gap:5, flexWrap:"wrap", marginBottom:8 }}>
-                    {TAGS.map(tag => {
-                      const has = selected.tags?.includes(tag);
-                      return (
-                        <button key={tag} onClick={() => { const next = has ? selected.tags.filter(t=>t!==tag) : [...(selected.tags||[]),tag]; updateItem(selected.id,{tags:next}); setSelected(s=>({...s,tags:next})); }}
-                          style={{ padding:"3px 10px", borderRadius:99, border:has?"1px solid var(--amber)":"1px solid var(--border)", background:has?"var(--amber-glow)":"transparent", color:has?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                          {tag}
-                        </button>
-                      );
-                    })}
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:16 }}>
+              {/* Top: image + metadata */}
+              <div style={{ display:"grid", gridTemplateColumns:"220px 1fr", gap:20 }}>
+                {selected.mediaType === "video" ? (
+                <video src={selected.url} controls style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", maxHeight:200 }} />
+              ) : (
+                <img src={selected.url || selected.dataUrl} alt={selected.name} style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", objectFit:"contain", maxHeight:200 }} />
+              )}
+                <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Name</label>
+                    <input value={selected.name || ""} onChange={e=>updateItem(selected.id,{name:e.target.value})}
+                      style={iS} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+                  </div>
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Tags</label>
+                    <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+                      {TAGS.map(tag => {
+                        const has = selected.tags?.includes(tag);
+                        return (
+                          <button key={tag} onClick={() => { const next = has ? selected.tags.filter(t=>t!==tag) : [...(selected.tags||[]),tag]; updateItem(selected.id,{tags:next}); }}
+                            style={{ padding:"3px 10px", borderRadius:99, border:has?"1px solid var(--amber)":"1px solid var(--border)", background:has?"var(--amber-glow)":"transparent", color:has?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            {tag}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Notes</label>
+                    <textarea value={selected.notes||""} onChange={e=>updateItem(selected.id,{notes:e.target.value})}
+                      rows={2} style={{ ...iS, resize:"none", lineHeight:1.5, fontSize:12 }} placeholder="e.g. Used for Spring Hatch post…" />
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--muted)", display:"flex", gap:12, flexWrap:"wrap" }}>
+                    {selected.type && <span>📐 {selected.type.split("/")[1]?.toUpperCase()}</span>}
+                    {selected.size && <span>💾 {formatSize(selected.size)}</span>}
+                    <span>🗓 {new Date(selected.createdAt).toLocaleDateString()}</span>
+                    <span style={{ textTransform:"capitalize" }}>📥 {selected.source}</span>
+                  </div>
+                  <div style={{ display:"flex", gap:8 }}>
+                    <button onClick={() => copyUrl(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"none", background:copied===selected.id?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      {copied===selected.id ? "✓ Copied!" : "⎘ Copy URL"}
+                    </button>
+                    <button onClick={() => download(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      ↓ Download
+                    </button>
+                    <button onClick={() => { setRestyleOpen(o=>!o); setOverlayOpen(false); setRestyleResult(null); setRestyleError(""); }}
+                      style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${restyleOpen?"var(--amber)":"var(--border)"}`, background:restyleOpen?"var(--amber-glow)":"transparent", color:restyleOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:restyleOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                      ✦ AI Restyle
+                    </button>
+                    <button onClick={() => { setOverlayOpen(o=>!o); setRestyleOpen(false); }}
+                      style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${overlayOpen?"var(--amber)":"var(--border)"}`, background:overlayOpen?"var(--amber-glow)":"transparent", color:overlayOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:overlayOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                      ✎ Text Overlay
+                    </button>
                   </div>
                 </div>
-
-                <div>
-                  <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Notes</label>
-                  <textarea value={selected.notes||""} onChange={e=>{ setSelected(s=>({...s,notes:e.target.value})); updateItem(selected.id,{notes:e.target.value}); }}
-                    rows={2} style={{ ...iS, resize:"none", lineHeight:1.5, fontSize:12 }} placeholder="e.g. Used for Spring Hatch post, River Stone palette…" />
-                </div>
-
-                <div style={{ fontSize:11, color:"var(--muted)", display:"flex", gap:16 }}>
-                  <span>📐 {selected.type?.split("/")[1]?.toUpperCase()}</span>
-                  {selected.size && <span>💾 {formatSize(selected.size)}</span>}
-                  <span>🗓 {new Date(selected.createdAt).toLocaleDateString()}</span>
-                  <span style={{ textTransform:"capitalize" }}>📥 {selected.source}</span>
-                </div>
-
-                <div style={{ display:"flex", gap:8 }}>
-                  <button onClick={() => copyUrl(selected)}
-                    style={{ padding:"7px 16px", borderRadius:7, border:"none", background:copied===selected.id?"var(--green)":"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                    {copied===selected.id ? "✓ Copied!" : "⎘ Copy Image URL"}
-                  </button>
-                  <button onClick={() => download(selected)}
-                    style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                    ↓ Download
-                  </button>
-                </div>
               </div>
+
+              {/* AI Restyle Panel */}
+              {restyleOpen && (
+                <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✦ AI Restyle</span>
+                    <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Transform your photo while keeping its composition</span>
+                  </div>
+
+                  {/* Style presets */}
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Quick Styles</label>
+                    <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                      {STYLE_PRESETS.map(p => (
+                        <button key={p.label} onClick={() => setRestylePrompt(p.prompt)}
+                          style={{ padding:"5px 12px", borderRadius:99, border:restylePrompt===p.prompt?"1px solid var(--amber)":"1px solid var(--border)", background:restylePrompt===p.prompt?"var(--amber-glow)":"transparent", color:restylePrompt===p.prompt?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:restylePrompt===p.prompt?600:400 }}>
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Custom prompt */}
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Style Prompt</label>
+                    <textarea value={restylePrompt} onChange={e=>setRestylePrompt(e.target.value)} rows={2}
+                      placeholder="e.g. cinematic golden hour, oil painting style, professional magazine photo, misty morning fog…"
+                      style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
+                  </div>
+
+                  {/* Restyle strength (Stability only) */}
+                  <div>
+                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+                      Restyle Strength — {Math.round(restyleStrength * 100)}%
+                      <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0, color:"var(--muted)", marginLeft:8 }}>
+                        (lower = closer to original · Stability AI only)
+                      </span>
+                    </label>
+                    <input type="range" min={0.2} max={0.9} step={0.05} value={restyleStrength}
+                      onChange={e => setRestyleStrength(Number(e.target.value))}
+                      style={{ width:"100%", accentColor:"var(--amber)" }} />
+                    <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"var(--muted)", marginTop:3 }}>
+                      <span>Subtle (keep original)</span>
+                      <span>Strong (full restyle)</span>
+                    </div>
+                  </div>
+
+                  {restyleError && (
+                    <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{restyleError}</div>
+                  )}
+
+                  {/* Result */}
+                  {restyleResult ? (
+                    <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                        <div>
+                          <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Original</div>
+                          <img src={selected.url || selected.dataUrl} alt="Original" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize:10, fontWeight:700, color:"var(--amber)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>✦ Restyled</div>
+                          <img src={restyleResult} alt="Restyled" style={{ width:"100%", borderRadius:8, border:"1px solid var(--amber)44" }} />
+                        </div>
+                      </div>
+                      <div style={{ display:"flex", gap:8 }}>
+                        <button onClick={saveRestyleResult}
+                          style={{ padding:"8px 20px", borderRadius:8, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                          ✓ Save to Library
+                        </button>
+                        <button onClick={() => { const a=document.createElement("a"); a.href=restyleResult; a.download=`${selected?.name||"image"}-restyled.png`; a.click(); }}
+                          style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                          ↓ Download
+                        </button>
+                        <button onClick={() => { setRestyleResult(null); runRestyle(); }}
+                          style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                          ↻ Try again
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button onClick={runRestyle} disabled={restyleLoading || !restylePrompt.trim()}
+                      style={{ padding:"10px 24px", borderRadius:8, border:"none", background:restyleLoading||!restylePrompt.trim()?"var(--bg-elevated)":"var(--amber)", color:restyleLoading||!restylePrompt.trim()?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:restyleLoading||!restylePrompt.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
+                      {restyleLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Restyling…</> : "✦ Generate Restyle"}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* ── TEXT OVERLAY EDITOR ── */}
+              {overlayOpen && selected && (
+                <ImageTextOverlayEditor
+                  imageUrl={selected.url || selected.dataUrl}
+                  imageName={selected.name}
+                  userId={resolvedUserId}
+                  onSave={(newItem) => {
+                    setItems(prev => [newItem, ...prev]);
+                    setOverlayOpen(false);
+                    setSelected(newItem);
+                  }}
+                />
+              )}
             </div>
           )}
         </>
+      )}
+
+      {!loading && items.length === 0 && (
+        <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13, lineHeight:1.7 }}>
+          <div style={{ fontSize:32, marginBottom:12 }}>🖼</div>
+          No images yet. Upload files above or click <strong>🖼 Save</strong> on any generated image.
+        </div>
       )}
     </div>
   );
@@ -6261,11 +7481,32 @@ function MediaLibrary() {
 // Inline picker for selecting an image from the Media Library.
 // Used in Social Pipeline image stage, HeadlineImagePanel, etc.
 
-function LibraryImagePicker({ onSelect, compact = false }) {
+function LibraryImagePicker({ onSelect, compact = false, userId }) {
+  const resolvedUserId = userId || window.__bbUserId || "anonymous";
   const [open,    setOpen]   = useState(false);
   const [filter,  setFilter] = useState("all");
   const [search,  setSearch] = useState("");
-  const items = loadMediaLibrary();
+  const [items,   setItems]  = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchItems = async () => {
+    setLoading(true);
+    try {
+      const res  = await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}`);
+      const data = await res.json();
+      setItems(data.items || []);
+    } catch {
+      setItems(loadMediaLibraryCache());
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchItems(); }, [resolvedUserId]);
+  useEffect(() => {
+    const sync = () => fetchItems();
+    window.addEventListener("bb-media-updated", sync);
+    return () => window.removeEventListener("bb-media-updated", sync);
+  }, [resolvedUserId]);
 
   const filtered = items.filter(item => {
     const typeMatch  = filter === "all" || item.tags?.includes(filter);
@@ -6313,11 +7554,11 @@ function LibraryImagePicker({ onSelect, compact = false }) {
       ) : (
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(90px,1fr))", gap:8, maxHeight:260, overflow:"auto" }}>
           {filtered.map(item => (
-            <div key={item.id} onClick={() => { onSelect(item.dataUrl); setOpen(false); }}
+            <div key={item.id} onClick={() => { onSelect(item.url || item.dataUrl); setOpen(false); }}
               style={{ position:"relative", borderRadius:8, overflow:"hidden", border:"1px solid var(--border)", cursor:"pointer", aspectRatio:"1" }}
               onMouseEnter={e=>{ e.currentTarget.style.borderColor="var(--amber)"; e.currentTarget.querySelector(".overlay").style.opacity="1"; }}
               onMouseLeave={e=>{ e.currentTarget.style.borderColor="var(--border)"; e.currentTarget.querySelector(".overlay").style.opacity="0"; }}>
-              <img src={item.dataUrl} alt={item.name} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+              <img src={item.url || item.dataUrl} alt={item.name} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
               <div className="overlay" style={{ position:"absolute", inset:0, background:"rgba(196,124,43,0.8)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"#0e0f11", opacity:0, transition:"opacity 0.15s" }}>
                 Use This
               </div>
@@ -6329,6 +7570,261 @@ function LibraryImagePicker({ onSelect, compact = false }) {
       <div style={{ fontSize:10, color:"var(--muted)", marginTop:10, lineHeight:1.5 }}>
         Click any image to use it. Add more in Marketing → Media Library.
       </div>
+    </div>
+  );
+}
+
+// ─── VIDEO PLANNING STUDIO ───────────────────────────────────────────────────
+
+const VIDEO_PLAN_STORAGE = "bb_video_plans";
+function loadVideoPlans() { try { return JSON.parse(localStorage.getItem(VIDEO_PLAN_STORAGE) || "[]"); } catch { return []; } }
+function saveVideoPlansToStorage(p) { try { localStorage.setItem(VIDEO_PLAN_STORAGE, JSON.stringify(p)); } catch {} }
+
+function VideoPlanningStudio({ activeProvider, activeModel, apiKeys, posts, userId }) {
+  const [plans,     setPlans]     = useState(loadVideoPlans);
+  const [activeTab, setActiveTab] = useState("youtube");
+  const [selected,  setSelected]  = useState(null);
+  const [generating,setGenerating]= useState(false);
+  const [genResult, setGenResult] = useState(null);
+  const [genType,   setGenType]   = useState("script");
+  const [topic,     setTopic]     = useState("");
+  const [error,     setError]     = useState("");
+
+  const savePlans = (next) => { setPlans(next); saveVideoPlansToStorage(next); };
+
+  const TABS = [
+    { id:"youtube",  label:"YouTube Vlogs",  icon:"▶", color:"#ff0000" },
+    { id:"tiktok",   label:"TikTok",         icon:"🎵", color:"#010101" },
+    { id:"reels",    label:"Reels",          icon:"📸", color:"#e1306c" },
+    { id:"library",  label:"Video Library",  icon:"🎬", color:"var(--amber)" },
+  ];
+
+  const GEN_TYPES = [
+    { id:"script",    label:"Full Script",      icon:"📄" },
+    { id:"outline",   label:"Video Outline",    icon:"▤"  },
+    { id:"hook",      label:"Hook & Intro",      icon:"⚡"  },
+    { id:"title",     label:"Title Ideas",       icon:"✦"  },
+    { id:"desc",      label:"Description & SEO", icon:"◎"  },
+    { id:"chapters",  label:"Chapter Timestamps",icon:"⏱"  },
+    { id:"shorts",    label:"Short Clips Ideas", icon:"📱"  },
+    { id:"thumbnail", label:"Thumbnail Concept", icon:"🖼"  },
+  ];
+
+  const platformConfig = {
+    youtube: { name:"YouTube",  maxLen:"10-20 min", format:"Talking head or on-location",      tone:"Educational, storytelling, authentic" },
+    tiktok:  { name:"TikTok",   maxLen:"15-60 sec", format:"Vertical, fast-paced, trending",    tone:"Casual, entertaining, hook-driven" },
+    reels:   { name:"Reels",    maxLen:"15-90 sec", format:"Vertical, cinematic, lifestyle",    tone:"Aspirational, beautiful, lifestyle-focused" },
+  };
+
+  const generate = async () => {
+    if (!topic.trim()) return;
+    setGenerating(true); setError(""); setGenResult(null);
+    const platform = platformConfig[activeTab];
+    const brand = loadBrandGuide();
+    const brandCtx = buildBrandContext(brand);
+    try {
+      const prompts = {
+        script:    `Write a complete ${platform?.name || activeTab} video script for: "${topic}". Include intro hook, main content sections, and outro with CTA. Format with [SECTION] headers, speaker notes, and B-roll suggestions. Target length: ${platform?.maxLen}. Tone: ${platform?.tone}.`,
+        outline:   `Create a detailed video outline for a ${platform?.name} video: "${topic}". Include: hook idea, 4-6 main sections with talking points, B-roll suggestions, CTA ideas. Keep it punchy and scannable.`,
+        hook:      `Write 5 different opening hooks (first 3-5 seconds) for a ${platform?.name} video about "${topic}". Each hook should immediately grab attention. Include one question hook, one bold statement, one story hook, one shocking fact, one visual hook.`,
+        title:     `Generate 10 ${platform?.name} title ideas for "${topic}". Mix: curiosity gaps, how-to, listicles, emotional triggers. Include SEO-friendly versions. For YouTube, include click-worthy titles. For TikTok/Reels, include trending formats.`,
+        desc:      `Write a ${platform?.name} video description for "${topic}". Include: engaging summary paragraph, key talking points as bullet list, relevant hashtags (10-15), call to action, and links placeholder. Optimize for search.`,
+        chapters:  `Create YouTube chapter timestamps for a video about "${topic}". Assume a 10-15 minute video. Format: 0:00 - Intro, etc. Make chapters interesting and specific enough to make viewers want to jump to each section.`,
+        shorts:    `Suggest 5 short-form clip ideas from a video about "${topic}" that would work as YouTube Shorts, TikToks, or Reels. For each: describe the clip, the hook, why it works as a short, and the ideal length.`,
+        thumbnail: `Describe a compelling YouTube thumbnail concept for "${topic}". Include: main visual element, text overlay (max 3 words), color scheme, facial expression if applicable, and why it would get high CTR. Also suggest 2 alternatives.`,
+      };
+
+      const text = await callAI(activeProvider, activeModel,
+        `${brandCtx}You are a content strategist specializing in fly fishing and whiskey lifestyle video content for Cask & Stream. Platform: ${platform?.name || activeTab}. Format: ${platform?.format || ""}. Create engaging, authentic content that resonates with fly fishing enthusiasts and whiskey lovers.`,
+        prompts[genType] || prompts.script,
+        apiKeys[activeProvider],
+        2500
+      );
+
+      const plan = {
+        id:        Date.now(),
+        platform:  activeTab,
+        topic:     topic.trim(),
+        type:      genType,
+        content:   text,
+        createdAt: new Date().toISOString(),
+        status:    "idea",
+      };
+      setGenResult(plan);
+    } catch(e) { setError(e.message); }
+    setGenerating(false);
+  };
+
+  const savePlan = () => {
+    if (!genResult) return;
+    savePlans([genResult, ...plans]);
+    setGenResult(null);
+    setTopic("");
+  };
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Header */}
+      <div>
+        <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>🎬 Video Planning Studio</h2>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Plan, script, and organize your YouTube vlogs, TikToks, and Reels — all in one place.</p>
+      </div>
+
+      {/* Platform tabs */}
+      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setActiveTab(t.id)}
+            style={{ padding:"7px 18px", borderRadius:8, border:`1px solid ${activeTab===t.id?t.color:"var(--border)"}`, background:activeTab===t.id?t.color+"15":"transparent", color:activeTab===t.id?t.color:"var(--text-secondary)", fontSize:12, fontWeight:activeTab===t.id?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            <span>{t.icon}</span>{t.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "library" ? (
+        /* ── VIDEO LIBRARY ── */
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Videos uploaded to your Media Library appear here for easy access.</p>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24, textAlign:"center", color:"var(--muted)", fontSize:13 }}>
+            <div style={{ fontSize:32, marginBottom:12 }}>🎬</div>
+            Upload videos in the <strong style={{ color:"var(--text)" }}>Media Library</strong> tab — they'll appear here organized by platform tag.
+          </div>
+          {plans.length > 0 && (
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>Saved Plans</div>
+              {plans.map(plan => (
+                <div key={plan.id} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:10, padding:16, cursor:"pointer" }}
+                  onClick={() => setSelected(selected?.id===plan.id ? null : plan)}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <div>
+                      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:"var(--amber-glow)", color:"var(--amber)", fontWeight:600, marginRight:8, textTransform:"capitalize" }}>{plan.platform} · {plan.type}</span>
+                      <span style={{ fontSize:13, fontWeight:600 }}>{plan.topic}</span>
+                    </div>
+                    <span style={{ fontSize:11, color:"var(--muted)" }}>{new Date(plan.createdAt).toLocaleDateString()}</span>
+                  </div>
+                  {selected?.id === plan.id && (
+                    <pre style={{ marginTop:12, fontSize:12, lineHeight:1.7, color:"var(--text-secondary)", whiteSpace:"pre-wrap", fontFamily:"var(--font-body)" }}>{plan.content}</pre>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        /* ── GENERATOR ── */
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Topic input */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>
+                Video Topic or Idea
+              </label>
+              <input value={topic} onChange={e=>setTopic(e.target.value)}
+                placeholder={`e.g. "Early morning dry fly fishing on the Toccoa River" or "Pairing bourbon with fly fishing — our favorite combos"`}
+                style={iS}
+                onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"}
+                onKeyDown={e=>e.key==="Enter"&&generate()} />
+            </div>
+
+            {/* Quick ideas from existing posts */}
+            {posts.length > 0 && (
+              <div>
+                <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Quick ideas from your blog posts</div>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                  {posts.filter(p=>p.status==="published").slice(0,5).map(post => (
+                    <button key={post.id} onClick={() => setTopic(`Turn blog post into video: "${post.title}"`)}
+                      style={{ padding:"4px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      📄 {post.title?.slice(0,35)}…
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Content type picker */}
+            <div>
+              <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>What do you need?</div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:6 }}>
+                {GEN_TYPES.map(g => (
+                  <button key={g.id} onClick={() => setGenType(g.id)}
+                    style={{ padding:"8px 12px", borderRadius:8, border:`1px solid ${genType===g.id?"var(--amber)":"var(--border)"}`, background:genType===g.id?"var(--amber-glow)":"transparent", color:genType===g.id?"var(--amber)":"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, textAlign:"left", fontWeight:genType===g.id?600:400 }}>
+                    <span>{g.icon}</span>{g.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {error && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{error}</div>}
+
+            <button onClick={generate} disabled={generating || !topic.trim()}
+              style={{ padding:"10px 24px", borderRadius:8, border:"none", background:generating||!topic.trim()?"var(--bg-elevated)":"var(--amber)", color:generating||!topic.trim()?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:generating||!topic.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
+              {generating ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Generating…</> : `🎬 Generate ${GEN_TYPES.find(g=>g.id===genType)?.label}`}
+            </button>
+          </div>
+
+          {/* Generated result */}
+          {genResult && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:20, display:"flex", flexDirection:"column", gap:14 }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                <div>
+                  <div style={{ fontSize:11, fontWeight:700, color:"var(--amber)", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:4 }}>
+                    {activeTab.toUpperCase()} · {GEN_TYPES.find(g=>g.id===genType)?.label}
+                  </div>
+                  <div style={{ fontSize:15, fontWeight:600 }}>{genResult.topic}</div>
+                </div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button onClick={() => navigator.clipboard.writeText(genResult.content)}
+                    style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    ⎘ Copy
+                  </button>
+                  <button onClick={savePlan}
+                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    ✓ Save Plan
+                  </button>
+                  <button onClick={generate}
+                    style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    ↻ Regenerate
+                  </button>
+                </div>
+              </div>
+              <pre style={{ fontSize:13, lineHeight:1.8, color:"var(--text)", whiteSpace:"pre-wrap", fontFamily:"var(--font-body)", background:"var(--bg-elevated)", padding:"16px", borderRadius:8, overflow:"auto", maxHeight:500 }}>
+                {genResult.content}
+              </pre>
+            </div>
+          )}
+
+          {/* Saved plans for this platform */}
+          {plans.filter(p=>p.platform===activeTab).length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>
+                Saved {TABS.find(t=>t.id===activeTab)?.label} Plans ({plans.filter(p=>p.platform===activeTab).length})
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {plans.filter(p=>p.platform===activeTab).slice(0,5).map(plan => (
+                  <div key={plan.id} style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", cursor:"pointer" }}
+                    onClick={() => setSelected(selected?.id===plan.id ? null : plan)}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                      <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:"var(--bg-surface)", color:"var(--text-secondary)", border:"1px solid var(--border)" }}>{GEN_TYPES.find(g=>g.id===plan.type)?.label || plan.type}</span>
+                        <span style={{ fontSize:12, fontWeight:500 }}>{plan.topic}</span>
+                      </div>
+                      <div style={{ display:"flex", gap:6 }}>
+                        <span style={{ fontSize:10, color:"var(--muted)" }}>{new Date(plan.createdAt).toLocaleDateString()}</span>
+                        <button onClick={e=>{ e.stopPropagation(); savePlans(plans.filter(p=>p.id!==plan.id)); }}
+                          style={{ background:"none", border:"none", color:"var(--muted)", cursor:"pointer", fontSize:13, padding:0 }}>✕</button>
+                      </div>
+                    </div>
+                    {selected?.id === plan.id && (
+                      <pre style={{ marginTop:10, fontSize:12, lineHeight:1.7, color:"var(--text-secondary)", whiteSpace:"pre-wrap", fontFamily:"var(--font-body)", maxHeight:300, overflow:"auto" }}>{plan.content}</pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -6450,6 +7946,1586 @@ function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, bt
   );
 }
 
+// ─── ANALYTICS DASHBOARD ─────────────────────────────────────────────────────
+
+function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onConnectMeta, activeProvider, activeModel, apiKeys }) {
+  const [tab, setTab] = useState("overview");
+  const [socialInsights, setSocialInsights] = useState(null);
+  const [loadingInsights, setLoadingInsights] = useState(false);
+  const [insightError, setInsightError] = useState("");
+
+  const TABS = [
+    { id:"overview", label:"Overview",    icon:"◈" },
+    { id:"seo",      label:"SEO",         icon:"◎", highlight:true },
+    { id:"search",   label:"Search Data", icon:"📊" },
+    { id:"connect",  label:"🔌 Fetch Data",icon:"",  highlight: !gscData },
+    { id:"social",   label:"Social",      icon:"▣" },
+    { id:"content",  label:"Content",     icon:"▤" },
+  ];
+
+  // ── FETCH META SOCIAL INSIGHTS ─────────────────────────────────────────────
+  const fetchSocialInsights = async () => {
+    if (!metaConfig?.connected || !metaConfig?.pages?.length) return;
+    setLoadingInsights(true); setInsightError("");
+    try {
+      const page   = metaConfig.pages[0];
+      const token  = page.access_token;
+      const pageId = page.id;
+      const igId   = page.instagram_id;
+      const results = {};
+
+      // Facebook Page insights — use separate calls per metric with correct periods
+      const fbMetrics = [
+        { metric: "page_fans",             period: "lifetime" },
+        { metric: "page_impressions",      period: "week"     },
+        { metric: "page_post_engagements", period: "week"     },
+        { metric: "page_views_total",      period: "week"     },
+      ];
+
+      results.facebook = {};
+      await Promise.all(fbMetrics.map(async ({ metric, period }) => {
+        try {
+          const res  = await fetch(
+            `https://graph.facebook.com/v19.0/${pageId}/insights?metric=${metric}&period=${period}&access_token=${token}`
+          );
+          const data = await res.json();
+          if (!data.error && data.data?.length) {
+            const vals = data.data[0]?.values;
+            results.facebook[metric] = vals?.[vals.length - 1]?.value ?? null;
+          }
+        } catch {}
+      }));
+
+      // Also get page fan count directly (more reliable)
+      try {
+        const fanRes  = await fetch(`https://graph.facebook.com/v19.0/${pageId}?fields=fan_count,followers_count&access_token=${token}`);
+        const fanData = await fanRes.json();
+        if (!fanData.error) {
+          if (fanData.fan_count       != null) results.facebook.page_fans      = fanData.fan_count;
+          if (fanData.followers_count != null) results.facebook.followers_count = fanData.followers_count;
+        }
+      } catch {}
+
+      // Instagram — get follower count from account endpoint, insights from insights
+      if (igId) {
+        results.instagram = {};
+
+        // Follower count from IG account directly
+        try {
+          const igAccRes  = await fetch(`https://graph.facebook.com/v19.0/${igId}?fields=followers_count,media_count,name,username&access_token=${token}`);
+          const igAccData = await igAccRes.json();
+          if (!igAccData.error) {
+            if (igAccData.followers_count != null) results.instagram.follower_count = igAccData.followers_count;
+            if (igAccData.media_count     != null) results.instagram.media_count    = igAccData.media_count;
+          }
+        } catch {}
+
+        // IG insights
+        try {
+          const igRes  = await fetch(
+            `https://graph.facebook.com/v19.0/${igId}/insights?metric=impressions,reach,profile_views&period=week&access_token=${token}`
+          );
+          const igData = await igRes.json();
+          if (!igData.error) {
+            (igData.data || []).forEach(m => {
+              const vals = m.values;
+              results.instagram[m.name] = vals?.[vals.length - 1]?.value ?? null;
+            });
+          }
+        } catch {}
+      }
+
+      // Only set insights if we got some data
+      const hasFBData = Object.values(results.facebook || {}).some(v => v != null);
+      const hasIGData = Object.values(results.instagram || {}).some(v => v != null);
+
+      if (!hasFBData && !hasIGData) {
+        setInsightError("No data returned — your Facebook Page may need 'Insights' permission or have insufficient activity. Make sure you're connected as a Page Admin.");
+      } else {
+        setSocialInsights(results);
+      }
+    } catch(e) { setInsightError(e.message); }
+    setLoadingInsights(false);
+  };
+
+  useEffect(() => {
+    if (tab === "social" && !socialInsights && metaConfig?.connected) {
+      fetchSocialInsights();
+    }
+  }, [tab, metaConfig]);
+
+  // ── DERIVED STATS ──────────────────────────────────────────────────────────
+  const publishedPosts    = posts.filter(p => p.status === "published").length;
+  const draftPosts        = posts.filter(p => p.status === "draft").length;
+  const scheduledPosts    = socialPosts.filter(p => p.status === "scheduled").length;
+  const publishedSocial   = socialPosts.filter(p => p.status === "published").length;
+  const gscClicks         = gscData?.totalClicks || 0;
+  const gscImpressions    = gscData?.totalImpressions || 0;
+  const avgPosition       = gscData?.keywords?.length
+    ? (gscData.keywords.reduce((s,k) => s + k.position, 0) / gscData.keywords.length).toFixed(1)
+    : "—";
+
+  const StatCard = ({ label, value, sub, color = "var(--amber)", icon }) => (
+    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+      <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8, display:"flex", alignItems:"center", gap:6 }}>
+        {icon && <span>{icon}</span>}{label}
+      </div>
+      <div style={{ fontFamily:"var(--font-display)", fontSize:28, fontWeight:700, color }}>{value}</div>
+      {sub && <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:4 }}>{sub}</div>}
+    </div>
+  );
+
+  const ConnectPrompt = ({ icon, title, desc, action, onAction }) => (
+    <div style={{ textAlign:"center", padding:"48px 20px", background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12 }}>
+      <div style={{ fontSize:40, marginBottom:16 }}>{icon}</div>
+      <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, marginBottom:8 }}>{title}</h3>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24, maxWidth:400, margin:"0 auto 24px", lineHeight:1.6 }}>{desc}</p>
+      <button onClick={onAction}
+        style={{ padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+        {action} →
+      </button>
+    </div>
+  );
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, margin:"0 0 4px" }}>Analytics</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Search performance, social reach, and content insights in one place.</p>
+        </div>
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          {gscData && <span style={{ fontSize:11, color:"#5cba6c", padding:"3px 10px", borderRadius:99, background:"#5cba6c11", border:"1px solid #5cba6c33" }}>● GSC Connected</span>}
+          {metaConfig?.connected && <span style={{ fontSize:11, color:"#1877f2", padding:"3px 10px", borderRadius:99, background:"#1877f211", border:"1px solid #1877f233" }}>● Meta Connected</span>}
+        </div>
+      </div>
+
+      {/* Sub-tabs */}
+      <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            style={{ padding:"7px 18px", borderRadius:8, border:tab===t.id?"1px solid var(--amber)":"1px solid var(--border)", background:tab===t.id?"var(--amber-glow)":"transparent", color:tab===t.id?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+            <span>{t.icon}</span>{t.label}
+            {t.highlight && tab!==t.id && <span style={{ fontSize:8, fontWeight:700, padding:"1px 5px", borderRadius:99, background:"var(--amber)", color:"#0e0f11" }}>AI</span>}
+          </button>
+        ))}
+      </div>
+
+      {/* ── FETCH DATA ── */}
+      {tab === "connect" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:0 }}>Fetch Analytics Data</h3>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.7 }}>
+            Fetch fresh data from Google Search Console without going to Settings. You can also configure your GSC connection here.
+          </p>
+          <GSCPanel onDataLoaded={(data) => {
+            // Bubble up to parent — triggers re-render with fresh gscData
+            if (onConnectGSC) onConnectGSC(data);
+          }} />
+        </div>
+      )}
+
+      {/* ── SEO ── */}
+      {tab === "seo" && (
+        <SEODashboard
+          posts={posts}
+          gscData={gscData}
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          onConnectGSC={onConnectGSC}
+        />
+      )}
+
+      {/* ── OVERVIEW ── */}
+      {tab === "overview" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Key numbers */}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12 }}>
+            <StatCard label="Blog Posts Published" value={publishedPosts} sub={`${draftPosts} drafts`} icon="📄" />
+            <StatCard label="GSC Clicks" value={gscClicks.toLocaleString()} sub={gscData ? `Last ${gscData.days} days` : "Connect GSC"} color={gscData?"var(--amber)":"var(--muted)"} icon="◎" />
+            <StatCard label="GSC Impressions" value={gscImpressions.toLocaleString()} sub="Search appearances" color={gscData?"var(--amber)":"var(--muted)"} icon="👁" />
+            <StatCard label="Social Posts" value={publishedSocial} sub={`${scheduledPosts} scheduled`} icon="📸" />
+          </div>
+
+          {/* Quick status of connected sources */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+            {/* GSC quick view */}
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"var(--text)" }}>◎ Search Console</div>
+                {gscData ? (
+                  <button onClick={onConnectGSC} style={{ fontSize:11, color:"var(--amber)", background:"none", border:"none", cursor:"pointer", fontFamily:"var(--font-body)" }}>Refresh ↻</button>
+                ) : (
+                  <button onClick={onConnectGSC} style={{ fontSize:11, color:"var(--amber)", background:"none", border:"none", cursor:"pointer", fontFamily:"var(--font-body)" }}>Connect →</button>
+                )}
+              </div>
+              {gscData ? (
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {gscData.keywords?.slice(0,5).map((k,i) => (
+                    <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:12 }}>
+                      <span style={{ color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"60%" }}>{k.query}</span>
+                      <div style={{ display:"flex", gap:10, flexShrink:0 }}>
+                        <span style={{ fontWeight:700, color:"var(--amber)" }}>{k.clicks}</span>
+                        <span style={{ color:"var(--muted)" }}>#{k.position.toFixed(0)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize:12, color:"var(--muted)", lineHeight:1.6 }}>Connect Google Search Console to see which keywords and pages are driving organic traffic to your blog.</div>
+              )}
+            </div>
+
+            {/* Social quick view */}
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"var(--text)" }}>▣ Social Performance</div>
+                {!metaConfig?.connected && (
+                  <button onClick={onConnectMeta} style={{ fontSize:11, color:"var(--amber)", background:"none", border:"none", cursor:"pointer", fontFamily:"var(--font-body)" }}>Connect →</button>
+                )}
+              </div>
+              {socialPosts.length > 0 ? (
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {socialPosts.filter(p=>p.status==="published").slice(0,4).map((post,i) => {
+                    const caption = Object.values(post.captions||{})[0];
+                    const text = typeof caption === "string" ? caption : caption?.text || "Post";
+                    return (
+                      <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:12 }}>
+                        <span style={{ color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"70%" }}>{text.slice(0,50)}…</span>
+                        <span style={{ fontSize:10, color:"#5cba6c", flexShrink:0, marginLeft:8 }}>✓ Published</span>
+                      </div>
+                    );
+                  })}
+                  {socialPosts.filter(p=>p.status==="published").length === 0 && (
+                    <div style={{ fontSize:12, color:"var(--muted)" }}>No published social posts yet. Use the Marketing → Social Pipeline to create and publish posts.</div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ fontSize:12, color:"var(--muted)", lineHeight:1.6 }}>No social posts yet. Create posts in Marketing → Social Pipeline to track performance here.</div>
+              )}
+            </div>
+          </div>
+
+          {/* Top content */}
+          {posts.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Your Blog Posts</div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))", gap:10 }}>
+                {posts.slice(0,6).map(post => {
+                  const gscPage = gscData?.topPages?.find(p => p.page.includes(post.title?.toLowerCase().replace(/\s+/g,"-")));
+                  return (
+                    <div key={post.id} style={{ padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                      <div style={{ fontSize:12, fontWeight:600, marginBottom:6, lineHeight:1.4 }}>{post.title}</div>
+                      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+                        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-surface)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                        {gscPage && <span style={{ fontSize:11, color:"var(--amber)" }}>◎ {gscPage.clicks} clicks</span>}
+                        <span style={{ fontSize:10, color:"var(--muted)", marginLeft:"auto" }}>{post.date || post.createdAt?.slice(0,10)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── SEARCH (GSC) ── */}
+      {tab === "search" && (
+        <div>
+          {!gscData ? (
+            <ConnectPrompt
+              icon="◎"
+              title="Connect Google Search Console"
+              desc="See which keywords drive traffic to your blog, your average search position, click-through rates, and which posts perform best in Google."
+              action="Connect Search Console"
+              onAction={onConnectGSC}
+            />
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+              {/* Summary */}
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12 }}>
+                <StatCard label="Total Clicks"      value={gscData.totalClicks.toLocaleString()}       sub={`Last ${gscData.days} days`} />
+                <StatCard label="Impressions"        value={gscData.totalImpressions.toLocaleString()} sub="Search appearances" />
+                <StatCard label="Avg CTR"            value={`${(gscData.totalClicks/Math.max(gscData.totalImpressions,1)*100).toFixed(1)}%`} sub="Click-through rate" color="#5cba6c" />
+                <StatCard label="Avg Position"       value={avgPosition} sub="Google rank" color="#7c3aed" />
+              </div>
+
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+                {/* Top Keywords */}
+                <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                  <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Top Keywords</div>
+                  <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                    <thead>
+                      <tr style={{ borderBottom:"1px solid var(--border)" }}>
+                        {["Query","Clicks","Impr.","Pos.","CTR"].map(h=>(
+                          <th key={h} style={{ textAlign:"left", padding:"6px 8px", fontSize:9, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {gscData.keywords.slice(0,15).map((k,i) => (
+                        <tr key={i} style={{ borderBottom:"1px solid var(--border)11" }}>
+                          <td style={{ padding:"7px 8px", fontSize:12 }}>{k.query}</td>
+                          <td style={{ padding:"7px 8px", fontSize:12, fontWeight:700, color:"var(--amber)" }}>{k.clicks}</td>
+                          <td style={{ padding:"7px 8px", fontSize:11, color:"var(--text-secondary)" }}>{k.impressions}</td>
+                          <td style={{ padding:"7px 8px", fontSize:11, color:"var(--text-secondary)" }}>#{k.position.toFixed(1)}</td>
+                          <td style={{ padding:"7px 8px", fontSize:11, color:"#5cba6c" }}>{k.impressions>0?(k.clicks/k.impressions*100).toFixed(1):0}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Top Pages */}
+                <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                  <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>Top Pages by Clicks</div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                    {gscData.topPages.slice(0,10).map((p,i) => {
+                      const slug = p.page.replace(/https?:\/\/[^/]+/, "").replace(/\/$/, "") || "/";
+                      const max  = gscData.topPages[0]?.clicks || 1;
+                      return (
+                        <div key={i}>
+                          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                            <span style={{ fontSize:11, color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"75%" }} title={p.page}>{slug}</span>
+                            <div style={{ flexShrink:0, marginLeft:8, display:"flex", gap:10 }}>
+                              <span style={{ fontSize:12, fontWeight:700, color:"var(--amber)" }}>{p.clicks}</span>
+                              {p.impressions && <span style={{ fontSize:11, color:"var(--muted)" }}>{p.impressions} impr</span>}
+                            </div>
+                          </div>
+                          <div style={{ height:4, borderRadius:99, background:"var(--bg-elevated)" }}>
+                            <div style={{ height:"100%", width:`${(p.clicks/max)*100}%`, background:"var(--amber)", borderRadius:99 }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ fontSize:11, color:"var(--muted)", padding:"8px 0", display:"flex", justifyContent:"space-between" }}>
+                <span>Data from Google Search Console · Last {gscData.days} days · Fetched {new Date(gscData.fetchedAt).toLocaleString()}</span>
+                <button onClick={onConnectGSC} style={{ background:"none", border:"none", cursor:"pointer", color:"var(--amber)", fontSize:11, fontFamily:"var(--font-body)" }}>↻ Refresh</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── SOCIAL ── */}
+      {tab === "social" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {!metaConfig?.connected ? (
+            <ConnectPrompt
+              icon="📊"
+              title="Connect Facebook & Instagram"
+              desc="See your page impressions, engagement, follower growth, and which posts performed best — pulled directly from Meta's API."
+              action="Connect Facebook & Instagram"
+              onAction={onConnectMeta}
+            />
+          ) : (
+            <>
+              {/* Refresh button */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <div>
+                  <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>Social Analytics</h3>
+                  <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Last 28 days · pulled from Meta API</p>
+                </div>
+                <button onClick={fetchSocialInsights} disabled={loadingInsights}
+                  style={{ padding:"8px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                  {loadingInsights ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Loading…</> : "↻ Refresh"}
+                </button>
+              </div>
+
+              {insightError && (
+                <div style={{ padding:"12px 16px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>
+                  {insightError}
+                </div>
+              )}
+
+              {loadingInsights && (
+                <div style={{ textAlign:"center", padding:40, color:"var(--muted)", fontSize:13 }}>
+                  <span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:8 }}>◌</span>
+                  Fetching insights from Meta…
+                </div>
+              )}
+
+              {socialInsights && (
+                <>
+                  {/* Platform overview cards */}
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+                    {socialInsights.facebook && (
+                      <div style={{ background:"var(--bg-surface)", border:"1px solid #1877f233", borderRadius:12, padding:20 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:"#1877f2", marginBottom:14, display:"flex", alignItems:"center", gap:6 }}>
+                          👍 Facebook Page
+                        </div>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                          {[
+                            { key:"page_fans",             label:"Fans",         icon:"❤" },
+                            { key:"page_impressions",      label:"Impressions",   icon:"👁" },
+                            { key:"page_post_engagements", label:"Engagements",   icon:"💬" },
+                            { key:"page_views_total",      label:"Page Views",    icon:"🔗" },
+                          ].map(({ key, label, icon }) => socialInsights.facebook[key] != null && (
+                            <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                              <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:3 }}>{icon} {label}</div>
+                              <div style={{ fontSize:22, fontWeight:700, color:"#1877f2" }}>{socialInsights.facebook[key]?.toLocaleString()}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {socialInsights.instagram && (
+                      <div style={{ background:"var(--bg-surface)", border:"1px solid #e1306c33", borderRadius:12, padding:20 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:"#e1306c", marginBottom:14, display:"flex", alignItems:"center", gap:6 }}>
+                          📸 Instagram
+                        </div>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                          {[
+                            { key:"follower_count", label:"Followers",     icon:"👤" },
+                            { key:"impressions",    label:"Impressions",   icon:"👁" },
+                            { key:"reach",          label:"Reach",         icon:"📡" },
+                            { key:"profile_views",  label:"Profile Views", icon:"🔗" },
+                          ].map(({ key, label, icon }) => socialInsights.instagram[key] != null && (
+                            <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                              <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:3 }}>{icon} {label}</div>
+                              <div style={{ fontSize:22, fontWeight:700, color:"#e1306c" }}>{socialInsights.instagram[key]?.toLocaleString()}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Engagement rate */}
+                  {socialInsights.facebook && (
+                    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                      <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📈 Engagement Breakdown</div>
+                      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))", gap:10 }}>
+                        {[
+                          { key:"page_actions_post_reactions_like_total", label:"Likes",    color:"#1877f2" },
+                          { key:"page_actions_post_reactions_love_total", label:"Love",     color:"#e05555" },
+                          { key:"page_posts_impressions",                 label:"Post Reach",color:"#5cba6c" },
+                          { key:"page_fans_online_per_day",               label:"Online Now",color:"var(--amber)" },
+                        ].filter(m => socialInsights.facebook[m.key] != null).map(m => (
+                          <div key={m.key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", textAlign:"center" }}>
+                            <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>{m.label}</div>
+                            <div style={{ fontSize:18, fontWeight:700, color:m.color }}>{socialInsights.facebook[m.key]?.toLocaleString?.() ?? socialInsights.facebook[m.key]}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {!loadingInsights && !socialInsights && !insightError && (
+                <div style={{ textAlign:"center", padding:40 }}>
+                  <div style={{ fontSize:32, marginBottom:12 }}>📊</div>
+                  <p style={{ fontSize:13, color:"var(--muted)", marginBottom:20 }}>Pull live data from your Facebook and Instagram accounts.</p>
+                  <button onClick={fetchSocialInsights}
+                    style={{ padding:"10px 28px", borderRadius:8, border:"none", background:"#1877f2", color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    Load Social Analytics
+                  </button>
+                </div>
+              )}
+
+              {/* Published posts with engagement */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>
+                  Published Social Posts ({socialPosts.filter(p=>p.status==="published").length})
+                </div>
+                {socialPosts.filter(p=>p.status==="published").length === 0 ? (
+                  <div style={{ fontSize:13, color:"var(--muted)", textAlign:"center", padding:20 }}>No published posts yet.</div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                    {socialPosts.filter(p=>p.status==="published").slice(0,10).map((post,i) => {
+                      const caption = Object.values(post.captions||{})[0];
+                      const text = typeof caption === "string" ? caption : caption?.text || "";
+                      return (
+                        <div key={i} style={{ display:"flex", gap:12, alignItems:"flex-start", padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                          {post.imageUrl && <img src={post.imageUrl} alt="" style={{ width:52, height:52, borderRadius:6, objectFit:"cover", flexShrink:0 }} />}
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:12, color:"var(--text)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginBottom:4 }}>{text.slice(0,100)}</div>
+                            <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+                              {post.platforms?.map(p => {
+                                const platCfg = SOCIAL_PLATFORMS.find(sp => sp.id === p);
+                                return platCfg ? <span key={p} style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:platCfg.color+"15", color:platCfg.color, border:`1px solid ${platCfg.color}33` }}>{platCfg.icon} {platCfg.name}</span> : null;
+                              })}
+                              <span style={{ fontSize:10, color:"var(--muted)", marginLeft:"auto" }}>
+                                {post.publishedAt ? new Date(post.publishedAt).toLocaleDateString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}) : ""}
+                              </span>
+                              {post.results && Object.values(post.results).some(r=>r.success) && (
+                                <span style={{ fontSize:10, color:"#5cba6c", fontWeight:600 }}>✓ Published</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── CONTENT ── */}
+      {tab === "content" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Blog post performance */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:16 }}>Blog Post Performance</div>
+            {posts.length === 0 ? (
+              <div style={{ fontSize:13, color:"var(--muted)" }}>No posts yet — create your first post in the Pipeline.</div>
+            ) : (
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom:"1px solid var(--border)" }}>
+                    {["Title","Status","Date","GSC Clicks","GSC Position"].map(h=>(
+                      <th key={h} style={{ textAlign:"left", padding:"8px 10px", fontSize:9, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {posts.map((post,i) => {
+                    const slug = post.title?.toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9-]/g,"");
+                    const gscPage = gscData?.topPages?.find(p => p.page.includes(slug));
+                    const gscKw   = gscData?.keywords?.filter(k => k.query.includes(post.title?.split(" ")[0]?.toLowerCase() || ""))[0];
+                    return (
+                      <tr key={post.id} style={{ borderBottom:"1px solid var(--border)11" }}>
+                        <td style={{ padding:"10px 10px", fontSize:12, fontWeight:500, maxWidth:240, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{post.title}</td>
+                        <td style={{ padding:"10px 10px" }}>
+                          <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-elevated)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                        </td>
+                        <td style={{ padding:"10px 10px", fontSize:11, color:"var(--text-secondary)" }}>{post.date || post.createdAt?.slice(0,10) || "—"}</td>
+                        <td style={{ padding:"10px 10px", fontSize:12, fontWeight:700, color:gscPage?"var(--amber)":"var(--muted)" }}>{gscPage ? gscPage.clicks : "—"}</td>
+                        <td style={{ padding:"10px 10px", fontSize:12, color:gscKw?"#7c3aed":"var(--muted)" }}>{gscKw ? `#${gscKw.position.toFixed(0)}` : "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Content gap — posts without GSC data */}
+          {gscData && posts.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Ranking Keywords Without Posts</div>
+              <p style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:14, lineHeight:1.6 }}>
+                These keywords are already sending you traffic but you don't have dedicated posts for them yet — quick wins for new content.
+              </p>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                {gscData.keywords
+                  .filter(k => k.clicks > 0 && k.position < 20)
+                  .filter(k => !posts.some(p => p.title?.toLowerCase().includes(k.query.split(" ")[0]?.toLowerCase())))
+                  .slice(0, 8)
+                  .map((k,i) => (
+                    <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 12px", borderRadius:7, background:"var(--bg-elevated)" }}>
+                      <span style={{ fontSize:12 }}>{k.query}</span>
+                      <div style={{ display:"flex", gap:12, flexShrink:0 }}>
+                        <span style={{ fontSize:11, color:"var(--amber)", fontWeight:700 }}>{k.clicks} clicks</span>
+                        <span style={{ fontSize:11, color:"#7c3aed" }}>#{k.position.toFixed(0)}</span>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SEO DASHBOARD ───────────────────────────────────────────────────────────
+
+function SEODashboard({ posts, gscData, activeProvider, activeModel, apiKeys, onConnectGSC }) {
+  const [analysis,     setAnalysis]     = useState(null);
+  const [loading,      setLoading]      = useState(false);
+  const [loadMsg,      setLoadMsg]      = useState("");
+  const [error,        setError]        = useState("");
+  const [activeCard,   setActiveCard]   = useState(null);
+  const [postAnalysis, setPostAnalysis] = useState({});
+  const [analyzingPost,setAnalyzingPost]= useState(null);
+  const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
+
+  // ── DERIVE OPPORTUNITIES FROM GSC DATA ─────────────────────────────────────
+  const opportunities = gscData ? (() => {
+    const kws = gscData.keywords || [];
+
+    // Low-hanging fruit: ranking 5-20, decent impressions
+    const lowHanging = kws
+      .filter(k => k.position >= 4 && k.position <= 20 && k.impressions >= 10)
+      .sort((a,b) => (a.position - b.position))
+      .slice(0, 8);
+
+    // High impressions, low CTR (title needs work)
+    const lowCTR = kws
+      .filter(k => k.impressions >= 20 && (k.clicks / k.impressions) < 0.03 && k.position <= 15)
+      .sort((a,b) => b.impressions - a.impressions)
+      .slice(0, 6);
+
+    // Already ranking well (top 5)
+    const winning = kws
+      .filter(k => k.position < 5 && k.clicks > 0)
+      .sort((a,b) => b.clicks - a.clicks)
+      .slice(0, 6);
+
+    // Keywords with zero clicks despite impressions
+    const noClicks = kws
+      .filter(k => k.clicks === 0 && k.impressions >= 15 && k.position <= 20)
+      .sort((a,b) => b.impressions - a.impressions)
+      .slice(0, 6);
+
+    return { lowHanging, lowCTR, winning, noClicks };
+  })() : null;
+
+  // ── AI FULL-SITE ANALYSIS ──────────────────────────────────────────────────
+  const runFullAnalysis = async () => {
+    setLoading(true); setError(""); setLoadMsg("Analyzing your site…");
+    try {
+      const postTitles   = posts.map(p => p.title).join(", ");
+      const topKeywords  = (gscData?.keywords || []).slice(0, 15).map(k => `"${k.query}" (pos ${k.position.toFixed(0)}, ${k.clicks} clicks, ${k.impressions} impr)`).join("; ");
+      const topPages     = (gscData?.topPages || []).slice(0, 8).map(p => `${p.page} (${p.clicks} clicks)`).join("; ");
+      const totalClicks  = gscData?.totalClicks || 0;
+      const totalImpr    = gscData?.totalImpressions || 0;
+      const avgCTR       = totalImpr > 0 ? (totalClicks / totalImpr * 100).toFixed(1) : 0;
+
+      const text = await callAI(activeProvider, activeModel,
+        `You are an expert SEO consultant specializing in niche lifestyle blogs. Be specific, actionable, and honest. Return ONLY valid JSON (no fences):
+{
+  "health_score": 0-100,
+  "health_label": "one word: Excellent/Good/Fair/Needs Work",
+  "summary": "2-3 sentence overall assessment",
+  "quick_wins": [{"action":"specific action","impact":"High/Medium/Low","effort":"Easy/Medium/Hard","detail":"why this works"}],
+  "title_rewrites": [{"current":"...","suggested":"...","reason":"..."}],
+  "content_gaps": [{"topic":"...","why":"...","angle":"..."}],
+  "technical_tips": ["tip1","tip2","tip3"],
+  "biggest_opportunity": "single most impactful thing to do right now in 1-2 sentences"
+}
+quick_wins = 5 items. title_rewrites = 3 items using actual post titles provided. content_gaps = 4 items.`,
+        `Site: caskandstream.com — fly fishing and whiskey lifestyle blog.
+Published posts: ${postTitles || "none yet"}
+Top keywords: ${topKeywords || "no GSC data yet"}
+Top pages: ${topPages || "no data"}
+Total clicks (28 days): ${totalClicks}
+Total impressions: ${totalImpr}
+Avg CTR: ${avgCTR}%
+Site age: relatively new, building domain authority`,
+        apiKeys[activeProvider],
+        2000
+      );
+
+      setLoadMsg("Parsing recommendations…");
+      setAnalysis(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── AI PER-POST ANALYSIS ───────────────────────────────────────────────────
+  const analyzePost = async (post) => {
+    setAnalyzingPost(post.id);
+    try {
+      const gscKw = (gscData?.keywords || []).filter(k =>
+        k.query.includes(post.title?.split(" ")[0]?.toLowerCase() || "")
+      ).slice(0, 3);
+      const gscPage = (gscData?.topPages || []).find(p =>
+        p.page.includes(post.title?.toLowerCase().replace(/\s+/g, "-") || "")
+      );
+
+      const text = await callAI(activeProvider, activeModel,
+        `You are an SEO expert. Analyze this blog post and give specific, actionable recommendations. Return ONLY valid JSON (no fences):
+{
+  "seo_score": 0-100,
+  "title_score": 0-100,
+  "title_feedback": "specific feedback on the title for SEO",
+  "suggested_title": "improved SEO title under 60 chars",
+  "meta_description": "suggested meta description 150-160 chars with primary keyword",
+  "primary_keyword": "best target keyword for this post",
+  "secondary_keywords": ["kw1","kw2","kw3"],
+  "improvements": ["specific improvement 1","specific improvement 2","specific improvement 3"],
+  "internal_links": ["suggest a topic to link to from this post","another link opportunity"],
+  "verdict": "one sentence on the post's SEO potential"
+}`,
+        `Blog: caskandstream.com (fly fishing and whiskey lifestyle)
+Post title: "${post.title}"
+Post status: ${post.status}
+GSC data for this post: ${gscKw.length ? JSON.stringify(gscKw) : "no data yet"}
+Page clicks: ${gscPage?.clicks || 0}`,
+        apiKeys[activeProvider],
+        1000
+      );
+      const result = parseAIJson(text);
+      setPostAnalysis(prev => ({ ...prev, [post.id]: result }));
+    } catch(e) { console.error(e); }
+    setAnalyzingPost(null);
+  };
+
+  const scoreColor = (s) => s >= 80 ? "#5cba6c" : s >= 60 ? "var(--amber)" : "var(--red)";
+  const impactColor = { High:"#5cba6c", Medium:"var(--amber)", Low:"var(--text-secondary)" };
+  const effortColor = { Easy:"#5cba6c", Medium:"var(--amber)", Hard:"var(--red)" };
+
+  if (!gscData) return (
+    <div style={{ textAlign:"center", padding:"60px 20px", background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12 }}>
+      <div style={{ fontSize:40, marginBottom:16 }}>◎</div>
+      <h3 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, marginBottom:8 }}>SEO Analysis Requires Search Console</h3>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24, maxWidth:400, margin:"0 auto 24px", lineHeight:1.7 }}>
+        Connect Google Search Console to unlock AI-powered SEO recommendations, keyword opportunities, and content gap analysis.
+      </p>
+      <button onClick={onConnectGSC}
+        style={{ padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+        Connect Search Console →
+      </button>
+    </div>
+  );
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div>
+          <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>SEO Dashboard</h2>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>AI-powered recommendations to grow organic traffic on caskandstream.com</p>
+        </div>
+        <button onClick={runFullAnalysis} disabled={loading}
+          style={{ padding:"9px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+          {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Run Full SEO Analysis`}
+        </button>
+      </div>
+
+      {error && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>{error}</div>}
+
+      {/* ── AI ANALYSIS RESULTS ── */}
+      {analysis && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          {/* Health score + summary */}
+          <div style={{ background:"var(--bg-surface)", border:`1px solid ${scoreColor(analysis.health_score)}44`, borderRadius:12, padding:24, display:"grid", gridTemplateColumns:"140px 1fr", gap:24, alignItems:"center" }}>
+            <div style={{ textAlign:"center" }}>
+              <div style={{ fontSize:56, fontWeight:900, fontFamily:"var(--font-display)", color:scoreColor(analysis.health_score) }}>{analysis.health_score}</div>
+              <div style={{ fontSize:12, fontWeight:700, color:scoreColor(analysis.health_score), textTransform:"uppercase", letterSpacing:"0.08em" }}>{analysis.health_label}</div>
+              <div style={{ fontSize:10, color:"var(--muted)", marginTop:4 }}>SEO Health Score</div>
+            </div>
+            <div>
+              <div style={{ fontSize:15, lineHeight:1.7, color:"var(--text)", marginBottom:12 }}>{analysis.summary}</div>
+              <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)44", fontSize:13, fontWeight:500, color:"var(--amber)", lineHeight:1.6 }}>
+                ⚡ Biggest opportunity: {analysis.biggest_opportunity}
+              </div>
+            </div>
+          </div>
+
+          {/* Quick wins */}
+          <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>⚡ Quick Wins</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+              {analysis.quick_wins?.map((w, i) => (
+                <div key={i} style={{ padding:"12px 16px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", display:"flex", gap:16, alignItems:"flex-start" }}>
+                  <div style={{ flexShrink:0, width:24, height:24, borderRadius:6, background:"var(--amber-glow)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"var(--amber)" }}>{i+1}</div>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontWeight:600, fontSize:13, marginBottom:4 }}>{w.action}</div>
+                    <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.5 }}>{w.detail}</div>
+                  </div>
+                  <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                    <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:impactColor[w.impact]+"15", color:impactColor[w.impact], border:`1px solid ${impactColor[w.impact]}33`, fontWeight:600 }}>{w.impact} impact</span>
+                    <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:effortColor[w.effort]+"15", color:effortColor[w.effort], border:`1px solid ${effortColor[w.effort]}33` }}>{w.effort}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+            {/* Title rewrites */}
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>✏ Title Rewrites</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                {analysis.title_rewrites?.map((t, i) => (
+                  <div key={i} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                    <div style={{ fontSize:11, color:"var(--red)", marginBottom:4, textDecoration:"line-through", opacity:0.7 }}>{t.current}</div>
+                    <div style={{ fontSize:12, fontWeight:600, color:"#5cba6c", marginBottom:4 }}>→ {t.suggested}</div>
+                    <div style={{ fontSize:11, color:"var(--muted)" }}>{t.reason}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Content gaps */}
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📝 Content Gaps</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                {analysis.content_gaps?.map((g, i) => (
+                  <div key={i} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                    <div style={{ fontSize:12, fontWeight:600, marginBottom:3 }}>{g.topic}</div>
+                    <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>{g.why}</div>
+                    <div style={{ fontSize:11, color:"var(--amber)" }}>Angle: {g.angle}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Technical tips */}
+          {analysis.technical_tips?.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>⚙ Technical Tips</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                {analysis.technical_tips.map((t, i) => (
+                  <div key={i} style={{ display:"flex", gap:10, padding:"6px 0", borderBottom:"1px solid var(--border)11", fontSize:12, color:"var(--text-secondary)" }}>
+                    <span style={{ color:"var(--amber)", flexShrink:0 }}>→</span>{t}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── KEYWORD OPPORTUNITIES (always shown if GSC connected) ── */}
+      {opportunities && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Keyword Opportunities</h3>
+
+          {/* Low-hanging fruit */}
+          {opportunities.lowHanging.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c33", borderRadius:12, padding:20 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c" }}>🎯 Low-Hanging Fruit</div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)" }}>— Ranking positions 5-20, one good update away from page 1</div>
+              </div>
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom:"1px solid var(--border)" }}>
+                    {["Keyword","Position","Impressions","Clicks","Action"].map(h => (
+                      <th key={h} style={{ textAlign:"left", padding:"6px 8px", fontSize:9, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {opportunities.lowHanging.map((k, i) => (
+                    <tr key={i} style={{ borderBottom:"1px solid var(--border)11" }}>
+                      <td style={{ padding:"8px 8px", fontSize:12 }}>{k.query}</td>
+                      <td style={{ padding:"8px 8px", fontSize:13, fontWeight:700, color:"var(--amber)" }}>#{k.position.toFixed(0)}</td>
+                      <td style={{ padding:"8px 8px", fontSize:12, color:"var(--text-secondary)" }}>{k.impressions}</td>
+                      <td style={{ padding:"8px 8px", fontSize:12 }}>{k.clicks}</td>
+                      <td style={{ padding:"8px 8px", fontSize:11, color:"#5cba6c" }}>Update &amp; expand post</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Low CTR */}
+          {opportunities.lowCTR.length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)33", borderRadius:12, padding:20 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)" }}>✏ Low Click-Through Rate</div>
+                <div style={{ fontSize:11, color:"var(--text-secondary)" }}>— Appearing in search but not getting clicks. Rewrite the title/description.</div>
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {opportunities.lowCTR.map((k, i) => (
+                  <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 10px", borderRadius:7, background:"var(--bg-elevated)" }}>
+                    <span style={{ fontSize:12 }}>{k.query}</span>
+                    <div style={{ display:"flex", gap:12, flexShrink:0 }}>
+                      <span style={{ fontSize:11, color:"var(--text-secondary)" }}>{k.impressions} impr</span>
+                      <span style={{ fontSize:11, fontWeight:700, color:"var(--red)" }}>{(k.clicks/k.impressions*100).toFixed(1)}% CTR</span>
+                      <span style={{ fontSize:11, color:"var(--muted)" }}>#{k.position.toFixed(0)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+            {/* Winning keywords */}
+            {opportunities.winning.length > 0 && (
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>✓ Already Winning</div>
+                {opportunities.winning.map((k, i) => (
+                  <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:"1px solid var(--border)11", fontSize:12 }}>
+                    <span style={{ color:"var(--text-secondary)" }}>{k.query}</span>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <span style={{ fontWeight:700, color:"#5cba6c" }}>#{k.position.toFixed(0)}</span>
+                      <span style={{ color:"var(--muted)" }}>{k.clicks} clicks</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Zero clicks */}
+            {opportunities.noClicks.length > 0 && (
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--red)", marginBottom:10 }}>⚠ Impressions, Zero Clicks</div>
+                {opportunities.noClicks.map((k, i) => (
+                  <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:"1px solid var(--border)11", fontSize:12 }}>
+                    <span style={{ color:"var(--text-secondary)" }}>{k.query}</span>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <span style={{ color:"var(--amber)" }}>{k.impressions} impr</span>
+                      <span style={{ color:"var(--muted)" }}>#{k.position.toFixed(0)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── PER-POST SEO ANALYSIS ── */}
+      {posts.length > 0 && (
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📄 Post-by-Post SEO Analysis</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            {posts.map(post => {
+              const pa = postAnalysis[post.id];
+              return (
+                <div key={post.id} style={{ borderRadius:8, border:"1px solid var(--border)", overflow:"hidden" }}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"12px 14px", background:"var(--bg-elevated)", cursor:"pointer" }}
+                    onClick={() => setActiveCard(activeCard===post.id ? null : post.id)}>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:13, fontWeight:600, marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{post.title}</div>
+                      <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                        <span style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-surface)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                        {pa && <span style={{ fontSize:11, color:scoreColor(pa.seo_score), fontWeight:700 }}>SEO: {pa.seo_score}/100</span>}
+                      </div>
+                    </div>
+                    <div style={{ display:"flex", gap:8, alignItems:"center", flexShrink:0, marginLeft:12 }}>
+                      {!pa && (
+                        <button onClick={e=>{ e.stopPropagation(); analyzePost(post); }} disabled={analyzingPost===post.id}
+                          style={{ padding:"5px 12px", borderRadius:7, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:5 }}>
+                          {analyzingPost===post.id ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Analyzing…</> : `${provider.logo} Analyze`}
+                        </button>
+                      )}
+                      <span style={{ fontSize:14, color:"var(--muted)" }}>{activeCard===post.id?"▲":"▼"}</span>
+                    </div>
+                  </div>
+
+                  {activeCard === post.id && pa && (
+                    <div style={{ padding:"16px 14px", display:"flex", flexDirection:"column", gap:12, borderTop:"1px solid var(--border)" }}>
+                      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:10 }}>
+                        {[
+                          { label:"SEO Score",   value:`${pa.seo_score}/100`,  color:scoreColor(pa.seo_score) },
+                          { label:"Title Score", value:`${pa.title_score}/100`, color:scoreColor(pa.title_score) },
+                          { label:"Target Keyword", value:pa.primary_keyword,   color:"var(--amber)" },
+                        ].map(s => (
+                          <div key={s.label} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", textAlign:"center" }}>
+                            <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>{s.label}</div>
+                            <div style={{ fontSize:16, fontWeight:700, color:s.color }}>{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--amber)22" }}>
+                        <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Title Feedback</div>
+                        <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:6 }}>{pa.title_feedback}</div>
+                        <div style={{ fontSize:12, fontWeight:600, color:"#5cba6c" }}>→ {pa.suggested_title}</div>
+                      </div>
+
+                      <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)" }}>
+                        <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Meta Description</div>
+                        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{pa.meta_description}</div>
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Improvements</div>
+                        {pa.improvements?.map((imp, i) => (
+                          <div key={i} style={{ fontSize:12, padding:"5px 0", borderBottom:"1px solid var(--border)11", color:"var(--text-secondary)", display:"flex", gap:8 }}>
+                            <span style={{ color:"var(--amber)", flexShrink:0 }}>→</span>{imp}
+                          </div>
+                        ))}
+                      </div>
+
+                      <div style={{ fontSize:11, fontStyle:"italic", color:"var(--amber)", lineHeight:1.6, padding:"8px 12px", borderRadius:7, background:"var(--amber-glow)" }}>
+                        {pa.verdict}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {!analysis && !opportunities?.lowHanging?.length && !opportunities?.lowCTR?.length && (
+        <div style={{ textAlign:"center", padding:"48px 20px", color:"var(--muted)", fontSize:13 }}>
+          <p style={{ marginBottom:16 }}>Click <strong style={{color:"var(--text)"}}>Run Full SEO Analysis</strong> above to get AI-powered recommendations for your site.</p>
+          <p>Or analyze individual posts using the <strong style={{color:"var(--text)"}}>Analyze</strong> button on each post below.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── MOBILE RESPONSIVE ───────────────────────────────────────────────────────
+
+function useIsMobile() {
+  const [mobile, setMobile] = useState(() => window.innerWidth < 768);
+  useEffect(() => {
+    const handler = () => setMobile(window.innerWidth < 768);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
+  return mobile;
+}
+
+const MOBILE_CSS = `
+  /* ── RESPONSIVE GRID OVERRIDES ── */
+  @media (max-width: 767px) {
+    /* Collapse all multi-column grids to 1 or 2 cols */
+    [style*="repeat(4,1fr)"], [style*="repeat(3,1fr)"],
+    [style*="repeat(4, 1fr)"], [style*="repeat(3, 1fr)"] {
+      grid-template-columns: 1fr 1fr !important;
+    }
+    /* Two-column grids that are too tight */
+    [style*="gridTemplateColumns:\"1fr 1fr\""],
+    [style*="grid-template-columns: 1fr 1fr"] {
+      grid-template-columns: 1fr !important;
+    }
+    /* Horizontal tab bars — allow wrap */
+    [style*="display:\"flex\""][style*="gap:4"] {
+      flex-wrap: wrap;
+    }
+    /* Rich text editor min height */
+    .ProseMirror { min-height: 200px !important; }
+    /* Stage progress text smaller */
+    .stage-label { font-size: 9px !important; }
+  }
+
+  /* ── MOBILE NAV BAR (bottom) ── */
+  .bb-mobile-nav {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    z-index: 900;
+    background: var(--sidebar-bg);
+    border-top: 1px solid var(--border);
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-around;
+    padding: 0 4px;
+  }
+  .bb-mobile-nav button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 6px 8px;
+    border-radius: 8px;
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+  .bb-mobile-nav button.active {
+    background: var(--amber-glow);
+  }
+  .bb-mobile-nav .nav-icon { font-size: 18px; }
+  .bb-mobile-nav .nav-label { font-size: 9px; font-weight: 600; color: var(--text-secondary); letter-spacing: 0.04em; }
+  .bb-mobile-nav button.active .nav-label { color: var(--amber); }
+
+  @media (max-width: 767px) {
+    .bb-mobile-nav { display: flex; }
+    .bb-sidebar { display: none !important; }
+    .bb-main-content { padding: 16px 14px 72px !important; }
+    .bb-root { flex-direction: column !important; }
+  }
+`;
+
+// ─── BUFFER SETTINGS ─────────────────────────────────────────────────────────
+
+const BUFFER_STORAGE = "bb_buffer_config";
+function loadBufferConfig() { try { return JSON.parse(localStorage.getItem(BUFFER_STORAGE) || "{}"); } catch { return {}; } }
+function saveBufferConfig(d) {
+  try { localStorage.setItem(BUFFER_STORAGE, JSON.stringify(d)); } catch {}
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("buffer_config", uid, d);
+}
+
+function BufferSettings() {
+  const [config,   setConfig]   = useState(loadBufferConfig);
+  const [apiKey,   setApiKey]   = useState(() => loadBufferConfig().apiKey || "");
+  const [channels, setChannels] = useState(() => loadBufferConfig().channels || []);
+  const [loading,  setLoading]  = useState(false);
+  const [saved,    setSaved]    = useState(false);
+  const [error,    setError]    = useState("");
+  const [mapping,  setMapping]  = useState(() => loadBufferConfig().mapping || {});
+
+  const PLATFORM_NAMES = {
+    twitter: "X (Twitter)", tiktok: "TikTok", pinterest: "Pinterest",
+    reddit: "Reddit", instagram: "Instagram", facebook: "Facebook",
+    threads: "Threads", bluesky: "Bluesky", youtube: "YouTube", linkedin: "LinkedIn",
+  };
+
+  const [orgId,    setOrgId]    = useState(() => loadBufferConfig().orgId || "");
+  const [account,  setAccount]  = useState(() => loadBufferConfig().account || null);
+
+  const loadChannels = async () => {
+    if (!apiKey.trim()) { setError("Enter your Buffer API key first"); return; }
+    setLoading(true); setError("");
+    try {
+      const res  = await fetch("/api/buffer-post", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ apiKey: apiKey.trim(), action: "getChannels" }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setChannels(data.channels || []);
+      setOrgId(data.orgId || "");
+      setAccount(data.account || null);
+      if ((data.channels||[]).length === 0) setError("No channels found — connect social accounts in Buffer first.");
+    } catch(e) { setError(e.message); }
+    setLoading(false);
+  };
+
+  const save = () => {
+    const cfg = { apiKey: apiKey.trim(), channels, mapping, orgId, account, connected: !!apiKey.trim() && channels.length > 0 };
+    saveBufferConfig(cfg);
+    setConfig(cfg);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+  const SERVICE_ICONS = { twitter:"🐦", tiktok:"🎵", pinterest:"📌", instagram:"📸", facebook:"👍", threads:"🧵", bluesky:"🦋", youtube:"▶", linkedin:"💼", reddit:"🤖", googlebusiness:"📍" };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+        <span style={{ fontSize:28 }}>🟦</span>
+        <div>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>Buffer — Extended Reach</h3>
+          <div style={{ fontSize:11, color: config.connected ? "#5cba6c" : "var(--muted)", fontWeight: config.connected ? 600 : 400 }}>
+            {config.connected ? `● Connected · ${channels.length} channels` : "○ Optional · not connected"}
+          </div>
+        </div>
+      </div>
+
+      {/* Optional framing banner */}
+      <div style={{ background:"var(--amber-glow)", border:"1px solid var(--amber)44", borderRadius:10, padding:16 }}>
+        <div style={{ fontSize:13, fontWeight:700, color:"var(--amber)", marginBottom:6 }}>
+          📸 Facebook & Instagram already work without Buffer
+        </div>
+        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
+          Blog Bunker posts directly to Facebook and Instagram through your existing connection in <strong style={{color:"var(--text)"}}>Settings → Facebook & Instagram</strong>. Buffer is an optional add-on that unlocks posting to <strong style={{color:"var(--text)"}}>X, TikTok, Pinterest, Reddit, Threads, Bluesky, YouTube, and LinkedIn</strong> — all through one connection.
+        </div>
+      </div>
+
+      {/* Platform coverage */}
+      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+          What each connection covers
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+          <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-surface)", border:"1px solid #5cba6c33" }}>
+            <div style={{ fontSize:11, fontWeight:700, color:"#5cba6c", marginBottom:6 }}>✓ Built-in (no Buffer needed)</div>
+            <div style={{ fontSize:12, color:"var(--text-secondary)", display:"flex", flexDirection:"column", gap:3 }}>
+              <span>📸 Instagram</span>
+              <span>👍 Facebook</span>
+            </div>
+          </div>
+          <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-surface)", border:"1px solid var(--amber)33" }}>
+            <div style={{ fontSize:11, fontWeight:700, color:"var(--amber)", marginBottom:6 }}>+ Unlocked with Buffer</div>
+            <div style={{ fontSize:12, color:"var(--text-secondary)", display:"grid", gridTemplateColumns:"1fr 1fr", gap:3 }}>
+              <span>🐦 X (Twitter)</span>
+              <span>🎵 TikTok</span>
+              <span>📌 Pinterest</span>
+              <span>🤖 Reddit</span>
+              <span>🧵 Threads</span>
+              <span>🦋 Bluesky</span>
+              <span>▶ YouTube</span>
+              <span>💼 LinkedIn</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Setup steps */}
+      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Setup (2 minutes)</div>
+        <ol style={{ paddingLeft:16, display:"flex", flexDirection:"column", gap:8 }}>
+          {[
+            <>Sign up at <a href="https://buffer.com" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>buffer.com</a> — free plan works</>,
+            "Connect your social accounts in Buffer (X, TikTok, Pinterest, etc.) — Buffer handles all the OAuth",
+            <>Go to <a href="https://buffer.com/api" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>buffer.com/api</a> → Generate API Key</>,
+            "Paste the key below → click Load Channels",
+            "Map each Buffer channel to its platform → Save",
+          ].map((s, i) => (
+            <li key={i} style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{s}</li>
+          ))}
+        </ol>
+      </div>
+
+      {/* API Key input */}
+      <div>
+        <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+          Buffer API Key
+        </label>
+        <div style={{ display:"flex", gap:8 }}>
+          <input style={{ ...iS, flex:1 }} type="password" placeholder="paste your Buffer API key…"
+            value={apiKey} onChange={e => setApiKey(e.target.value)}
+            onFocus={e=>e.target.style.borderColor="#1da1f2"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          <button onClick={loadChannels} disabled={loading || !apiKey.trim()}
+            style={{ padding:"10px 18px", borderRadius:8, border:"none", background:loading||!apiKey.trim()?"var(--bg-elevated)":"#1da1f2", color:loading||!apiKey.trim()?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:loading||!apiKey.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:6 }}>
+            {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Loading…</> : "Load Channels"}
+          </button>
+        </div>
+        <p style={{ fontSize:11, color:"var(--muted)", marginTop:4 }}>
+          Find your key at <a href="https://buffer.com/api" target="_blank" rel="noopener" style={{ color:"var(--amber)" }}>buffer.com/api</a> → Generate API Key (must be the org owner)
+        </p>
+      </div>
+
+      {error && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{error}</div>}
+
+      {account && !error && (
+        <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", fontSize:12, color:"#5cba6c", display:"flex", alignItems:"center", gap:8 }}>
+          ✓ Connected as <strong style={{marginLeft:4}}>{account.name || account.email}</strong> · {channels.length} channel{channels.length !== 1 ? "s" : ""} found
+        </div>
+      )}
+      {channels.length > 0 && (
+        <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>
+            Map your Buffer channels
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {channels.map(ch => (
+              <div key={ch.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                <span style={{ fontSize:18 }}>{SERVICE_ICONS[ch.service?.toLowerCase()] || "📱"}</span>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ch.name}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)", textTransform:"capitalize" }}>{ch.service} · {ch.serviceId}</div>
+                </div>
+                <select
+                  value={Object.entries(mapping).find(([,v]) => v === ch.id)?.[0] || ""}
+                  onChange={e => {
+                    const platform = e.target.value;
+                    const next = Object.fromEntries(Object.entries(mapping).filter(([,v]) => v !== ch.id));
+                    if (platform) next[platform] = ch.id;
+                    setMapping(next);
+                  }}
+                  style={{ ...iS, width:"auto", minWidth:150, cursor:"pointer" }}>
+                  <option value="">— not mapped —</option>
+                  {Object.entries(PLATFORM_NAMES).map(([id, name]) => (
+                    <option key={id} value={id}>{name}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize:11, color:"var(--muted)", marginTop:10, lineHeight:1.6 }}>
+            Map each Buffer channel to the platform it represents. When you schedule a post to X in Blog Bunker, it sends to whichever Buffer channel is mapped to X.
+          </p>
+        </div>
+      )}
+
+      {/* Save / disconnect */}
+      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+        <button onClick={save}
+          style={{ padding:"9px 24px", borderRadius:8, border:"none", background:"#1da1f2", color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+          Save Settings
+        </button>
+        {config.connected && (
+          <button onClick={() => { saveBufferConfig({}); setConfig({}); setApiKey(""); setChannels([]); setMapping({}); }}
+            style={{ padding:"9px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            Disconnect Buffer
+          </button>
+        )}
+        {saved && <span style={{ fontSize:12, color:"#5cba6c" }}>✓ Saved</span>}
+      </div>
+    </div>
+  );
+}
+
+// Keep old SocialPlatformSettings as a thin wrapper that redirects to Buffer
+const SOCIAL_PLATFORM_STORAGE = "bb_social_platforms";
+function loadSocialPlatforms() { try { return JSON.parse(localStorage.getItem(SOCIAL_PLATFORM_STORAGE) || "{}"); } catch { return {}; } }
+function saveSocialPlatforms(d) {
+  try { localStorage.setItem(SOCIAL_PLATFORM_STORAGE, JSON.stringify(d)); } catch {}
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("social_platforms", uid, d);
+}
+
+function SocialPlatformSettings() {
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--amber)44", borderRadius:10, padding:16, fontSize:13, color:"var(--text-secondary)", lineHeight:1.7 }}>
+        Social platform connections are now managed through <strong style={{color:"var(--text)"}}>Buffer</strong>. Configure your Buffer API key in <strong style={{color:"var(--amber)"}}>Settings → Buffer</strong> to connect X, TikTok, Pinterest, Instagram, Facebook, Reddit, Threads, Bluesky, and YouTube all at once.
+      </div>
+      <BufferSettings />
+    </div>
+  );
+}
+
+// ─── IMAGE TEXT OVERLAY EDITOR ───────────────────────────────────────────────
+
+
+// ─── IMAGE TEXT OVERLAY EDITOR ───────────────────────────────────────────────
+
+function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
+  const [canvasEl, setCanvasEl] = useState(null); // callback ref — know when canvas is mounted
+  const canvasRef = useCallback(node => { if (node) setCanvasEl(node); }, []);
+  const [dataUrl,  setDataUrl]  = useState(null);
+  const [layers,   setLayers]   = useState([{
+    id:1, text:"Your text here", x:50, y:85, fontSize:36,
+    fontFamily:"Georgia, serif", color:"#ffffff", align:"center",
+    shadow:true, shadowColor:"#000000", shadowBlur:6, bold:true, italic:false, bgBox:false, bgColor:"#000000aa",
+  }]);
+  const [sel,      setSel]      = useState(0);
+  const [saving,   setSaving]   = useState(false);
+  const [loadErr,  setLoadErr]  = useState("");
+
+  const FONTS = [
+    { label:"Georgia (Serif)",  value:"Georgia, serif"           },
+    { label:"Times New Roman",  value:"'Times New Roman', serif" },
+    { label:"Arial",            value:"Arial, sans-serif"        },
+    { label:"Impact",           value:"Impact, sans-serif"       },
+    { label:"Courier",          value:"'Courier New', monospace" },
+  ];
+
+  // Load image — try fetch first, fall back to img element with crossOrigin
+  useEffect(() => {
+    setLoadErr("");
+    setDataUrl(null);
+    (async () => {
+      try {
+        if (imageUrl.startsWith("data:")) { setDataUrl(imageUrl); return; }
+
+        // Try fetch with no-cors handling
+        try {
+          const res  = await fetch(imageUrl, { mode: "cors", credentials: "omit" });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
+          const reader = new FileReader();
+          reader.onload = e => setDataUrl(e.target.result);
+          reader.readAsDataURL(blob);
+        } catch {
+          // Fetch failed (CORS) — load via Image element instead
+          // Canvas will be tainted but we can still display it
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => {
+            const canvas = document.createElement("canvas");
+            canvas.width  = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            try {
+              canvas.getContext("2d").drawImage(img, 0, 0);
+              setDataUrl(canvas.toDataURL("image/png"));
+            } catch {
+              // Canvas tainted — just use the URL directly for display
+              setDataUrl(imageUrl);
+            }
+          };
+          img.onerror = () => setLoadErr("Could not load image — try downloading it first and re-uploading.");
+          img.src = imageUrl + "?_=" + Date.now(); // cache bust
+        }
+      } catch(e) { setLoadErr("Could not load image: " + e.message); }
+    })();
+  }, [imageUrl]);
+
+  // Draw whenever dataUrl, layers, or canvas element changes
+  useEffect(() => {
+    if (!dataUrl || !canvasEl) return;
+    const img = new Image();
+    img.onload = () => {
+      const ctx = canvasEl.getContext("2d");
+      canvasEl.width  = img.width;
+      canvasEl.height = img.height;
+      ctx.drawImage(img, 0, 0);
+
+      for (const l of layers) {
+        if (!l.text.trim()) continue;
+        const x = (l.x / 100) * canvasEl.width;
+        const y = (l.y / 100) * canvasEl.height;
+        ctx.font = `${l.italic?"italic ":""}${l.bold?"bold ":""}${l.fontSize}px ${l.fontFamily}`;
+        ctx.textAlign    = l.align;
+        ctx.textBaseline = "middle";
+        const tw = ctx.measureText(l.text).width;
+        if (l.bgBox) {
+          const pad = 14;
+          const bx  = l.align==="center" ? x-tw/2-pad : l.align==="right" ? x-tw-pad : x-pad;
+          ctx.shadowColor = "transparent"; ctx.shadowBlur = 0;
+          ctx.fillStyle = l.bgColor;
+          ctx.fillRect(bx, y-l.fontSize*0.65, tw+pad*2, l.fontSize*1.3);
+        }
+        ctx.shadowColor   = l.shadow ? l.shadowColor : "transparent";
+        ctx.shadowBlur    = l.shadow ? l.shadowBlur  : 0;
+        ctx.shadowOffsetX = l.shadow ? 2 : 0;
+        ctx.shadowOffsetY = l.shadow ? 2 : 0;
+        ctx.fillStyle = l.color;
+        ctx.fillText(l.text, x, y);
+        ctx.shadowColor = "transparent"; ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+      }
+    };
+    img.src = dataUrl;
+  }, [dataUrl, layers, canvasEl]);
+
+  const layer = layers[sel] || layers[0];
+  const upd   = (patch) => setLayers(p => p.map((l,i) => i===sel ? {...l,...patch} : l));
+
+  const save = async () => {
+    if (!canvasEl) return;
+    setSaving(true);
+    try {
+      const exportUrl = canvasEl.toDataURL("image/png", 0.92);
+      const res  = await fetch("/api/gcs", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ userId, dataUrl: exportUrl, name:`${imageName||"image"}-overlay`, tags:["overlay","edited"], source:"edited" }),
+      });
+      const data = await res.json();
+      if (data.item) onSave(data.item);
+    } catch(e) { console.error(e); }
+    setSaving(false);
+  };
+
+  const iS = { width:"100%", padding:"7px 10px", borderRadius:7, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+
+  return (
+    <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✎ Text Overlay Editor</span>
+        <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Click image to reposition selected text</span>
+      </div>
+
+      {loadErr && <div style={{ padding:"8px 12px", borderRadius:7, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{loadErr}</div>}
+
+      {!dataUrl && !loadErr && (
+        <div style={{ padding:20, textAlign:"center", color:"var(--muted)", fontSize:12 }}>
+          <span style={{ animation:"spin 1s linear infinite", display:"inline-block", marginRight:6 }}>◌</span>Loading image…
+        </div>
+      )}
+
+      {dataUrl && (
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 280px", gap:14 }}>
+          {/* Canvas preview */}
+          <div>
+            <canvas ref={canvasRef}
+              onClick={e => {
+                const r = e.currentTarget.getBoundingClientRect();
+                upd({ x: Math.round((e.clientX-r.left)/r.width*100), y: Math.round((e.clientY-r.top)/r.height*100) });
+              }}
+              style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", cursor:"crosshair", display:"block" }} />
+          </div>
+
+          {/* Controls */}
+          <div style={{ display:"flex", flexDirection:"column", gap:10, maxHeight:520, overflow:"auto" }}>
+            {/* Layers */}
+            <div>
+              <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Layers</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+                {layers.map((l,i) => (
+                  <div key={l.id} style={{ display:"flex", gap:3 }}>
+                    <button onClick={() => setSel(i)} style={{ flex:1, padding:"5px 8px", borderRadius:6, border:`1px solid ${sel===i?"var(--amber)":"var(--border)"}`, background:sel===i?"var(--amber-glow)":"transparent", color:sel===i?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", textAlign:"left", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {l.text.slice(0,20)||"Empty"}
+                    </button>
+                    {layers.length>1 && <button onClick={() => { setLayers(p=>p.filter((_,j)=>j!==i)); setSel(Math.max(0,i-1)); }} style={{ padding:"4px 7px", borderRadius:5, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer" }}>✕</button>}
+                  </div>
+                ))}
+                <button onClick={() => { setLayers(p=>[...p,{...p[0],id:Date.now(),text:"New text",y:30}]); setSel(layers.length); }} style={{ padding:"4px", borderRadius:6, border:"1px dashed var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer" }}>+ Add Layer</button>
+              </div>
+            </div>
+
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Text</label>
+              <textarea value={layer.text} onChange={e=>upd({text:e.target.value})} rows={2} style={{...iS, resize:"none"}} />
+            </div>
+
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Font</label>
+              <select value={layer.fontFamily} onChange={e=>upd({fontFamily:e.target.value})} style={iS}>
+                {FONTS.map(f=><option key={f.value} value={f.value}>{f.label}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Size: {layer.fontSize}px</label>
+              <input type="range" min={10} max={200} value={layer.fontSize} onChange={e=>upd({fontSize:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
+            </div>
+
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Color</label>
+                <input type="color" value={layer.color} onChange={e=>upd({color:e.target.value})} style={{ width:"100%", height:30, borderRadius:6, border:"1px solid var(--border)", cursor:"pointer" }} />
+              </div>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Align</label>
+                <div style={{ display:"flex", gap:3 }}>
+                  {["left","center","right"].map(a=>(
+                    <button key={a} onClick={()=>upd({align:a})} style={{ flex:1, padding:"4px", borderRadius:5, border:`1px solid ${layer.align===a?"var(--amber)":"var(--border)"}`, background:layer.align===a?"var(--amber-glow)":"transparent", color:layer.align===a?"var(--amber)":"var(--muted)", fontSize:11, cursor:"pointer" }}>
+                      {a==="left"?"←":a==="center"?"↔":"→"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+              {[{k:"bold",label:"Bold"},{k:"italic",label:"Italic"},{k:"shadow",label:"Shadow"},{k:"bgBox",label:"BG Box"}].map(t=>(
+                <button key={t.k} onClick={()=>upd({[t.k]:!layer[t.k]})} style={{ padding:"4px 10px", borderRadius:6, border:`1px solid ${layer[t.k]?"var(--amber)":"var(--border)"}`, background:layer[t.k]?"var(--amber-glow)":"transparent", color:layer[t.k]?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontWeight:layer[t.k]?700:400 }}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {layer.bgBox && (
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Box Color</label>
+                <input type="color" value={layer.bgColor.slice(0,7)} onChange={e=>upd({bgColor:e.target.value+"aa"})} style={{ width:"100%", height:28, borderRadius:6, border:"1px solid var(--border)", cursor:"pointer" }} />
+              </div>
+            )}
+
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>X: {layer.x}%</label>
+                <input type="range" min={0} max={100} value={layer.x} onChange={e=>upd({x:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
+              </div>
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Y: {layer.y}%</label>
+                <input type="range" min={0} max={100} value={layer.y} onChange={e=>upd({y:Number(e.target.value)})} style={{ width:"100%", accentColor:"var(--amber)" }} />
+              </div>
+            </div>
+
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Quick Presets</label>
+              {[
+                { label:"Tagline", text:"Cast at Dawn. Sip at Dusk.", y:87, fontSize:28 },
+                { label:"URL",     text:"caskandstream.com",          y:95, fontSize:16 },
+                { label:"Quote",   text:'"The river knows."',         y:50, fontSize:42 },
+                { label:"CTA",     text:"Link in bio →",              y:91, fontSize:22 },
+              ].map((p,i)=>(
+                <button key={i} onClick={()=>upd({text:p.text, y:p.y, fontSize:p.fontSize})} style={{ display:"block", width:"100%", padding:"4px 8px", marginBottom:3, borderRadius:5, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", textAlign:"left" }}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display:"flex", flexDirection:"column", gap:5, paddingTop:6, borderTop:"1px solid var(--border)" }}>
+              <button onClick={save} disabled={saving} style={{ padding:"9px", borderRadius:8, border:"none", background:saving?"var(--bg-elevated)":"#5cba6c", color:saving?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:saving?"not-allowed":"pointer" }}>
+                {saving ? "Saving…" : "✓ Save to Library"}
+              </button>
+              <button onClick={()=>{ if(!canvasEl) return; const a=document.createElement("a"); a.href=canvasEl.toDataURL("image/png"); a.download=`${imageName||"image"}-overlay.png`; a.click(); }} style={{ padding:"9px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer" }}>
+                ↓ Download PNG
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 // ─── MODAL SHELL ─────────────────────────────────────────────────────────────
 
 function Modal({ title, onClose, children, wide }) {
@@ -6481,13 +9557,16 @@ const HEADLINE_IMAGE_SPEC = {
   style: "cinematic editorial photography, moody atmospheric, fly fishing and whiskey lifestyle, amber and teal tones, wide landscape",
 };
 
-function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys }) {
-  const [imageUrl,   setImageUrl]   = useState(null);
-  const [prompt,     setPrompt]     = useState("");
-  const [loading,    setLoading]    = useState(false);
-  const [showPrompt, setShowPrompt] = useState(false);
-  const [error,      setError]      = useState("");
-  const [copied,     setCopied]     = useState(false);
+function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys, onImageSaved }) {
+  const [imageUrl,    setImageUrl]    = useState(null);
+  const [cloudUrl,    setCloudUrl]    = useState(null); // permanent GCS URL
+  const [prompt,      setPrompt]      = useState("");
+  const [loading,     setLoading]     = useState(false);
+  const [uploading,   setUploading]   = useState(false);
+  const [error,       setError]       = useState("");
+  const [copied,      setCopied]      = useState(false);
+  const [savedToLib,  setSavedToLib]  = useState(false);
+  const [saveError,   setSaveError]   = useState("");
   const [previewOpen, setPreviewOpen] = useState(false);
   const [draftPrompt, setDraftPrompt] = useState("");
 
@@ -6496,15 +9575,81 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
   const providerLabel = getImageProviderLabel(provider);
   const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
 
-  // Opens the preview modal with an AI-drafted prompt the user can edit before generating
+  // Convert any image URL to a JPEG data URL via canvas before saving
+  const toJpegDataUrl = (url) => new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width  = img.naturalWidth  || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      canvas.getContext("2d").drawImage(img, 0, 0);
+      resolve(canvas.toDataURL("image/jpeg", 0.92));
+    };
+    img.onerror = () => reject(new Error("Could not load image for conversion"));
+    img.src = url;
+  });
+
+  const handleSaveToLibrary = async () => {
+    if (!imageUrl) return;
+    setSavedToLib(false); setSaveError("");
+    try {
+      let dataUrl = imageUrl;
+      if (imageUrl.startsWith("blob:")) {
+        const res  = await fetch(imageUrl);
+        const blob = await res.blob();
+        dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+      // Compress if needed
+      if (dataUrl.length > 4_000_000) {
+        dataUrl = await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement("canvas");
+            const scale = Math.sqrt(4_000_000 / dataUrl.length) * 0.9;
+            c.width  = Math.round(img.width  * scale);
+            c.height = Math.round(img.height * scale);
+            c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+            resolve(c.toDataURL("image/jpeg", 0.85));
+          };
+          img.onerror = () => reject(new Error("Compression failed"));
+          img.src = dataUrl;
+        });
+      }
+      // Get userId from window (set by Dashboard on mount)
+      const userId = window.__bbUserId || "anonymous";
+      const safeName = `headline-${(title || "image").toLowerCase().replace(/\s+/g, "-").slice(0, 30)}`;
+      const res = await fetch("/api/gcs", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId, dataUrl, name: safeName, tags: ["blog headline", "generated"], notes: prompt ? `Prompt: ${prompt.slice(0, 100)}` : "", source: "generated" }),
+      });
+      if (!res.ok) throw new Error(`Upload failed (${res.status})`);
+      window.dispatchEvent(new CustomEvent("bb-media-updated"));
+      setSavedToLib(true);
+      setTimeout(() => setSavedToLib(false), 3000);
+    } catch(e) {
+      setSaveError(e.message);
+      setTimeout(() => setSaveError(""), 4000);
+    }
+  };
+
+  // Opens the preview modal with a pre-built prompt the user can edit before generating
   const openPromptPreview = async () => {
     setLoading(true); setError("");
     try {
       let draftedPrompt = prompt;
       if (!draftedPrompt) {
-        const topic = `${title}. ${(body || "").slice(0, 200).replace(/[#*\n]/g, " ").trim()}`;
-        draftedPrompt = await generateImagePrompt(topic, "facebook", activeProvider, activeModel, apiKeys[activeProvider]);
-        draftedPrompt += `, ${HEADLINE_IMAGE_SPEC.style}, wide editorial banner`;
+        // Build a prompt directly from the title — no extra AI call needed
+        const guide = loadBrandGuide();
+        const style = guide?.imageStyle || "cinematic editorial photography, moody atmospheric, fly fishing and whiskey lifestyle, amber and teal tones";
+        const topic = (title || "").replace(/[#*\n]/g, " ").trim();
+        draftedPrompt = `${topic}, ${style}, wide landscape banner, professional photography, golden hour lighting, 16:9 aspect ratio`;
       }
       setDraftPrompt(draftedPrompt);
       setPreviewOpen(true);
@@ -6514,11 +9659,51 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
 
   const generate = async (finalPrompt) => {
     setPreviewOpen(false);
-    setLoading(true); setError(""); setImageUrl(null);
+    setLoading(true); setError(""); setImageUrl(null); setCloudUrl(null);
     try {
       setPrompt(finalPrompt);
-      const url = await generateImage(finalPrompt, "facebook", apiKeys, imgProvider);
-      setImageUrl(url);
+      const blobUrl = await generateImage(finalPrompt, "facebook", apiKeys, imgProvider);
+      setImageUrl(blobUrl);
+
+      // Auto-upload to GCS so the image persists in the cloud
+      setUploading(true);
+      try {
+        const userId   = window.__bbUserId || "anonymous";
+        const safeName = `headline-${(title || "image").toLowerCase().replace(/\s+/g, "-").slice(0, 30)}-${Date.now()}`;
+
+        // Convert blob URL to base64
+        const res  = await fetch(blobUrl);
+        const blob = await res.blob();
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+
+        const uploadRes = await fetch("/api/gcs", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({
+            userId,
+            dataUrl,
+            name:   safeName,
+            tags:   ["blog headline", "generated"],
+            notes:  `Prompt: ${finalPrompt.slice(0, 100)}`,
+            source: "generated",
+          }),
+        });
+        const uploadData = await uploadRes.json();
+        if (uploadData.url) {
+          setCloudUrl(uploadData.url);
+          if (onImageSaved) onImageSaved(uploadData.url); // notify parent post record
+        }
+      } catch(e) {
+        console.warn("Auto-upload to GCS failed:", e.message);
+        // Not fatal — blob URL still works for display
+      }
+      setUploading(false);
+
     } catch(e) { setError(e.message); }
     setLoading(false);
   };
@@ -6527,7 +9712,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
     if (!imageUrl) return;
     const a = document.createElement("a");
     a.href = imageUrl;
-    a.download = `headline-${(title||"blog").toLowerCase().replace(/\s+/g,"-").slice(0,30)}.webp`;
+    a.download = `headline-${(title||"blog").toLowerCase().replace(/\s+/g,"-").slice(0,30)}.jpg`;
     a.click();
   };
 
@@ -6564,6 +9749,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
 
       {/* Image output */}
       {imageUrl ? (
+        <>
         <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)" }}>
           <img src={imageUrl} alt="Blog headline" style={{ width:"100%", display:"block", borderRadius:10 }} />
           <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
@@ -6575,12 +9761,29 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys 
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↻ New
             </button>
-            <button onClick={async ()=>{ await saveToMediaLibrary(imageUrl, `${title||"headline"}-${Date.now()}`, ["blog headline"]); setCopied(true); setTimeout(()=>setCopied(false),2000); }}
-              style={{ padding:"6px 14px", borderRadius:6, border:"none", background:copied?"rgba(92,186,108,0.85)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
-              {copied ? "✓ Saved" : "🖼 Save to Library"}
-            </button>
+            {cloudUrl ? (
+              <span style={{ padding:"6px 14px", borderRadius:6, background:"rgba(92,186,108,0.85)", color:"#fff", fontSize:11, fontWeight:700, backdropFilter:"blur(4px)" }}>
+                ✓ Saved to Cloud
+              </span>
+            ) : uploading ? (
+              <span style={{ padding:"6px 14px", borderRadius:6, background:"rgba(0,0,0,0.5)", color:"#fff", fontSize:11, backdropFilter:"blur(4px)", display:"flex", alignItems:"center", gap:5 }}>
+                <span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span> Saving…
+              </span>
+            ) : (
+              <button onClick={handleSaveToLibrary}
+                style={{ padding:"6px 14px", borderRadius:6, border:"none", background:savedToLib?"rgba(92,186,108,0.85)":"rgba(196,124,43,0.85)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
+                {savedToLib ? "✓ Saved!" : "🖼 Save to Library"}
+              </button>
+            )}
           </div>
+          {cloudUrl && (
+            <div style={{ position:"absolute", top:8, left:8, fontSize:10, padding:"3px 8px", borderRadius:99, background:"rgba(0,0,0,0.65)", color:"#5cba6c", fontWeight:600 }}>
+              ☁ Synced to GCS
+            </div>
+          )}
         </div>
+        {saveError && <div style={{ fontSize:11, color:"var(--red)", marginTop:6 }}>{saveError}</div>}
+        </>
       ) : !loading && (
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
           <div style={{ height:130, borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:8 }}>
@@ -6738,8 +9941,13 @@ function RichTextToolbar({ editor }) {
   );
 }
 
-function RichTextEditor({ value, onChange, placeholder = "Write your post here…", minHeight = 380 }) {
+function RichTextEditor({ value, onChange, placeholder = "Write your post here…", minHeight = 380, activeProvider, activeModel, apiKeys }) {
   const isInternalUpdate = useRef(false);
+  const [aiPanel,     setAiPanel]     = useState(null); // { text, from, to }
+  const [aiNote,      setAiNote]      = useState("");
+  const [aiLoading,   setAiLoading]   = useState(false);
+  const [aiResult,    setAiResult]    = useState("");
+  const containerRef = useRef(null);
 
   const editor = useEditor({
     extensions: [
@@ -6754,9 +9962,17 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
       const md = htmlToMarkdown(editor.getHTML());
       onChange(md);
     },
+    onSelectionUpdate: ({ editor }) => {
+      const { from, to } = editor.state.selection;
+      if (from === to) { setAiPanel(null); setAiResult(""); setAiNote(""); return; }
+      const selectedText = editor.state.doc.textBetween(from, to, " ").trim();
+      if (selectedText.length < 10) { setAiPanel(null); return; }
+      setAiPanel({ text: selectedText, from, to });
+      setAiResult("");
+    },
   });
 
-  // Sync external changes (e.g. AI regenerating the draft) into the editor
+  // Sync external changes into editor
   useEffect(() => {
     if (!editor) return;
     if (isInternalUpdate.current) { isInternalUpdate.current = false; return; }
@@ -6766,9 +9982,94 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
     }
   }, [value, editor]);
 
+  const rewriteSelection = async () => {
+    if (!aiPanel || !editor) return;
+    setAiLoading(true); setAiResult("");
+    try {
+      const guide = loadBrandGuide();
+      const brandCtx = buildBrandContext(guide);
+      const result = await callAI(
+        activeProvider || "anthropic",
+        activeModel || "claude-sonnet-4-6",
+        `${brandCtx}You are an editor. Rewrite the provided text based on the user's notes. Return ONLY the rewritten text — no explanation, no quotes around it, no preamble. Match the surrounding article's voice and style exactly.`,
+        `Original text:\n"${aiPanel.text}"\n\nEditor notes: ${aiNote || "Improve clarity and flow"}`,
+        apiKeys?.[activeProvider || "anthropic"],
+        800
+      );
+      setAiResult(result.trim());
+    } catch(e) { setAiResult(`Error: ${e.message}`); }
+    setAiLoading(false);
+  };
+
+  const applyRewrite = () => {
+    if (!editor || !aiResult || !aiPanel) return;
+    // Replace selected range with rewritten text
+    const { from, to } = aiPanel;
+    editor.chain()
+      .focus()
+      .deleteRange({ from, to })
+      .insertContentAt(from, aiResult)
+      .run();
+    setAiPanel(null); setAiResult(""); setAiNote("");
+  };
+
+  const dismissPanel = () => {
+    setAiPanel(null); setAiResult(""); setAiNote("");
+    editor?.commands.setTextSelection(editor.state.selection.from);
+  };
+
   return (
-    <div style={{ border:"1px solid var(--border)", borderRadius:8, overflow:"hidden", background:"var(--bg-elevated)" }}>
+    <div ref={containerRef} style={{ border:"1px solid var(--border)", borderRadius:8, overflow:"visible", background:"var(--bg-elevated)", position:"relative" }}>
       <RichTextToolbar editor={editor} />
+
+      {/* AI Rewrite panel — appears when text is selected */}
+      {aiPanel && (
+        <div style={{ position:"sticky", top:8, zIndex:100, margin:"0 12px 8px", padding:"14px 16px", borderRadius:10, background:"var(--bg-surface)", border:"1px solid var(--amber)44", boxShadow:"0 4px 20px rgba(0,0,0,0.3)" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+            <span style={{ fontSize:13, fontWeight:700, color:"var(--amber)" }}>✦ AI Rewrite</span>
+            <span style={{ fontSize:11, color:"var(--text-secondary)", flex:1 }}>"{aiPanel.text.slice(0,60)}{aiPanel.text.length>60?"…":""}"</span>
+            <button onClick={dismissPanel} style={{ background:"none", border:"none", color:"var(--muted)", fontSize:16, cursor:"pointer", padding:2, lineHeight:1 }}>✕</button>
+          </div>
+
+          {!aiResult ? (
+            <div style={{ display:"flex", gap:8 }}>
+              <input
+                value={aiNote}
+                onChange={e => setAiNote(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && rewriteSelection()}
+                placeholder="e.g. make it more concise, add more detail, use a fishing metaphor…"
+                style={{ flex:1, padding:"8px 12px", borderRadius:7, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none" }}
+                onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"}
+              />
+              <button onClick={rewriteSelection} disabled={aiLoading}
+                style={{ padding:"8px 16px", borderRadius:7, border:"none", background:aiLoading?"var(--bg-elevated)":"var(--amber)", color:aiLoading?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:aiLoading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, whiteSpace:"nowrap" }}>
+                {aiLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Rewriting…</> : "↻ Rewrite"}
+              </button>
+            </div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+              <div style={{ padding:"10px 12px", borderRadius:7, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:13, lineHeight:1.7, color:"var(--text)", whiteSpace:"pre-wrap" }}>
+                {aiResult}
+              </div>
+              <div style={{ display:"flex", gap:8 }}>
+                <button onClick={applyRewrite}
+                  style={{ padding:"7px 18px", borderRadius:7, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  ✓ Apply
+                </button>
+                <button onClick={() => { setAiResult(""); }}
+                  style={{ padding:"7px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  ↻ Try again
+                </button>
+                <button onClick={dismissPanel}
+                  style={{ padding:"7px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  Discard
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       <div
         onClick={() => editor?.chain().focus().run()}
         style={{ padding:"14px 16px", minHeight, cursor:"text", fontSize:14, lineHeight:1.8, color:"var(--text)" }}>
@@ -6791,6 +10092,7 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
         .ProseMirror blockquote { border-left: 3px solid var(--amber); padding-left: 14px; margin: 0.6em 0; color: var(--text-secondary); font-style: italic; }
         .ProseMirror a { color: var(--amber); text-decoration: underline; }
         .ProseMirror strong { font-weight: 700; }
+        .ProseMirror ::selection { background: var(--amber-glow); }
       `}</style>
     </div>
   );
@@ -6905,17 +10207,44 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
     date:     post?.date     || new Date().toISOString().split("T")[0],
   });
   const [saved,        setSaved]        = useState(false);
+  const [saveStatus,   setSaveStatus]   = useState(""); // "saving" | "saved" | ""
+  const [lastSaved,    setLastSaved]    = useState(null);
   const [wixStatus,    setWixStatus]    = useState("");
   const [wixLoading,   setWixLoading]   = useState(false);
   const [wixError,     setWixError]     = useState("");
+  const autosaveTimer = useRef(null);
+
+  // Autosave — debounced 2s after last change
+  useEffect(() => {
+    if (!form.title && !form.body) return;
+    setSaveStatus("saving");
+    clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      // Save to localStorage as a backup
+      try {
+        const key = `bb_post_autosave_${post?.id || "new"}`;
+        localStorage.setItem(key, JSON.stringify({ ...form, autosavedAt: new Date().toISOString() }));
+      } catch {}
+      // Also call onSave to persist to cloud if editing an existing post
+      if (post?.id) {
+        onSave({ ...post, ...form }, true); // true = silent (no close)
+      }
+      setLastSaved(new Date());
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus(""), 2500);
+    }, 2000);
+    return () => clearTimeout(autosaveTimer.current);
+  }, [form.title, form.body, form.category, form.status]);
 
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
 
-  const handleSave = () => {
+  const handleSave = (silent = false) => {
     if (!form.title.trim()) return;
     onSave({ ...post, ...form, id: post?.id || Date.now() });
-    setSaved(true);
-    setTimeout(() => { setSaved(false); onClose(); }, 600);
+    if (!silent) {
+      setSaved(true);
+      setTimeout(() => { setSaved(false); onClose(); }, 600);
+    }
   };
 
   const handlePublishToWix = async (asDraft = false) => {
@@ -6941,6 +10270,22 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
   return (
     <Modal title={isNew ? "New Post" : "Edit Post"} onClose={onClose} wide>
       <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        {/* Autosave indicator */}
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", height:18 }}>
+          {saveStatus === "saving" && (
+            <span style={{ fontSize:11, color:"var(--muted)", display:"flex", alignItems:"center", gap:4 }}>
+              <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>Saving…
+            </span>
+          )}
+          {saveStatus === "saved" && (
+            <span style={{ fontSize:11, color:"#5cba6c" }}>✓ Autosaved</span>
+          )}
+          {!saveStatus && lastSaved && (
+            <span style={{ fontSize:11, color:"var(--muted)" }}>
+              Last saved {lastSaved.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}
+            </span>
+          )}
+        </div>
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Title *</label>
           <input style={iS} placeholder="Post title…" value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} autoFocus />
@@ -6967,7 +10312,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
             Body
           </label>
-          <RichTextEditor value={form.body} onChange={(md)=>setForm(f=>({...f,body:md}))} placeholder="Write your post here…" minHeight={300} />
+          <RichTextEditor value={form.body} onChange={(md)=>setForm(f=>({...f,body:md}))} placeholder="Write your post here…" minHeight={300} activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys} />
         </div>
 
         {/* Headline Image */}
@@ -6977,6 +10322,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           activeProvider={activeProvider || "anthropic"}
           activeModel={activeModel || "claude-sonnet-4-6"}
           apiKeys={apiKeys || {}}
+          onImageSaved={(url) => setForm(f => ({ ...f, headlineImageUrl: url }))}
         />
 
         {/* Copy to Wix */}
@@ -6986,17 +10332,16 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           </div>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
             <button onClick={() => {
-              const html = (form.body || "").split("\n\n").filter(Boolean).map(block => {
-                if (block.startsWith("# "))  return `<h1>${block.slice(2)}</h1>`;
-                if (block.startsWith("## ")) return `<h2>${block.slice(3)}</h2>`;
-                if (block.startsWith("### "))return `<h3>${block.slice(4)}</h3>`;
-                const formatted = block.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\*(.*?)\*/g, "<em>$1</em>");
-                return `<p>${formatted}</p>`;
-              }).join("\n");
-              navigator.clipboard.writeText(`<h1>${form.title}</h1>\n${html}`);
+              const plainText = `${form.title}\n\n${(form.body || "")
+                .replace(/^#{1,3}\s+/gm, "")
+                .replace(/\*\*(.*?)\*\*/g, "$1")
+                .replace(/\*(.*?)\*/g, "$1")
+                .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+                .trim()}`;
+              navigator.clipboard.writeText(plainText);
             }}
               style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
-              📋 Copy as HTML
+              📋 Copy Post Text
             </button>
             <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
               style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
@@ -7004,7 +10349,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
             </button>
           </div>
           <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"8px 0 0", lineHeight:1.5 }}>
-            Copy post as HTML → Open Wix Blog → click HTML view → paste. Takes about 30 seconds.
+            Copy plain text → Open Wix Blog → paste into the editor. Wix handles formatting automatically.
           </p>
         </div>
 
@@ -7037,6 +10382,11 @@ function AddCompetitorModal({ onSave, onClose }) {
   const [form, setForm] = useState({ name:"", url:"", da:"", posts:"", traffic:"", strengths:"", threat:"medium" });
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
   const valid = form.name.trim() && form.url.trim();
+  const normalizeUrl = (u) => {
+    const t = u.trim();
+    if (!t) return t;
+    return t.startsWith("http://") || t.startsWith("https://") ? t : `https://${t}`;
+  };
   return (
     <Modal title="Add Competitor" onClose={onClose}>
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
@@ -7081,7 +10431,7 @@ function AddCompetitorModal({ onSave, onClose }) {
         </div>
         <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginTop:4 }}>
           <button onClick={onClose} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Cancel</button>
-          <button onClick={()=>{ if(valid){ onSave({...form, da:Number(form.da)||0, id:Date.now()}); onClose(); }}} disabled={!valid}
+          <button onClick={()=>{ if(valid){ onSave({...form, url: normalizeUrl(form.url), da:Number(form.da)||0, id:Date.now()}); onClose(); }}} disabled={!valid}
             style={{ padding:"9px 24px", borderRadius:8, border:"none", background:valid?"var(--amber)":"var(--bg-elevated)", color:valid?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:valid?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif" }}>
             Add Competitor
           </button>
@@ -7196,7 +10546,9 @@ function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
 
 // ─── MAIN DASHBOARD ───────────────────────────────────────────────────────────
 
-export default function Dashboard({ user, workspace, onLogout }) {
+export default function Dashboard({ user, workspace }) {
+  const { logout: onLogout } = useAuth();
+  const isMobile = useIsMobile();
   const [dark,            setDark]           = useState(true);
   const [activeTab,       setActiveTab]      = useState("posts");
   const [postFilter,      setPostFilter]     = useState("all");
@@ -7216,7 +10568,9 @@ export default function Dashboard({ user, workspace, onLogout }) {
   const [wsSettings,  setWsSettings]  = useState(() => { try { const s = localStorage.getItem("bb_ws_settings"); return s ? JSON.parse(s) : null; } catch { return null; } });
 
   // ── Cloud sync (Netlify Blobs) — survives localStorage clearing ──────────
-  const userId = user?.id || user?.email || "anonymous";
+  const userId = user?.email || user?.id || "anonymous";
+  // Make userId available to components deep in tree (HeadlineImagePanel etc.)
+  window.__bbUserId = userId;
   const [cloudSynced, setCloudSynced] = useState(false);
 
   // Pull from cloud once on mount — cloud wins if it has data
@@ -7234,15 +10588,57 @@ export default function Dashboard({ user, workspace, onLogout }) {
       if (cloudCompetitors && Array.isArray(cloudCompetitors)) {
         setCompetitors(cloudCompetitors);
       }
-      // Pull social posts — scheduler may have updated them (scheduled → published)
+      // Pull social posts
       const cloudSocialPosts = await cloudGet("social_posts", userId);
       if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
         setSocialPosts(cloudSocialPosts);
         saveSocialPostsToStorage(cloudSocialPosts);
       }
+      // Pull brand guide
+      const cloudBrandGuide = await cloudGet("brand_guide", userId);
+      if (cloudBrandGuide && typeof cloudBrandGuide === "object") {
+        setBrandGuide(cloudBrandGuide);
+        saveBrandGuide(cloudBrandGuide);
+      }
+      // Pull API keys
+      const cloudApiKeys = await cloudGet("api_keys", userId);
+      if (cloudApiKeys && typeof cloudApiKeys === "object") {
+        setApiKeys(cloudApiKeys);
+        try { localStorage.setItem(KEYS_STORAGE, JSON.stringify(cloudApiKeys)); } catch {}
+      }
+      // Pull GSC config (tokens)
+      const cloudGSC = await cloudGet("gsc_config", userId);
+      if (cloudGSC && typeof cloudGSC === "object" && cloudGSC.refreshToken) {
+        saveGSCConfig(cloudGSC);
+      }
+      // Pull Meta config
+      const cloudMeta = await cloudGet("meta_config", userId);
+      if (cloudMeta && typeof cloudMeta === "object" && cloudMeta.connected) {
+        saveMetaConfig(cloudMeta);
+        setMetaConfig(cloudMeta);
+      }
+      // Pull Buffer config
+      const cloudBuffer = await cloudGet("buffer_config", userId);
+      if (cloudBuffer && typeof cloudBuffer === "object" && cloudBuffer.apiKey) {
+        saveBufferConfig(cloudBuffer);
+      }
       setCloudSynced(true);
     })();
   }, []);
+
+  // Refresh social posts when tab becomes visible again (catches scheduler updates)
+  useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== "visible") return;
+      const cloudSocialPosts = await cloudGet("social_posts", userId);
+      if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
+        setSocialPosts(cloudSocialPosts);
+        saveSocialPostsToStorage(cloudSocialPosts);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [userId]);
 
   // Re-pull social posts from cloud whenever Marketing tab is opened
   // (catches any auto-publishes that happened while the tab was closed)
@@ -7261,6 +10657,11 @@ export default function Dashboard({ user, workspace, onLogout }) {
   useEffect(() => { if (cloudSynced) cloudSaveDebounced("posts", userId, posts); }, [posts, cloudSynced]);
   useEffect(() => { if (cloudSynced) cloudSaveDebounced("inspiration", userId, inspiration); }, [inspiration, cloudSynced]);
   useEffect(() => { if (cloudSynced) cloudSaveDebounced("competitors", userId, competitors); }, [competitors, cloudSynced]);
+  // Push API keys to cloud (debounced — they change when user adds a key in settings)
+  useEffect(() => { if (cloudSynced && Object.keys(apiKeys).length > 0) cloudSaveDebounced("api_keys", userId, apiKeys, 2000); }, [apiKeys, cloudSynced]);
+  // Push GSC + Meta configs whenever they change (triggered manually after connect/save)
+  const syncGSCToCloud  = (cfg)  => { if (cfg?.refreshToken) cloudSet("gsc_config",  userId, cfg);  };
+  const syncMetaToCloud = (cfg)  => { if (cfg?.connected)    cloudSet("meta_config",  userId, cfg);  };
 
   // Persist whenever data changes
   useEffect(() => { try { localStorage.setItem("bb_posts",       JSON.stringify(posts));       } catch {} }, [posts]);
@@ -7422,19 +10823,21 @@ export default function Dashboard({ user, workspace, onLogout }) {
   ];
 
   const SETTINGS_SECTIONS = [
-    { id:"general",  label:"General"             },
-    { id:"brand",    label:"Brand Guide"         },
-    { id:"apikeys",  label:"API Keys"            },
-    { id:"gsc",      label:"Search Console"      },
-    { id:"meta",     label:"Facebook & Instagram"},
-    { id:"social",   label:"Social Media"        },
-    { id:"wix",      label:"Wix Integration"     },
-    { id:"billing",  label:"Billing & Plan"      },
-    { id:"account",  label:"Account"             },
+    { id:"general",    label:"General"              },
+    { id:"brand",      label:"Brand Guide"          },
+    { id:"apikeys",    label:"API Keys"             },
+    { id:"gsc",        label:"Search Console"       },
+    { id:"meta",       label:"Facebook & Instagram" },
+    { id:"buffer",     label:"Buffer (Social)"      },
+    { id:"social",     label:"Social Media"         },
+    { id:"wix",        label:"Wix Integration"      },
+    { id:"billing",    label:"Billing & Plan"       },
+    { id:"account",    label:"Account"              },
   ];
 
   return (
-    <div style={{...theme,fontFamily:"var(--font-body)",color:"var(--text)",background:"var(--bg)",minHeight:"100vh",display:"flex",fontSize:14,lineHeight:1.5}}>
+    <div className="bb-root" style={{...theme,fontFamily:"var(--font-body)",color:"var(--text)",background:"var(--bg)",minHeight:"100vh",display:"flex",fontSize:14,lineHeight:1.5}}>
+      <style>{MOBILE_CSS}</style>
       <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;700;900&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
 
@@ -7479,9 +10882,21 @@ export default function Dashboard({ user, workspace, onLogout }) {
       )}
 
       {/* ── SIDEBAR ── */}
-      <aside style={{width:220,minWidth:220,background:"var(--sidebar-bg)",borderRight:"1px solid var(--border)",display:"flex",flexDirection:"column"}}>
+      <aside className="bb-sidebar" style={{width:220,minWidth:220,background:"var(--sidebar-bg)",borderRight:"1px solid var(--border)",display:"flex",flexDirection:"column"}}>
         <div style={{padding:"20px 20px 16px",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:10}}>
-          <div style={{width:32,height:32,borderRadius:8,background:"var(--amber)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:900,color:dark?"#0e0f11":"#fff",fontFamily:"var(--font-display)",flexShrink:0}}>B</div>
+          {(() => {
+            const [sidebarLogo, setSidebarLogo] = useState(loadLogo);
+            useEffect(() => {
+              const handler = (e) => setSidebarLogo(e.detail || null);
+              window.addEventListener("bb-logo-updated", handler);
+              return () => window.removeEventListener("bb-logo-updated", handler);
+            }, []);
+            return sidebarLogo ? (
+              <img src={sidebarLogo} alt="Logo" style={{height:32,maxWidth:100,objectFit:"contain",flexShrink:0}} />
+            ) : (
+              <div style={{width:32,height:32,borderRadius:8,background:"var(--amber)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:900,color:dark?"#0e0f11":"#fff",fontFamily:"var(--font-display)",flexShrink:0}}>B</div>
+            );
+          })()}
           <div>
             <div style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:14,lineHeight:1.1}}>Blog Bunker</div>
             <div style={{fontSize:9,color:"var(--text-secondary)",letterSpacing:"0.05em",textTransform:"uppercase"}}>Command Center</div>
@@ -7531,11 +10946,24 @@ export default function Dashboard({ user, workspace, onLogout }) {
       {/* ── MAIN ── */}
       <main style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
         <header style={{padding:"16px 28px",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"space-between",background:"var(--bg-surface)"}}>
-          <div>
-            <h1 style={{fontFamily:"var(--font-display)",fontSize:22,fontWeight:700,margin:0}}>🥃 {wsName}</h1>
-            <p style={{margin:"2px 0 0",fontSize:12,color:"var(--text-secondary)"}}>
-              {posts.length} posts · {wsTagline}
-            </p>
+          <div style={{display:"flex",alignItems:"center",gap:14}}>
+            {(() => {
+              const [headerLogo, setHeaderLogo] = useState(loadLogo);
+              useEffect(() => {
+                const handler = (e) => setHeaderLogo(e.detail || null);
+                window.addEventListener("bb-logo-updated", handler);
+                return () => window.removeEventListener("bb-logo-updated", handler);
+              }, []);
+              return headerLogo ? (
+                <img src={headerLogo} alt="Logo" style={{height:40,maxWidth:160,objectFit:"contain"}} />
+              ) : null;
+            })()}
+            <div>
+              <h1 style={{fontFamily:"var(--font-display)",fontSize:22,fontWeight:700,margin:0}}>{!loadLogo() ? "🥃 " : ""}{wsName}</h1>
+              <p style={{margin:"2px 0 0",fontSize:12,color:"var(--text-secondary)"}}>
+                {posts.length} posts · {wsTagline}
+              </p>
+            </div>
           </div>
           <div style={{display:"flex",gap:8}}>
             {wixConnected && (
@@ -7546,7 +10974,23 @@ export default function Dashboard({ user, workspace, onLogout }) {
           </div>
         </header>
 
-        <div style={{flex:1,overflow:"auto",padding:28}}>
+        {/* ── MOBILE BOTTOM NAV ── */}
+        <nav className="bb-mobile-nav">
+          {[
+            { id:"pipeline",  icon:"◈", label:"Pipeline" },
+            { id:"posts",     icon:"▤", label:"Posts"    },
+            { id:"social",    icon:"▣", label:"Market"   },
+            { id:"analytics", icon:"◔", label:"Analytics"},
+            { id:"settings",  icon:"⚙", label:"Settings" },
+          ].map(t => (
+            <button key={t.id} className={activeTab===t.id?"active":""} onClick={() => setActiveTab(t.id)}>
+              <span className="nav-icon">{t.icon}</span>
+              <span className="nav-label">{t.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="bb-main-content" style={{flex:1,overflow:"auto",padding:28}}>
 
           {/* ══ PIPELINE ══ */}
           {activeTab==="pipeline"&&(
@@ -7587,51 +11031,19 @@ export default function Dashboard({ user, workspace, onLogout }) {
 
           {/* ══ ANALYTICS ══ */}
           {activeTab==="analytics"&&(
-            <div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}}>
-                {[
-                  {label:"Total Views",   value:DEFAULT_ANALYTICS.totalViews.toLocaleString(), trend:DEFAULT_ANALYTICS.viewsTrend, spark:DEFAULT_ANALYTICS.weeklyViews},
-                  {label:"Subscribers",   value:DEFAULT_ANALYTICS.subscribers,                 trend:DEFAULT_ANALYTICS.subsTrend,  spark:[95,105,112,118,128,136,142]},
-                  {label:"Avg Read Time", value:DEFAULT_ANALYTICS.avgReadTime},
-                  {label:"Bounce Rate",   value:`${DEFAULT_ANALYTICS.bounceRate}%`,            trend:-3.1},
-                ].map((s,i)=>(
-                  <div key={i} style={card}>
-                    <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:8}}>{s.label}</div>
-                    <div style={{fontFamily:"var(--font-display)",fontSize:28,fontWeight:700}}>{s.value}</div>
-                    {s.trend!=null&&<span style={{fontSize:12,color:s.trend>0?fixedGreen:"var(--red)",fontWeight:600}}>{s.trend>0?"↑":"↓"} {Math.abs(s.trend)}% <span style={{color:"var(--text-secondary)",fontWeight:400}}>vs last week</span></span>}
-                    {s.spark&&<div style={{marginTop:12}}><Sparkline data={s.spark} color={dark?"#d4a054":"#b8862e"}/></div>}
-                  </div>
-                ))}
-              </div>
-
-              <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16,marginBottom:24}}>
-                <div style={card}>
-                  <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:16}}>Weekly Traffic</div>
-                  <BarChart data={DEFAULT_ANALYTICS.weeklyViews} labels={DEFAULT_ANALYTICS.weekLabels} color={dark?"#d4a054":"#b8862e"}/>
-                </div>
-                <div style={card}>
-                  <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:16}}>Top Posts</div>
-                  {posts.filter(p=>p.views>0).sort((a,b)=>b.views-a.views).slice(0,4).map((p,i)=>(
-                    <div key={p.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:i<3?"1px solid var(--border)":"none"}}>
-                      <div style={{fontSize:12,fontWeight:500,maxWidth:"70%",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.title}</div>
-                      <div style={{fontSize:12,fontWeight:700,color:"var(--amber)"}}>{p.views.toLocaleString()}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Google Search Console */}
-              <div style={{marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                <div style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700}}>Search Console</div>
-                {!gscData && (
-                  <button onClick={()=>{setActiveTab("settings");setSettingsSection("gsc");}}
-                    style={{padding:"6px 14px",borderRadius:7,border:"1px solid var(--amber)44",background:"var(--amber-glow)",color:"var(--amber)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)"}}>
-                    Connect Search Console →
-                  </button>
-                )}
-              </div>
-              <GSCAnalyticsView data={gscData} onRefresh={()=>{setActiveTab("settings");setSettingsSection("gsc");}} />
-            </div>
+            <AnalyticsDashboard
+              posts={posts}
+              gscData={gscData}
+              metaConfig={metaConfig}
+              socialPosts={socialPosts}
+              dark={dark}
+              userId={userId}
+              onConnectGSC={()=>{ setActiveTab("settings"); setSettingsSection("gsc"); }}
+              onConnectMeta={()=>{ setActiveTab("settings"); setSettingsSection("meta"); }}
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+            />
           )}
 
           {/* ══ CALENDAR ══ */}
@@ -7688,7 +11100,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
                       </tbody>
                     </table>
                   </div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginTop:16}}>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:16,marginTop:16}}>
                     {[
                       {title:"Content Gap",             value:"Whiskey + Fishing",    detail:"Zero competitors own this intersection — you do",                color:fixedGreen},
                       {title:"Avg Competitor Frequency", value:"3.0/wk",              detail:"You're at 2/wk — room to increase without diluting quality",    color:"var(--amber)"},
@@ -7784,6 +11196,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
                 socialPosts={socialPosts}
                 onSaveSocialPost={saveSocialPost}
                 onDeleteSocialPost={deleteSocialPost}
+                userId={userId}
               />
             </MarketingErrorBoundary>
           )}
@@ -7822,7 +11235,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
                 )}
 
                 {settingsSection==="brand"&&(
-                  <BrandGuidePanel onSave={(g) => setBrandGuide(g)} />
+                  <BrandGuidePanel onSave={(g) => { setBrandGuide(g); cloudSet("brand_guide", userId, g); }} />
                 )}
 
                 {settingsSection==="gsc"&&(
@@ -7838,6 +11251,15 @@ export default function Dashboard({ user, workspace, onLogout }) {
                     <MetaConnectPanel onConnected={(cfg) => setMetaConfig(cfg)} />
                   </div>
                 )}
+
+                {settingsSection==="buffer"&&(
+                  <BufferSettings />
+                )}
+
+                {settingsSection==="tiktok"&&( <BufferSettings /> )}
+                {settingsSection==="pinterest"&&( <BufferSettings /> )}
+                {settingsSection==="twitter"&&( <BufferSettings /> )}
+                {settingsSection==="reddit"&&( <BufferSettings /> )}
 
                 {settingsSection==="social"&&(
                   <SocialSettings/>
@@ -7856,7 +11278,7 @@ export default function Dashboard({ user, workspace, onLogout }) {
                   <div>
                     <h3 style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700,margin:"0 0 8px"}}>Billing & Plan</h3>
                     <p style={{fontSize:13,color:"var(--text-secondary)",margin:"0 0 20px"}}>Current plan: <span style={{color:"var(--amber)",fontWeight:700}}>Operative</span></p>
-                    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
                       {PLANS.map(p=>(
                         <div key={p.name} style={{padding:20,borderRadius:10,border:planLabel===p.name?"2px solid var(--amber)":"1px solid var(--border)",background:planLabel===p.name?"var(--amber-glow)":"var(--bg-elevated)",textAlign:"center"}}>
                           <div style={{fontFamily:"var(--font-display)",fontSize:16,fontWeight:700,marginBottom:4}}>{p.name}</div>

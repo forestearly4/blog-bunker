@@ -108,6 +108,11 @@
   status = 200
 
 [[redirects]]
+  from   = "/api/gcs-restore"
+  to     = "/.netlify/functions/gcs-restore"
+  status = 200
+
+[[redirects]]
   from   = "/api/buffer-post"
   to     = "/.netlify/functions/buffer-post"
   status = 200
