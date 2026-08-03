@@ -3,6 +3,7 @@
   command   = "npm run build"
   publish   = "dist"
   functions = "netlify/functions"
+  ignore    = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- src/ netlify/ netlify.toml package.json vite.config.js"
 
 [build.environment]
   NODE_VERSION = "20"
@@ -12,7 +13,7 @@
   external_node_modules = ["@netlify/blobs"]
 
 [functions.social-scheduler]
-  schedule = "*/15 * * * *"
+  schedule = "0 * * * *"
 
 # Claude AI proxy
 [[redirects]]
@@ -54,6 +55,61 @@
 [[redirects]]
   from   = "/api/media"
   to     = "/.netlify/functions/media"
+  status = 200
+
+[[redirects]]
+  from   = "/api/gsc-callback"
+  to     = "/.netlify/functions/gsc-oauth-callback"
+  status = 200
+
+[[redirects]]
+  from   = "/api/gsc-refresh"
+  to     = "/.netlify/functions/gsc-refresh"
+  status = 200
+
+[[redirects]]
+  from   = "/api/gcs"
+  to     = "/.netlify/functions/gcs"
+  status = 200
+
+[[redirects]]
+  from   = "/api/google-callback"
+  to     = "/.netlify/functions/google-auth-callback"
+  status = 200
+
+[[redirects]]
+  from   = "/api/google-refresh"
+  to     = "/.netlify/functions/google-refresh"
+  status = 200
+
+[[redirects]]
+  from   = "/api/image-generate"
+  to     = "/.netlify/functions/image-generate"
+  status = 200
+
+[[redirects]]
+  from   = "/api/gcs-upload"
+  to     = "/.netlify/functions/gcs-upload"
+  status = 200
+
+[[redirects]]
+  from   = "/api/gcs-signed-url"
+  to     = "/.netlify/functions/gcs-signed-url"
+  status = 200
+
+[[redirects]]
+  from   = "/api/gcs-finalize"
+  to     = "/.netlify/functions/gcs-finalize"
+  status = 200
+
+[[redirects]]
+  from   = "/api/scan-competitor"
+  to     = "/.netlify/functions/scan-competitor"
+  status = 200
+
+[[redirects]]
+  from   = "/api/buffer-post"
+  to     = "/.netlify/functions/buffer-post"
   status = 200
 
 [[redirects]]
