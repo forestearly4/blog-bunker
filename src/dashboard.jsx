@@ -6881,6 +6881,25 @@ function saveMediaLibraryToStorage(items) {
   saveMediaLibraryCache(items);
 }
 
+// Normalizes arbitrary image bytes (JPEG, WEBP, indexed/palette PNG, CMYK, etc.) into a
+// guaranteed-valid RGBA PNG by round-tripping through a canvas. Fixes OpenAI images/edits
+// rejecting files with "Invalid image file or mode" when the source isn't a true RGBA PNG.
+function normalizeToPngBase64(base64) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width  = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      resolve(canvas.toDataURL("image/png").split(",")[1]);
+    };
+    img.onerror = () => reject(new Error("Could not decode image for normalization"));
+    img.src = `data:image/*;base64,${base64}`;
+  });
+}
+
 function MediaLibrary({ userId }) {
   const resolvedUserId = userId || window.__bbUserId || "anonymous";
   const [items,     setItems]     = useState([]);
@@ -6951,6 +6970,12 @@ function MediaLibrary({ userId }) {
       }
 
       if (!base64Image) throw new Error("Could not load image data");
+
+      // Normalize to a guaranteed-valid RGBA PNG — fixes OpenAI's "Invalid image
+      // file or mode" error when the source is actually JPEG/WEBP/indexed-color
+      // and was being sent mislabeled as PNG.
+      base64Image = await normalizeToPngBase64(base64Image);
+
       const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
 
       if (apiKeys.openai) {
@@ -6974,28 +6999,36 @@ function MediaLibrary({ userId }) {
         setRestyleResult(`data:image/png;base64,${data.b64}`);
 
       } else if (apiKeys.gemini) {
-        // Gemini — image editing via inline data
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${apiKeys.gemini}`,
-          {
+        // Route through server proxy — matches OpenAI path, adds multi-model
+        // fallback, and avoids direct browser-to-Google calls hanging with no
+        // timeout or retry.
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 55000);
+        let res;
+        try {
+          res = await fetch("/api/image-generate", {
             method:  "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  { inline_data: { mime_type: "image/png", data: base64Image } },
-                  { text: `Transform this image in the following style while keeping the same composition and subjects: ${restylePrompt}` },
-                ],
-              }],
-              generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+            body:    JSON.stringify({
+              provider:     "gemini-edit",
+              prompt:       `Transform this image in the following style while keeping the same composition and subjects: ${restylePrompt}`,
+              apiKey:       apiKeys.gemini,
+              imageBase64:  base64Image,
             }),
-          }
-        );
-        const data = await res.json();
-        if (data.error) throw new Error(data.error.message);
-        const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-        if (!part) throw new Error("No image returned from Gemini");
-        setRestyleResult(`data:${part.inlineData.mimeType};base64,${part.inlineData.data}`);
+            signal: controller.signal,
+          });
+        } catch (fetchErr) {
+          if (fetchErr.name === "AbortError") throw new Error("Gemini took too long to respond (55s) — try again or switch to OpenAI in Settings → API Keys.");
+          throw fetchErr;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+        const text = await res.text();
+        if (text.trimStart().startsWith("<")) throw new Error("Server timeout — try again");
+        const data = JSON.parse(text);
+        if (data.error) throw new Error(`Gemini: ${data.error}`);
+        if (!data.b64) throw new Error("No image data returned");
+        setRestyleResult(`data:${data.mimeType || "image/png"};base64,${data.b64}`);
 
       } else {
         throw new Error("Add an OpenAI or Gemini API key in Settings → API Keys to use AI Restyle.");
