@@ -137,6 +137,39 @@ export default async (req) => {
       return new Response(JSON.stringify({ b64, mimeType: "image/png" }), { status: 200, headers: CORS });
     }
 
+    // ── GEMINI IMAGE EDIT (restyle uploaded image) ──────────────────────────────
+    if (provider === "gemini-edit") {
+      const { imageBase64 } = body;
+      if (!imageBase64) throw new Error("imageBase64 required for gemini-edit");
+
+      const models = ["gemini-3.1-flash-image-preview", "gemini-2.5-flash-image"];
+      let lastErr = "";
+      for (const model of models) {
+        try {
+          const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+          const res = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { inline_data: { mime_type: "image/png", data: imageBase64 } },
+                  { text: prompt },
+                ],
+              }],
+              generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+            }),
+          });
+          const data = await res.json();
+          if (data.error) { lastErr = data.error.message; continue; }
+          const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+          if (!part) { lastErr = "No image returned"; continue; }
+          return new Response(JSON.stringify({ b64: part.inlineData.data, mimeType: part.inlineData.mimeType || "image/png" }), { status: 200, headers: CORS });
+        } catch(e) { lastErr = e.message; }
+      }
+      throw new Error(lastErr || "All Gemini models failed");
+    }
+
     return new Response(JSON.stringify({ error: `Unknown provider: ${provider}` }), { status: 400, headers: CORS });
 
   } catch(e) {
