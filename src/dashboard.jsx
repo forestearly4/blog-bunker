@@ -192,7 +192,7 @@ const INSPIRATION = [
 const PLANS = [
   { name:"Scout",     price:"Free",   features:["1 Workspace","50 Posts","Basic Analytics","Community Support"] },
   { name:"Operative", price:"$19/mo", features:["3 Workspaces","Unlimited Posts","AI Writing Tools","Advanced Analytics","Email Support"] },
-  { name:"Command",   price:"$49/mo", features:["Unlimited Workspaces","Team Collaboration","Priority Support","Custom Integrations","Wix API"] },
+  { name:"Command",   price:"$49/mo", features:["Unlimited Workspaces","Team Collaboration","Priority Support","Custom Integrations"] },
 ];
 
 // ─── AI PROVIDER CONFIG ───────────────────────────────────────────────────────
@@ -1159,7 +1159,7 @@ function SocialSettings() {
       <div>
         <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Social Media</h3>
         <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
-          Mark which platforms you're active on. Direct API publishing is on the roadmap — for now, use the Social tab to generate and copy posts.
+          Mark which platforms you're active on. Facebook and Instagram post directly via <strong style={{color:"var(--text)"}}>Facebook & Instagram</strong> settings, and X, TikTok, Pinterest, and Reddit post directly via <strong style={{color:"var(--text)"}}>Buffer (Social)</strong> settings. For any platform without a direct connection yet, use the Social tab to generate and copy posts.
         </p>
       </div>
 
@@ -1193,7 +1193,9 @@ function SocialSettings() {
                   onBlur={e=>e.target.style.borderColor="var(--border)"}
                 />
                 <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:8, padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
-                  ✦ Direct publishing via {plat.name} API coming soon. For now, generate posts in the Social tab and copy them across.
+                  {(plat.id === "instagram" || plat.id === "facebook")
+                    ? <>✦ Direct posting is live — connect your account under <strong style={{color:"var(--text)"}}>Facebook & Instagram</strong> in Settings.</>
+                    : <>✦ Direct posting is live via Buffer — connect your account under <strong style={{color:"var(--text)"}}>Buffer (Social)</strong> in Settings.</>}
                 </div>
               </div>
             )}
@@ -1662,6 +1664,12 @@ function APIKeysSettings({ apiKeys, onSave }) {
                 onBlur={e => e.target.style.borderColor = "var(--border)"}
               />
             </div>
+
+            {provider.id !== "anthropic" && (
+              <div style={{marginTop:10,fontSize:11,color:"var(--text-secondary)",lineHeight:1.5,padding:"8px 12px",borderRadius:6,background:"var(--bg-elevated)",border:"1px solid var(--border)"}}>
+                💡 You'll need your own {provider.name} API key from {provider.company}, which is billed separately as pay-as-you-go usage — not included with Blog Bunker. It's usually significantly cheaper than a monthly subscription to {provider.name} directly, since you only pay for what you actually use.
+              </div>
+            )}
 
             <div style={{marginTop:12}}>
               <label style={{display:"block",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:6}}>Default Model</label>
@@ -3363,10 +3371,10 @@ Titles and descriptions MUST be under their character limits. Score each on: key
 
                   <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                     <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
-                      📋 Copy to Wix Blog
+                      📋 Copy for Your Blog
                     </div>
                     <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 10px", lineHeight:1.6 }}>
-                      Copy your post as formatted HTML, then paste it into the Wix Blog editor. The post is automatically saved to your Posts tab.
+                      Copy your post as plain text, then paste it into whichever blog host you publish on. The post is automatically saved to your Posts tab.
                     </p>
                     <div style={{ display:"flex", gap:8 }}>
                       <button onClick={() => {
@@ -3401,10 +3409,6 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                       }}
                         style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                         📋 Copy Post Text
-                      </button>
-                      <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
-                        style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                        ↗ Open Wix Blog
                       </button>
                     </div>
                   </div>
@@ -7933,7 +7937,7 @@ function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, bt
 
 // ─── ANALYTICS DASHBOARD ─────────────────────────────────────────────────────
 
-function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onConnectMeta, activeProvider, activeModel, apiKeys }) {
+function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onGSCDataLoaded, onConnectMeta, activeProvider, activeModel, apiKeys }) {
   const [tab, setTab] = useState("overview");
   const [socialInsights, setSocialInsights] = useState(null);
   const [loadingInsights, setLoadingInsights] = useState(false);
@@ -7960,11 +7964,12 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
       const results = {};
 
       // Facebook Page insights — use separate calls per metric with correct periods
+      // NOTE: page_fans and page_impressions were deprecated by Meta on Nov 15, 2025
+      // and now return an "invalid metric" 400 error on every API version. page_fans
+      // is covered below via the direct fan_count/followers_count field fetch instead.
       const fbMetrics = [
-        { metric: "page_fans",             period: "lifetime" },
-        { metric: "page_impressions",      period: "week"     },
-        { metric: "page_post_engagements", period: "week"     },
-        { metric: "page_views_total",      period: "week"     },
+        { metric: "page_post_engagements", period: "week" },
+        { metric: "page_views_total",      period: "week" },
       ];
 
       results.facebook = {};
@@ -8007,8 +8012,9 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
 
         // IG insights
         try {
+          // NOTE: "impressions" was deprecated by Meta in favor of "views"
           const igRes  = await fetch(
-            `https://graph.facebook.com/v19.0/${igId}/insights?metric=impressions,reach,profile_views&period=week&access_token=${token}`
+            `https://graph.facebook.com/v19.0/${igId}/insights?metric=views,reach,profile_views&period=week&access_token=${token}`
           );
           const igData = await igRes.json();
           if (!igData.error) {
@@ -8102,11 +8108,11 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:0 }}>Fetch Analytics Data</h3>
           <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.7 }}>
-            Fetch fresh data from Google Search Console without going to Settings. You can also configure your GSC connection here.
+            Fetch fresh data from Google Search Console right here, without leaving this tab. Use Settings → Search Console only if you need to change or reconnect the account.
           </p>
           <GSCPanel onDataLoaded={(data) => {
-            // Bubble up to parent — triggers re-render with fresh gscData
-            if (onConnectGSC) onConnectGSC(data);
+            // Save directly and stay on this tab — do NOT navigate to Settings
+            if (onGSCDataLoaded) onGSCDataLoaded(data);
           }} />
         </div>
       )}
@@ -8370,7 +8376,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
                           {[
                             { key:"follower_count", label:"Followers",     icon:"👤" },
-                            { key:"impressions",    label:"Impressions",   icon:"👁" },
+                            { key:"views",          label:"Views",         icon:"👁" },
                             { key:"reach",          label:"Reach",         icon:"📡" },
                             { key:"profile_views",  label:"Profile Views", icon:"🔗" },
                           ].map(({ key, label, icon }) => socialInsights.instagram[key] != null && (
@@ -10310,10 +10316,10 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           onImageSaved={(url) => setForm(f => ({ ...f, headlineImageUrl: url }))}
         />
 
-        {/* Copy to Wix */}
+        {/* Copy for blog host */}
         <div style={{ padding:"14px 16px", borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)" }}>
           <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
-            📋 Copy to Wix Blog
+            📋 Copy for Your Blog
           </div>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
             <button onClick={() => {
@@ -10328,13 +10334,9 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
               style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
               📋 Copy Post Text
             </button>
-            <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
-              style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
-              ↗ Open Wix Blog
-            </button>
           </div>
           <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"8px 0 0", lineHeight:1.5 }}>
-            Copy plain text → Open Wix Blog → paste into the editor. Wix handles formatting automatically.
+            Copy plain text → paste into your blog host's editor when you're ready to publish.
           </p>
         </div>
 
@@ -10815,7 +10817,7 @@ export default function Dashboard({ user, workspace }) {
     { id:"meta",       label:"Facebook & Instagram" },
     { id:"buffer",     label:"Buffer (Social)"      },
     { id:"social",     label:"Social Media"         },
-    { id:"wix",        label:"Wix Integration"      },
+    { id:"publish",    label:"Publishing"           },
     { id:"billing",    label:"Billing & Plan"       },
     { id:"account",    label:"Account"              },
   ];
@@ -10893,11 +10895,7 @@ export default function Dashboard({ user, workspace }) {
           <div style={{fontSize:13,fontWeight:700,marginBottom:2}}>{wsName}</div>
           <div style={{fontSize:10,color:"var(--amber)",fontWeight:700,letterSpacing:"0.08em",textTransform:"uppercase"}}>{planLabel}</div>
           {wsUrl&&<div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{wsUrl}</div>}
-          <div style={{fontSize:10,marginTop:6,color:wixConnected?fixedGreen:"var(--muted)"}}>
-            <span style={{width:6,height:6,borderRadius:99,background:wixConnected?fixedGreen:"var(--muted)",display:"inline-block",marginRight:4}}/>
-            {wixConnected?"Wix Connected":"Wix Not Connected"}
-          </div>
-          <div style={{fontSize:10,marginTop:4,color:"var(--text-secondary)"}}>
+          <div style={{fontSize:10,marginTop:6,color:"var(--text-secondary)"}}>
             <span style={{color:fixedGreen}}>◈</span> {connectedProviders} AI · {connectedSocial} social
           </div>
           <div style={{fontSize:10,marginTop:4,color:cloudSynced?fixedGreen:"var(--muted)"}}>
@@ -10951,9 +10949,6 @@ export default function Dashboard({ user, workspace }) {
             </div>
           </div>
           <div style={{display:"flex",gap:8}}>
-            {wixConnected && (
-              <button style={btnS} onClick={()=>{setActiveTab("settings");setSettingsSection("wix");}}>↓ Sync Wix</button>
-            )}
             <button style={btnS} onClick={()=>{ const input = document.createElement("input"); input.type="file"; input.accept=".md,.txt,.html"; input.onchange = e => { const file = e.target.files[0]; if(!file) return; const reader = new FileReader(); reader.onload = ev => { const newPost = { id:Date.now(), title:file.name.replace(/\.[^/.]+$/,""), body:ev.target.result, category:"Culture", status:"draft", date:new Date().toISOString().split("T")[0], views:0 }; savePost(newPost); setEditingPost(newPost); setPostEditorOpen(true); }; reader.readAsText(file); }; input.click(); }}>Import</button>
             <button style={btnP} onClick={openNewPost}>+ New Post</button>
           </div>
@@ -11024,6 +11019,7 @@ export default function Dashboard({ user, workspace }) {
               dark={dark}
               userId={userId}
               onConnectGSC={()=>{ setActiveTab("settings"); setSettingsSection("gsc"); }}
+              onGSCDataLoaded={(data)=>{ setGscData(data); saveGSCData(data); }}
               onConnectMeta={()=>{ setActiveTab("settings"); setSettingsSection("meta"); }}
               activeProvider={activeProvider}
               activeModel={activeModel}
@@ -11250,13 +11246,16 @@ export default function Dashboard({ user, workspace }) {
                   <SocialSettings/>
                 )}
 
-                {settingsSection==="wix"&&(
-                  <WixSyncPanel
-                    onSync={handleWixSync}
-                    onDisconnect={handleWixDisconnect}
-                    onConnect={() => setWixConnected(true)}
-                    currentPostCount={posts.length}
-                  />
+                {settingsSection==="publish"&&(
+                  <div>
+                    <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Publishing</h3>
+                    <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 20px", lineHeight:1.6 }}>
+                      Blog Bunker doesn't publish directly to a blog host yet. Write and finish your article in the Pipeline, then copy it and paste it into whichever blog host you use — WordPress, Wix, Squarespace, Ghost, or anywhere else — when you're ready to go live.
+                    </p>
+                    <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                      ✦ Direct social publishing to Facebook, Instagram, and other platforms via Buffer is already live — see <strong style={{color:"var(--text)"}}>Facebook & Instagram</strong> and <strong style={{color:"var(--text)"}}>Buffer (Social)</strong> in this menu. Direct blog-host publishing is still on the roadmap.
+                    </div>
+                  </div>
                 )}
 
                 {settingsSection==="billing"&&(
