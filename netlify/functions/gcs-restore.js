@@ -1,9 +1,9 @@
 /**
  * netlify/functions/gcs-restore.js
- * Scans the GCS bucket for a userId's files and rebuilds the Netlify Blobs
- * media library metadata index. Called when metadata is lost.
+ * Scans GCS bucket for userId files and rebuilds Netlify Blobs metadata.
+ * Supports scanning multiple userId prefixes and merging results.
  *
- * POST /api/gcs-restore { userId }
+ * POST /api/gcs-restore { userId, extraUserIds? }
  */
 
 import { getStore } from "@netlify/blobs";
@@ -38,56 +38,79 @@ async function getGCSToken() {
   return data.access_token;
 }
 
+async function listObjects(token, prefix) {
+  const res  = await fetch(
+    `${GCS_API}/storage/v1/b/${BUCKET}/o?prefix=${encodeURIComponent(prefix + "/")}&maxResults=1000`,
+    { headers: { "Authorization": `Bearer ${token}` } }
+  );
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.items || [];
+}
+
+function objectToItem(obj) {
+  const name      = obj.name;
+  const fileName  = name.split("/").pop();
+  const ext       = fileName.split(".").pop()?.toLowerCase() || "jpg";
+  const mimeType  = ext === "mp4" || ext === "mov" || ext === "webm"
+    ? `video/${ext}`
+    : `image/${ext === "jpg" ? "jpeg" : ext}`;
+  return {
+    id:        name,
+    url:       `${GCS_API}/${BUCKET}/${name}`,
+    name:      fileName.replace(/\.[^.]+$/, "").replace(/_[a-z0-9]{5}$/, "").replace(/_/g, " "),
+    type:      mimeType,
+    size:      parseInt(obj.size) || 0,
+    tags:      [],
+    notes:     "",
+    source:    "restored",
+    mediaType: mimeType.startsWith("video/") ? "video" : "image",
+    createdAt: obj.timeCreated || new Date().toISOString(),
+    status:    "ready",
+  };
+}
+
 export default async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status:204, headers:CORS });
   if (req.method !== "POST")    return new Response(JSON.stringify({ error:"POST only" }), { status:405, headers:CORS });
 
   try {
-    const { userId } = await req.json();
+    const { userId, extraUserIds = [] } = await req.json();
     if (!userId) return new Response(JSON.stringify({ error:"userId required" }), { status:400, headers:CORS });
 
     const token = await getGCSToken();
 
-    // List all objects in bucket with this userId as prefix
-    const listRes = await fetch(
-      `${GCS_API}/storage/v1/b/${BUCKET}/o?prefix=${encodeURIComponent(userId + "/")}&maxResults=1000`,
-      { headers: { "Authorization": `Bearer ${token}` } }
-    );
-    const listData = await listRes.json();
-    if (listData.error) throw new Error(listData.error.message);
+    // Scan all userId prefixes (email + numeric ID + any extras)
+    const allPrefixes = [userId, ...extraUserIds].filter(Boolean);
+    const allObjects  = [];
 
-    const objects = listData.items || [];
-    console.log(`[gcs-restore] Found ${objects.length} objects for ${userId}`);
+    for (const prefix of allPrefixes) {
+      const objects = await listObjects(token, prefix);
+      console.log(`[gcs-restore] ${prefix}: ${objects.length} objects`);
+      allObjects.push(...objects);
+    }
 
-    // Build metadata items from GCS objects
-    const items = objects.map(obj => {
-      const name      = obj.name; // e.g. "forestearly4@gmail.com/1234_abc.jpg"
-      const fileName  = name.split("/").pop();
-      const ext       = fileName.split(".").pop()?.toLowerCase() || "jpg";
-      const mimeType  = ext === "mp4" || ext === "mov" || ext === "webm"
-        ? `video/${ext}`
-        : `image/${ext === "jpg" ? "jpeg" : ext}`;
-      const mediaType = mimeType.startsWith("video/") ? "video" : "image";
-      return {
-        id:        name,
-        url:       `${GCS_API}/${BUCKET}/${name}`,
-        name:      fileName.replace(/\.[^.]+$/, "").replace(/_[a-z0-9]{5}$/, "").replace(/_/g, " "),
-        type:      mimeType,
-        size:      parseInt(obj.size) || 0,
-        tags:      [],
-        notes:     "",
-        source:    "restored",
-        mediaType,
-        createdAt: obj.timeCreated || new Date().toISOString(),
-        status:    "ready",
-      };
+    // Deduplicate by filename
+    const seen = new Set();
+    const unique = allObjects.filter(obj => {
+      const key = obj.name.split("/").pop();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
     });
 
-    // Save restored metadata to Blobs
+    // Build metadata items — normalize all URLs to use the primary userId
+    const items = unique.map(obj => {
+      const item = objectToItem(obj);
+      // If found under a different prefix, keep original URL (still accessible)
+      return item;
+    });
+
+    // Save merged metadata under primary userId
     const store = getStore("blog-bunker-data");
     await store.setJSON(`${userId}:media_library`, items);
 
-    console.log(`[gcs-restore] Restored ${items.length} items for ${userId}`);
+    console.log(`[gcs-restore] Restored ${items.length} total items for ${userId}`);
     return new Response(JSON.stringify({ success: true, restored: items.length, items }), { status:200, headers:CORS });
 
   } catch(e) {
