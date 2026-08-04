@@ -11,9 +11,13 @@ export default defineConfig({
     chunkSizeWarningLimit: 2000,
     rollupOptions: {
       output: {
-        // Split vendor libs into separate chunk
+        // Split vendor libs into separate chunks.
+        // IMPORTANT: react/react-dom must NOT be split into their own chunk here —
+        // tiptap consumes React hooks (useCallback, etc.) at module-init time, and
+        // separating vendor-react caused Rollup to emit a near-empty chunk with
+        // broken load order, producing "useCallback is not defined" crashes.
+        // React is left to bundle naturally with whatever pulls it in first.
         manualChunks: {
-          "vendor-react": ["react", "react-dom"],
           "vendor-tiptap": [
             "@tiptap/react",
             "@tiptap/starter-kit",
