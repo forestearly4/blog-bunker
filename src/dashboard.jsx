@@ -6948,7 +6948,6 @@ function MediaLibrary({ userId }) {
   const [restyleResult,  setRestyleResult]  = useState(null);
   const [restyleError,   setRestyleError]   = useState("");
   const [restyleOpen,    setRestyleOpen]    = useState(false);
-  const [overlayOpen,    setOverlayOpen]    = useState(false);
   const [restyleStrength,setRestyleStrength]= useState(0.65); // 0=keep original, 1=full restyle
   const fileInput = useRef(null);
 
@@ -7025,7 +7024,10 @@ function MediaLibrary({ userId }) {
         });
         const text = await res.text();
         if (text.trimStart().startsWith("<")) throw new Error("Server timeout — try again");
-        const data = JSON.parse(text);
+        if (!text.trim()) throw new Error("The image edit took too long and the connection was cut off before OpenAI finished responding. Try again — if it keeps happening, try a smaller image.");
+        let data;
+        try { data = JSON.parse(text); }
+        catch { throw new Error("The server response was cut off before finishing (likely a timeout on a slow edit). Try again."); }
         if (data.error) throw new Error(`OpenAI: ${data.error}`);
         if (!data.b64) throw new Error("No image data returned");
         setRestyleResult(`data:image/png;base64,${data.b64}`);
@@ -7057,7 +7059,10 @@ function MediaLibrary({ userId }) {
         }
         const text = await res.text();
         if (text.trimStart().startsWith("<")) throw new Error("Server timeout — try again");
-        const data = JSON.parse(text);
+        if (!text.trim()) throw new Error("The image edit took too long and the connection was cut off before Gemini finished responding. Try again — if it keeps happening, try a smaller image or switch to OpenAI.");
+        let data;
+        try { data = JSON.parse(text); }
+        catch { throw new Error("The server response was cut off before finishing (likely a timeout on a slow edit). Try again."); }
         if (data.error) throw new Error(`Gemini: ${data.error}`);
         if (!data.b64) throw new Error("No image data returned");
         setRestyleResult(`data:${data.mimeType || "image/png"};base64,${data.b64}`);
@@ -7404,13 +7409,9 @@ function MediaLibrary({ userId }) {
                     <button onClick={() => download(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                       ↓ Download
                     </button>
-                    <button onClick={() => { setRestyleOpen(o=>!o); setOverlayOpen(false); setRestyleResult(null); setRestyleError(""); }}
+                    <button onClick={() => { setRestyleOpen(o=>!o); setRestyleResult(null); setRestyleError(""); }}
                       style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${restyleOpen?"var(--amber)":"var(--border)"}`, background:restyleOpen?"var(--amber-glow)":"transparent", color:restyleOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:restyleOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
                       ✦ AI Restyle
-                    </button>
-                    <button onClick={() => { setOverlayOpen(o=>!o); setRestyleOpen(false); }}
-                      style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${overlayOpen?"var(--amber)":"var(--border)"}`, background:overlayOpen?"var(--amber-glow)":"transparent", color:overlayOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:overlayOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-                      ✎ Text Overlay
                     </button>
                   </div>
                 </div>
@@ -7503,19 +7504,6 @@ function MediaLibrary({ userId }) {
                 </div>
               )}
 
-              {/* ── TEXT OVERLAY EDITOR ── */}
-              {overlayOpen && selected && (
-                <ImageTextOverlayEditor
-                  imageUrl={selected.url || selected.dataUrl}
-                  imageName={selected.name}
-                  userId={resolvedUserId}
-                  onSave={(newItem) => {
-                    setItems(prev => [newItem, ...prev]);
-                    setOverlayOpen(false);
-                    setSelected(newItem);
-                  }}
-                />
-              )}
             </div>
           )}
         </>
