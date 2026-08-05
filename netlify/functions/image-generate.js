@@ -119,11 +119,12 @@ export default async (req) => {
       const imageBlob = new Blob([byteArr], { type: "image/png" });
 
       const formData = new FormData();
-      formData.append("model",  "gpt-image-2");
-      formData.append("image",  imageBlob, "image.png");
-      formData.append("prompt", prompt);
-      formData.append("n",      "1");
-      formData.append("size",   size || "1024x1024");
+      formData.append("model",   "gpt-image-2");
+      formData.append("image",   imageBlob, "image.png");
+      formData.append("prompt",  prompt);
+      formData.append("n",       "1");
+      formData.append("size",    size || "1024x1024");
+      formData.append("quality", quality || "medium"); // gpt-image-2 "high"/"auto" can be slow enough to exceed the function's sync timeout
 
       const res = await fetch("https://api.openai.com/v1/images/edits", {
         method:  "POST",
