@@ -106,70 +106,11 @@ export default async (req) => {
       return new Response(JSON.stringify({ b64, mimeType: "image/png" }), { status: 200, headers: CORS });
     }
 
-    // ── OPENAI IMAGE EDIT (restyle uploaded image) ──────────────────────────────
-    if (provider === "openai-edit") {
-      const { imageBase64 } = body;
-      if (!imageBase64) throw new Error("imageBase64 required for openai-edit");
-
-      // Convert base64 to proper RGBA PNG using canvas-like processing
-      // Build a valid PNG from the base64 data
-      const byteChars = atob(imageBase64);
-      const byteArr   = new Uint8Array(byteChars.length);
-      for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
-      const imageBlob = new Blob([byteArr], { type: "image/png" });
-
-      const formData = new FormData();
-      formData.append("model",   "gpt-image-2");
-      formData.append("image",   imageBlob, "image.png");
-      formData.append("prompt",  prompt);
-      formData.append("n",       "1");
-      formData.append("size",    size || "1024x1024");
-      formData.append("quality", quality || "medium"); // gpt-image-2 "high"/"auto" can be slow enough to exceed the function's sync timeout
-
-      const res = await fetch("https://api.openai.com/v1/images/edits", {
-        method:  "POST",
-        headers: { "Authorization": `Bearer ${apiKey}` },
-        body:    formData,
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error.message);
-      const b64 = data.data?.[0]?.b64_json;
-      if (!b64) throw new Error("No image data returned from OpenAI edits");
-      return new Response(JSON.stringify({ b64, mimeType: "image/png" }), { status: 200, headers: CORS });
-    }
-
-    // ── GEMINI IMAGE EDIT (restyle uploaded image) ──────────────────────────────
-    if (provider === "gemini-edit") {
-      const { imageBase64 } = body;
-      if (!imageBase64) throw new Error("imageBase64 required for gemini-edit");
-
-      const models = ["gemini-3.1-flash-image-preview", "gemini-2.5-flash-image"];
-      let lastErr = "";
-      for (const model of models) {
-        try {
-          const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-          const res = await fetch(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  { inline_data: { mime_type: "image/png", data: imageBase64 } },
-                  { text: prompt },
-                ],
-              }],
-              generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
-            }),
-          });
-          const data = await res.json();
-          if (data.error) { lastErr = data.error.message; continue; }
-          const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-          if (!part) { lastErr = "No image returned"; continue; }
-          return new Response(JSON.stringify({ b64: part.inlineData.data, mimeType: part.inlineData.mimeType || "image/png" }), { status: 200, headers: CORS });
-        } catch(e) { lastErr = e.message; }
-      }
-      throw new Error(lastErr || "All Gemini models failed");
-    }
+    // NOTE: openai-edit and gemini-edit (AI Restyle) moved to a background-job
+    // architecture — see image-edit.js + image-edit-status.js. gpt-image-2 edits
+    // can take longer than this function's ~10-26s sync timeout, which was
+    // causing the connection to be cut mid-response ("Unexpected end of JSON
+    // input" on the client). Background functions get up to 15 minutes.
 
     return new Response(JSON.stringify({ error: `Unknown provider: ${provider}` }), { status: 400, headers: CORS });
 
