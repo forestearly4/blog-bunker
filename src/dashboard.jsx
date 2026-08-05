@@ -2639,11 +2639,12 @@ function clearPipelineDraft() {
   try { localStorage.removeItem(PIPELINE_STORAGE); } catch {}
 }
 
-function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null }) {
+function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null, initialPost = null, onConsumedInitialPost = null }) {
   const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
   const saved = loadPipelineDraft();
   const [stage,     setStage]    = useState(saved?.stage     || "brief");
   const [completed, setCompleted]= useState(saved?.completed || []);
+  const [pipelinePostId, setPipelinePostId] = useState(saved?.pipelinePostId || null); // tracks the original post id when editing an existing article, so re-publishing updates it instead of creating a duplicate
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
 
   // Shared pipeline state — restored from localStorage if available
@@ -2679,14 +2680,31 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     setSaveStatus("saving");
     clearTimeout(autosaveTimer.current);
     autosaveTimer.current = setTimeout(() => {
-      const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, savedAt: new Date().toISOString() };
+      const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, pipelinePostId, savedAt: new Date().toISOString() };
       savePipelineDraft(data);
       setSavedAt(data.savedAt);
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus(""), 2500);
     }, 1500);
     return () => clearTimeout(autosaveTimer.current);
-  }, [stage, completed, brief, draft, enhance, social.posts, schedule]);
+  }, [stage, completed, brief, draft, enhance, social.posts, schedule, pipelinePostId]);
+
+  // Load an article handed off from the Posts tab ("→ Pipeline" button) — skips
+  // straight to the Enhance stage since the brief/draft are already written.
+  useEffect(() => {
+    if (!initialPost || initialPost.id === pipelinePostId) return;
+    const hasUnsavedWork = (brief.topic || draft.title || draft.body) && pipelinePostId !== initialPost.id;
+    if (hasUnsavedWork && !window.confirm(`Load "${initialPost.title}" into the Pipeline? This will replace what's currently in progress here (your current work is saved separately and won't be lost, but the Pipeline will switch to this article).`)) {
+      if (onConsumedInitialPost) onConsumedInitialPost();
+      return;
+    }
+    setDraft({ title: initialPost.title || "", body: initialPost.body || "", category: initialPost.category || "Culture", tone: "literary" });
+    setBrief(b => ({ ...b, topic: initialPost.title || b.topic }));
+    setPipelinePostId(initialPost.id);
+    setCompleted(c => [...new Set([...c, "brief", "draft"])]);
+    setStage("enhance");
+    if (onConsumedInitialPost) onConsumedInitialPost();
+  }, [initialPost]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
   const advanceTo = (next) => { setStage(next); setError(""); setSuccess(""); };
@@ -2841,7 +2859,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
     setLoading(true); setLoadMsg("Publishing…"); setError(""); setSuccess("");
     try {
       const finalPost = {
-        id: Date.now(),
+        id: pipelinePostId || Date.now(),
         title: enhance.metaTitle || draft.title,
         body: draft.body,
         category: draft.category,
@@ -3380,7 +3398,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                       <button onClick={() => {
                         // Auto-save to Posts tab first
                         const finalPost = {
-                          id: Date.now(),
+                          id: pipelinePostId || Date.now(),
                           title: enhance.metaTitle || draft.title,
                           body: draft.body,
                           category: draft.category,
@@ -3871,7 +3889,7 @@ function GSCAnalyticsView({ data, onRefresh }) {
 
 // ─── POSTS TAB ────────────────────────────────────────────────────────────────
 
-function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, savePost, openEditPost, card }) {
+function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, savePost, openEditPost, onSendToPipeline, card }) {
   const [selectedIds, setSelectedIds] = useState([]);
   const allSelected = filteredPosts.length > 0 && filteredPosts.every(p => selectedIds.includes(p.id));
 
@@ -3936,7 +3954,7 @@ function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, s
                   {allSelected&&<span style={{fontSize:10,color:"#0e0f11",fontWeight:900}}>✓</span>}
                 </div>
               </th>
-              {["Title","Category","Status","Date","Views"].map(h=>(
+              {["Title","Category","Status","Date","Views",""].map(h=>(
                 <th key={h} style={{textAlign:"left",padding:"12px 16px",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{h}</th>
               ))}
             </tr>
@@ -3965,6 +3983,12 @@ function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, s
                   </td>
                   <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)",cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.date}</td>
                   <td style={{padding:"14px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.views>0?p.views.toLocaleString():"—"}</td>
+                  <td style={{padding:"14px 16px"}} onClick={e=>e.stopPropagation()}>
+                    <button onClick={()=>onSendToPipeline(p)} title="Continue this article in the Pipeline"
+                      style={{padding:"5px 12px",borderRadius:7,border:"1px solid var(--amber)44",background:"transparent",color:"var(--amber)",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",whiteSpace:"nowrap"}}>
+                      → Pipeline
+                    </button>
+                  </td>
                 </tr>
               );
             })}
@@ -5083,14 +5107,11 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   const [completed, setCompleted] = useState(saved?.completed || []);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
 
-  const PLATFORMS = [
-    { id:"instagram", label:"Instagram", color:"#e1306c", icon:"📸" },
-    { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
-    { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
-    { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
-    { id:"pinterest", label:"Pinterest", color:"#e60023", icon:"📌" },
-    { id:"reddit",    label:"Reddit",    color:"#ff4500", icon:"🤖" },
-  ];
+  // Derived from the module-level SOCIAL_PLATFORMS so bestTimes/charLimit/hashtagLimit/
+  // tone/format stay in sync — the old hand-duplicated list here was missing all of
+  // those fields, which is why Best Times never showed and captions had no length cap.
+  const PLATFORMS = SOCIAL_PLATFORMS.filter(p => ["instagram","facebook","tiktok","twitter","pinterest","reddit"].includes(p.id))
+    .map(p => ({ id:p.id, label:p.name.replace(" (Twitter)",""), color:p.color, icon:p.icon, charLimit:p.charLimit, hashtagLimit:p.hashtagLimit, bestTimes:p.bestTimes, tone:p.tone, format:p.format }));
 
   // idea.platforms is now an ARRAY — supports multi-select
   const [idea, setIdea] = useState(saved?.idea || { topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
@@ -5153,23 +5174,29 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
   // ── STAGE 2: CAPTIONS (one per selected platform) ───────────────────────────
 
-  const toneMap = {
-    instagram: "warm, visual storytelling, evocative — Instagram caption style",
-    facebook:  "conversational, community-focused, slightly longer form",
-    tiktok:    "punchy, trend-aware, hook-first, short sentences",
-    twitter:   "concise, witty, under 280 characters",
-  };
+  // Strips any hashtags the AI includes despite instructions not to — hashtags
+  // are handled entirely in the separate Hashtags stage, never in the caption itself.
+  const stripHashtags = (text) => text
+    .replace(/(?:^|\n)\s*#[^\s#]+(?:\s+#[^\s#]+)*\s*$/g, "") // trailing hashtag line(s)
+    .replace(/(?<!\S)#[^\s#]+/g, "") // any inline hashtag token
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  const captionPromptFor = (plat) =>
+    `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${plat.tone || plat.label}. Format: ${plat.format || ""} Keep the caption itself under ${plat.charLimit} characters. Do NOT include any hashtags — hashtags are added separately in a later step, so the caption must have zero # tags.`;
 
   const generateCaptionFor = async (platId) => {
     if (!idea.topic.trim()) return;
-    setLoading(true); setLoadMsg(`Writing ${PLATFORMS.find(p=>p.id===platId)?.label} caption…`); setError("");
+    const plat = PLATFORMS.find(p => p.id === platId);
+    setLoading(true); setLoadMsg(`Writing ${plat?.label} caption…`); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
-        `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${toneMap[platId]}.`,
+        captionPromptFor(plat),
         `Write a ${platId} caption (post type: ${idea.type}) about: ${idea.topic}`,
         apiKeys[activeProvider]
       );
-      setCaptions(c => ({ ...c, [platId]: { text: text.trim() } }));
+      setCaptions(c => ({ ...c, [platId]: { text: stripHashtags(text.trim()) } }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
@@ -5180,11 +5207,11 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       setLoadMsg(`Writing ${plat.label} caption…`);
       try {
         const text = await callAI(activeProvider, activeModel,
-          `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${toneMap[plat.id]}.`,
+          captionPromptFor(plat),
           `Write a ${plat.id} caption (post type: ${idea.type}) about: ${idea.topic}`,
           apiKeys[activeProvider]
         );
-        setCaptions(c => ({ ...c, [plat.id]: { text: text.trim() } }));
+        setCaptions(c => ({ ...c, [plat.id]: { text: stripHashtags(text.trim()) } }));
       } catch(e) { setError(`${plat.label}: ${e.message}`); }
     }
     setLoading(false); setLoadMsg("");
@@ -5196,15 +5223,26 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setLoading(true); setLoadMsg("Optimizing hashtags…"); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
-        `You are a hashtag strategist for Cask & Stream. Return ONLY valid JSON (no fences): {"primary":["#tag1","#tag2"],"niche":["#tag1"],"branded":["#CaskAndStream"],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags.`,
+        `You are a hashtag strategist for Cask & Stream. Return ONLY valid JSON (no fences): {"primary":[{"tag":"#tag1","score":85}],"niche":[{"tag":"#tag1","score":40}],"branded":[{"tag":"#CaskAndStream","score":20}],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags. "score" is your best estimate of reach potential from 1-100 (higher = broader audience but more competition to be seen; lower = smaller but more targeted audience).`,
         `Topic: ${idea.topic}\nPlatforms: ${idea.platforms.join(", ")}`,
         apiKeys[activeProvider]
       );
       const parsed = parseAIJson(text);
+      // Normalize to {tag, score} objects — tolerate the AI occasionally returning plain strings
+      for (const key of ["primary","niche","branded"]) {
+        if (Array.isArray(parsed[key])) {
+          parsed[key] = parsed[key].map(t => typeof t === "string" ? { tag: t, score: null } : { tag: t.tag, score: typeof t.score === "number" ? t.score : null });
+        }
+      }
       setHashtags({ sets: parsed, selected: parsed.full_set || "" });
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
+
+  // Tolerates both the new {tag,score} shape and legacy plain-string entries from
+  // previously-saved in-progress drafts.
+  const tagText = (t) => typeof t === "string" ? t : t?.tag;
+  const scoreColor = (score) => score == null ? "var(--muted)" : score >= 70 ? "#5cba6c" : score >= 40 ? "var(--amber)" : "#7c9ce0";
 
   // ── STAGE 4: IMAGE (shared across platforms) ────────────────────────────────
 
@@ -5270,35 +5308,25 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   const handleSchedule = async () => {
     setLoading(true); setError(""); setLoadMsg("Preparing post…");
 
-    // Ensure image is in GCS before scheduling (blob: URLs won't survive the cron)
+    // Ensure image is on a public https:// URL before scheduling — blob:/data:
+    // URLs only exist in this browser tab and are meaningless to the server-side
+    // cron job that actually publishes the post later. Uses the same robust
+    // helper as immediate Facebook/Instagram publishing (handles size limits,
+    // throws real errors instead of silently failing).
     let finalImageUrl = imageData.url;
     if (finalImageUrl?.startsWith("blob:") || finalImageUrl?.startsWith("data:")) {
       setLoadMsg("Uploading image to cloud…");
       try {
-        const userId = window.__bbUserId || "anonymous";
-        let dataUrl  = finalImageUrl;
-        if (finalImageUrl.startsWith("blob:")) {
-          const res  = await fetch(finalImageUrl);
-          const blob = await res.blob();
-          dataUrl = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload  = () => resolve(reader.result);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-          });
-        }
-        const uploadRes  = await fetch("/api/gcs", {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ userId, dataUrl, name:`social-${Date.now()}`, tags:["social","scheduled"], source:"generated" }),
-        });
-        const uploadData = await uploadRes.json();
-        if (uploadData.url) finalImageUrl = uploadData.url;
-      } catch(e) { console.warn("Image GCS upload failed:", e.message); }
+        finalImageUrl = await ensurePublicImageUrl(finalImageUrl);
+      } catch(e) {
+        setError(`Couldn't upload the image, so this post was NOT scheduled (an image-less post would silently fail to attach later): ${e.message}. Try again, or remove the image and schedule without one.`);
+        setLoading(false); setLoadMsg("");
+        return; // STOP — never save a scheduled post referencing an unusable blob:/data: URL
+      }
     }
 
     const post = buildSocialPostRecord("scheduled", scheduleDate);
-    post.imageUrl = finalImageUrl; // use GCS URL
+    post.imageUrl = finalImageUrl; // use public URL
     if (onSaveSocialPost) onSaveSocialPost(post);
     setSuccess(`✓ Scheduled for ${new Date(scheduleDate).toLocaleString([], {dateStyle:"medium",timeStyle:"short"})}`);
     markDone("publish");
@@ -5331,40 +5359,13 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
           results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
 
         } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
-          // Buffer platforms — image must be a public https:// GCS URL
+          // Buffer platforms — image must be a public https:// URL
           let publicImageUrl = imageData.url;
 
-          // If we have a blob: URL, upload it to GCS first
           if (publicImageUrl?.startsWith("blob:") || publicImageUrl?.startsWith("data:")) {
             setLoadMsg(`Uploading image to cloud for ${plat.label}…`);
-            try {
-              const userId = window.__bbUserId || "anonymous";
-              let dataUrl = publicImageUrl;
-              if (publicImageUrl.startsWith("blob:")) {
-                const res  = await fetch(publicImageUrl);
-                const blob = await res.blob();
-                dataUrl = await new Promise((resolve, reject) => {
-                  const reader = new FileReader();
-                  reader.onload  = () => resolve(reader.result);
-                  reader.onerror = reject;
-                  reader.readAsDataURL(blob);
-                });
-              }
-              const uploadRes = await fetch("/api/gcs", {
-                method:  "POST",
-                headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({ userId, dataUrl, name:`social-${Date.now()}`, tags:["social","generated"], source:"generated" }),
-              });
-              const uploadData = await uploadRes.json();
-              if (uploadData.url) publicImageUrl = uploadData.url;
-            } catch(e) {
-              console.warn("Image upload to GCS failed:", e.message);
-              publicImageUrl = null;
-            }
+            publicImageUrl = await ensurePublicImageUrl(publicImageUrl); // throws on real failure — caught below, surfaced clearly instead of silently posting without the image
           }
-
-          // Ensure we have a valid public URL
-          if (!publicImageUrl?.startsWith("https://")) publicImageUrl = null;
 
           const channelId = bufferCfg.mapping[plat.id];
           setLoadMsg(`Publishing to ${plat.label} via Buffer…`);
@@ -5557,8 +5558,16 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               </div>
               <textarea value={captions[plat.id]?.text || ""} onChange={e=>setCaptions(c=>({...c,[plat.id]:{text:e.target.value}}))} rows={5}
                 placeholder="Caption will appear here — or write your own…"
-                style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
-              <div style={{ fontSize:11, color:"var(--muted)", marginTop:6, textAlign:"right" }}>{(captions[plat.id]?.text || "").length} characters</div>
+                style={{ ...iS, resize:"vertical", lineHeight:1.7, borderColor:(captions[plat.id]?.text||"").length > plat.charLimit ? "var(--red)" : undefined }} />
+              {(() => {
+                const len = (captions[plat.id]?.text || "").length;
+                const over = len > plat.charLimit;
+                return (
+                  <div style={{ fontSize:11, color: over ? "var(--red)" : "var(--muted)", marginTop:6, textAlign:"right", fontWeight: over ? 700 : 400 }}>
+                    {over && "⚠ "}{len}{plat.charLimit < 40000 ? ` / ${plat.charLimit}` : ""} characters{over ? ` — over by ${len - plat.charLimit}` : ""}
+                  </div>
+                );
+              })()}
             </div>
           ))}
 
@@ -5601,7 +5610,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                     <span style={{ fontSize:10, color:"var(--muted)" }}>— {g.hint} · click to add/remove</span>
                     <button onClick={() => {
                       // Select all in this group
-                      const all = hashtags.sets[g.key] || [];
+                      const all = (hashtags.sets[g.key] || []).map(tagText);
                       const current = hashtags.selected.split(/\s+/).filter(Boolean);
                       const allSelected = all.every(t => current.includes(t));
                       const next = allSelected
@@ -5611,14 +5620,16 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                     }}
                       style={{ marginLeft:"auto", padding:"2px 8px", borderRadius:6, border:`1px solid ${g.color}44`, background:"transparent", color:g.color, fontSize:10, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                       {(() => {
-                        const all = hashtags.sets[g.key] || [];
+                        const all = (hashtags.sets[g.key] || []).map(tagText);
                         const current = hashtags.selected.split(/\s+/).filter(Boolean);
                         return all.every(t => current.includes(t)) ? "Deselect All" : "Select All";
                       })()}
                     </button>
                   </div>
                   <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                    {hashtags.sets[g.key]?.map((tag, i) => {
+                    {hashtags.sets[g.key]?.map((entry, i) => {
+                      const tag = tagText(entry);
+                      const score = typeof entry === "object" ? entry.score : null;
                       const selected = hashtags.selected.split(/\s+/).includes(tag);
                       return (
                         <button key={i} onClick={() => {
@@ -5628,8 +5639,12 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                             : [...current, tag];
                           setHashtags(h => ({...h, selected: next.join(" ")}));
                         }}
-                          style={{ fontSize:12, padding:"5px 12px", borderRadius:99, border:`1px solid ${selected ? g.color : g.color+"33"}`, background:selected ? g.color+"20" : "transparent", color:selected ? g.color : "var(--text-secondary)", cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:selected ? 700 : 400, transition:"all 0.15s" }}>
-                          {selected && <span style={{ marginRight:4, fontSize:10 }}>✓</span>}{tag}
+                          title={score != null ? `Reach score: ${score}/100` : undefined}
+                          style={{ display:"inline-flex", alignItems:"center", gap:5, fontSize:12, padding:"5px 10px 5px 12px", borderRadius:99, border:`1px solid ${selected ? g.color : g.color+"33"}`, background:selected ? g.color+"20" : "transparent", color:selected ? g.color : "var(--text-secondary)", cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:selected ? 700 : 400, transition:"all 0.15s" }}>
+                          {selected && <span style={{ fontSize:10 }}>✓</span>}{tag}
+                          {score != null && (
+                            <span style={{ fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:99, background:scoreColor(score)+"22", color:scoreColor(score) }}>{score}</span>
+                          )}
                         </button>
                       );
                     })}
@@ -5678,7 +5693,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   Clear all
                 </button>
                 <button onClick={() => {
-                  const all = [...(hashtags.sets.primary||[]),...(hashtags.sets.niche||[]),...(hashtags.sets.branded||[])];
+                  const all = [...(hashtags.sets.primary||[]),...(hashtags.sets.niche||[]),...(hashtags.sets.branded||[])].map(tagText);
                   setHashtags(h => ({...h, selected: [...new Set(all)].join(" ")}));
                 }}
                   style={{ padding:"3px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -5867,6 +5882,23 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                       {hasMetaDirect && <div>● <strong style={{color:"var(--text)"}}>Facebook/Instagram</strong> — posts directly</div>}
                       {hasBuffer     && <div style={{color:"#1da1f2"}}>● <strong>Buffer platforms</strong> — adds to Buffer queue immediately</div>}
                       {hasManual     && <div style={{color:"var(--amber)"}}>⚠ Some platforms not connected — caption copied to clipboard for manual posting. Connect in <strong>Settings → Buffer</strong>.</div>}
+                    </div>
+                  );
+                })()}
+
+                {/* Combined caption + hashtags character limit check */}
+                {(() => {
+                  const overs = selectedPlatforms
+                    .map(p => {
+                      const captionText = captions[p.id]?.text || "";
+                      const combined = [captionText, hashtags.selected].filter(Boolean).join("\n\n");
+                      return { p, len: combined.length };
+                    })
+                    .filter(({ p, len }) => len > p.charLimit);
+                  if (overs.length === 0) return null;
+                  return (
+                    <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", fontSize:12, color:"var(--red)", fontWeight:600 }}>
+                      ⚠ Caption + hashtags together are over the limit for: {overs.map(({p,len}) => `${p.label} (${len}/${p.charLimit})`).join(", ")}. Trim the caption or select fewer hashtags before posting.
                     </div>
                   );
                 })()}
@@ -10573,6 +10605,7 @@ export default function Dashboard({ user, workspace }) {
   const [activeTab,       setActiveTab]      = useState("posts");
   const [postFilter,      setPostFilter]     = useState("all");
   const [researchTab,     setResearchTab]    = useState("competitors");
+  const [blogTab,         setBlogTab]        = useState("pipeline");
   const [aiTool,          setAiTool]         = useState("writer");
   const [settingsSection, setSettingsSection]= useState("general");
   const [showUpgrade,     setShowUpgrade]    = useState(false);
@@ -10692,6 +10725,8 @@ export default function Dashboard({ user, workspace }) {
   // ── Modal state
   const [postEditorOpen,    setPostEditorOpen]    = useState(false);
   const [editingPost,       setEditingPost]       = useState(null);
+  const [pipelineInitialPost, setPipelineInitialPost] = useState(null);
+  const sendPostToPipeline = (post) => { setPipelineInitialPost(post); setActiveTab("blog"); setBlogTab("pipeline"); };
   const [addCompetitorOpen, setAddCompetitorOpen] = useState(false);
   const [addInspirationOpen,setAddInspirationOpen]= useState(false);
   const [calModalDay,       setCalModalDay]       = useState(null);
@@ -10716,7 +10751,8 @@ export default function Dashboard({ user, workspace }) {
     setPosts(all => [newPost, ...all]);
     setEditingPost(newPost);
     setPostEditorOpen(true);
-    setActiveTab("posts");
+    setActiveTab("blog");
+    setBlogTab("posts");
   };
 
   const saveCalEvent = (ev) => setCalEvents(all => [...all, ev]);
@@ -10832,12 +10868,9 @@ export default function Dashboard({ user, workspace }) {
   const connectedSocial    = SOCIAL_PLATFORMS.filter(p => loadSocialConnections()[p.id]?.enabled).length;
 
   const TABS = [
-    { id:"pipeline",  label:"Pipeline",   icon:"◈", highlight:true },
-    { id:"posts",     label:"Posts",      icon:"▤" },
+    { id:"blog",      label:"Blog",       icon:"◈", highlight:true },
     { id:"analytics", label:"Analytics",  icon:"◔" },
     { id:"calendar",  label:"Calendar",   icon:"▦" },
-    { id:"research",  label:"Research",   icon:"◎" },
-    { id:"ai",        label:"AI Tools",   icon:"✦" },
     { id:"social",    label:"Marketing",  icon:"▣" },
     { id:"settings",  label:"Settings",   icon:"⚙" },
   ];
@@ -10990,10 +11023,10 @@ export default function Dashboard({ user, workspace }) {
         {/* ── MOBILE BOTTOM NAV ── */}
         <nav className="bb-mobile-nav">
           {[
-            { id:"pipeline",  icon:"◈", label:"Pipeline" },
-            { id:"posts",     icon:"▤", label:"Posts"    },
+            { id:"blog",      icon:"◈", label:"Blog"    },
             { id:"social",    icon:"▣", label:"Market"   },
             { id:"analytics", icon:"◔", label:"Analytics"},
+            { id:"calendar",  icon:"▦", label:"Calendar" },
             { id:"settings",  icon:"⚙", label:"Settings" },
           ].map(t => (
             <button key={t.id} className={activeTab===t.id?"active":""} onClick={() => setActiveTab(t.id)}>
@@ -11005,9 +11038,19 @@ export default function Dashboard({ user, workspace }) {
 
         <div className="bb-main-content" style={{flex:1,overflow:"auto",padding:28}}>
 
-          {/* ══ PIPELINE ══ */}
-          {activeTab==="pipeline"&&(
-            <ContentPipeline
+          {/* ══ BLOG ══ */}
+          {activeTab==="blog"&&(
+            <div>
+              <div style={{display:"flex",gap:4,marginBottom:24,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content"}}>
+                {[{id:"pipeline",label:"Article Pipeline",icon:"◈",highlight:true},{id:"posts",label:"Posts",icon:"▤"},{id:"research",label:"Research",icon:"◎"}].map(t=>(
+                  <button key={t.id} onClick={()=>setBlogTab(t.id)} style={{padding:"8px 16px",borderRadius:8,border:"none",background:blogTab===t.id?"var(--amber)":"transparent",color:blogTab===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:6}}>
+                    <span>{t.icon}</span>{t.label}
+                  </button>
+                ))}
+              </div>
+
+              {blogTab==="pipeline"&&(
+                <ContentPipeline
               posts={posts}
               inspiration={inspiration}
               competitors={competitors}
@@ -11024,12 +11067,13 @@ export default function Dashboard({ user, workspace }) {
               onProviderChange={handleProviderChange}
               onModelChange={handleModelChange}
               brandGuide={brandGuide}
+              initialPost={pipelineInitialPost}
+              onConsumedInitialPost={() => setPipelineInitialPost(null)}
             />
-          )}
+              )}
 
-          {/* ══ POSTS ══ */}
-          {activeTab==="posts"&&(
-            <PostsTab
+              {blogTab==="posts"&&(
+                <PostsTab
               posts={posts}
               filteredPosts={filteredPosts}
               postFilter={postFilter}
@@ -11037,44 +11081,13 @@ export default function Dashboard({ user, workspace }) {
               setPosts={setPosts}
               savePost={savePost}
               openEditPost={openEditPost}
+              onSendToPipeline={sendPostToPipeline}
               card={card}
               btnP={btnP}
             />
-          )}
+              )}
 
-          {/* ══ ANALYTICS ══ */}
-          {activeTab==="analytics"&&(
-            <AnalyticsDashboard
-              posts={posts}
-              gscData={gscData}
-              metaConfig={metaConfig}
-              socialPosts={socialPosts}
-              dark={dark}
-              userId={userId}
-              onConnectGSC={()=>{ setActiveTab("settings"); setSettingsSection("gsc"); }}
-              onGSCDataLoaded={(data)=>{ setGscData(data); saveGSCData(data); }}
-              onConnectMeta={()=>{ setActiveTab("settings"); setSettingsSection("meta"); }}
-              activeProvider={activeProvider}
-              activeModel={activeModel}
-              apiKeys={apiKeys}
-            />
-          )}
-
-          {/* ══ CALENDAR ══ */}
-          {activeTab==="calendar"&&(
-            <CalendarTab
-              calEvents={calEvents}
-              deleteCalEvent={deleteCalEvent}
-              setCalModalDay={setCalModalDay}
-              setCalModalOpen={setCalModalOpen}
-              btnP={btnP}
-              fixedGreen={fixedGreen}
-              dark={dark}
-            />
-          )}
-
-          {/* ══ RESEARCH ══ */}
-          {activeTab==="research"&&(
+              {blogTab==="research"&&(
             <div>
               <div style={{display:"flex",gap:4,marginBottom:24,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content"}}>
                 {[{id:"competitors",label:"Competitors",icon:"⊞"},{id:"tracker",label:"Post Tracker",icon:"◉"},{id:"inspiration",label:"Inspiration",icon:"◐"},{id:"ideas",label:"AI Ideas",icon:"✦"}].map(t=>(
@@ -11166,29 +11179,39 @@ export default function Dashboard({ user, workspace }) {
                 />
               )}
             </div>
+              )}
+            </div>
           )}
 
-          {/* ══ AI TOOLS ══ */}
-          {activeTab==="ai"&&(
-            <div>
-              <ProviderPicker
-                activeProvider={activeProvider}
-                activeModel={activeModel}
-                onProviderChange={handleProviderChange}
-                onModelChange={handleModelChange}
-                keys={apiKeys}
-              />
-              <div style={{display:"flex",gap:4,marginBottom:24,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content"}}>
-                {[{id:"writer",label:"Blog Writer",icon:"✍"},{id:"headline",label:"Headlines",icon:"✦"},{id:"seo",label:"SEO Optimizer",icon:"◉"}].map(t=>(
-                  <button key={t.id} onClick={()=>setAiTool(t.id)} style={{padding:"8px 16px",borderRadius:8,border:"none",background:aiTool===t.id?"var(--amber)":"transparent",color:aiTool===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:6}}>
-                    <span>{t.icon}</span>{t.label}
-                  </button>
-                ))}
-              </div>
-              {aiTool==="writer"  &&<AIWriter   wsName={wsName} activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys}/>}
-              {aiTool==="headline"&&<HeadlineGenerator          activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys}/>}
-              {aiTool==="seo"     &&<SEOOptimizer               activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys}/>}
-            </div>
+          {/* ══ ANALYTICS ══ */}
+          {activeTab==="analytics"&&(
+            <AnalyticsDashboard
+              posts={posts}
+              gscData={gscData}
+              metaConfig={metaConfig}
+              socialPosts={socialPosts}
+              dark={dark}
+              userId={userId}
+              onConnectGSC={()=>{ setActiveTab("settings"); setSettingsSection("gsc"); }}
+              onGSCDataLoaded={(data)=>{ setGscData(data); saveGSCData(data); }}
+              onConnectMeta={()=>{ setActiveTab("settings"); setSettingsSection("meta"); }}
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+            />
+          )}
+
+          {/* ══ CALENDAR ══ */}
+          {activeTab==="calendar"&&(
+            <CalendarTab
+              calEvents={calEvents}
+              deleteCalEvent={deleteCalEvent}
+              setCalModalDay={setCalModalDay}
+              setCalModalOpen={setCalModalOpen}
+              btnP={btnP}
+              fixedGreen={fixedGreen}
+              dark={dark}
+            />
           )}
 
           {/* ══ SOCIAL ══ */}
