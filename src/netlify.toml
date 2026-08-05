@@ -88,6 +88,16 @@
   status = 200
 
 [[redirects]]
+  from   = "/api/image-edit"
+  to     = "/.netlify/functions/image-edit"
+  status = 200
+
+[[redirects]]
+  from   = "/api/image-edit-status"
+  to     = "/.netlify/functions/image-edit-status"
+  status = 200
+
+[[redirects]]
   from   = "/api/gcs-upload"
   to     = "/.netlify/functions/gcs-upload"
   status = 200
@@ -105,6 +115,11 @@
 [[redirects]]
   from   = "/api/scan-competitor"
   to     = "/.netlify/functions/scan-competitor"
+  status = 200
+
+[[redirects]]
+  from   = "/api/gcs-restore"
+  to     = "/.netlify/functions/gcs-restore"
   status = 200
 
 [[redirects]]

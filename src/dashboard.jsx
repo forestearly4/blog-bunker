@@ -6932,6 +6932,45 @@ function normalizeToPngBase64(base64) {
   });
 }
 
+// Starts an AI Restyle background job (image-edit.js) and polls image-edit-status.js
+// until it's done. Background functions get up to 15 minutes of runtime — this
+// replaces the old direct sync-function call that could get cut off mid-response
+// on slow edits, producing a truncated body the client couldn't parse.
+async function runBackgroundImageEdit({ provider, prompt, apiKey, imageBase64, size = "1024x1024", quality = "medium", onWaiting, pollIntervalMs = 3000, maxWaitMs = 180000 }) {
+  const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+  const startRes = await fetch("/api/image-edit", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ jobId, provider, prompt, apiKey, imageBase64, size, quality }),
+  });
+  if (!startRes.ok && startRes.status !== 202) throw new Error(`Could not start the image edit (${startRes.status})`);
+
+  const deadline = Date.now() + maxWaitMs;
+  let firstPoll = true;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, firstPoll ? 2000 : pollIntervalMs));
+    firstPoll = false;
+    if (onWaiting) onWaiting();
+
+    let statusRes;
+    try {
+      statusRes = await fetch(`/api/image-edit-status?jobId=${encodeURIComponent(jobId)}`);
+    } catch {
+      continue; // transient network hiccup — keep polling
+    }
+    if (!statusRes.ok) continue;
+    const text = await statusRes.text();
+    let data;
+    try { data = JSON.parse(text); } catch { continue; }
+
+    if (data.status === "done") return { b64: data.b64, mimeType: data.mimeType || "image/png" };
+    if (data.status === "error") throw new Error(data.error || "The image edit failed");
+    // status === "pending" — keep polling
+  }
+  throw new Error("The image edit is taking longer than expected (3+ minutes). It may still finish — try again shortly, or check Media Library for the result.");
+}
+
 function MediaLibrary({ userId }) {
   const resolvedUserId = userId || window.__bbUserId || "anonymous";
   const [items,     setItems]     = useState([]);
@@ -6945,6 +6984,7 @@ function MediaLibrary({ userId }) {
   // AI restyle state
   const [restylePrompt,  setRestylePrompt]  = useState("");
   const [restyleLoading, setRestyleLoading] = useState(false);
+  const [restyleStatus,  setRestyleStatus]  = useState("");
   const [restyleResult,  setRestyleResult]  = useState(null);
   const [restyleError,   setRestyleError]   = useState("");
   const [restyleOpen,    setRestyleOpen]    = useState(false);
@@ -7008,71 +7048,24 @@ function MediaLibrary({ userId }) {
       base64Image = await normalizeToPngBase64(base64Image);
 
       const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
+      const provider = apiKeys.openai ? "openai" : apiKeys.gemini ? "gemini" : null;
+      if (!provider) throw new Error("Add an OpenAI or Gemini API key in Settings → API Keys to use AI Restyle.");
 
-      if (apiKeys.openai) {
-        // Route through server proxy — handles PNG conversion and multipart properly
-        const res = await fetch("/api/image-generate", {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({
-            provider:     "openai-edit",
-            prompt:       `${restylePrompt}. Keep the same scene, subjects, and composition. Only change the visual style, lighting, color grading, and atmosphere.`,
-            apiKey:       apiKeys.openai,
-            imageBase64:  base64Image,
-            size:         "1024x1024",
-          }),
-        });
-        const text = await res.text();
-        if (text.trimStart().startsWith("<")) throw new Error("Server timeout — try again");
-        if (!text.trim()) throw new Error("The image edit took too long and the connection was cut off before OpenAI finished responding. Try again — if it keeps happening, try a smaller image.");
-        let data;
-        try { data = JSON.parse(text); }
-        catch { throw new Error("The server response was cut off before finishing (likely a timeout on a slow edit). Try again."); }
-        if (data.error) throw new Error(`OpenAI: ${data.error}`);
-        if (!data.b64) throw new Error("No image data returned");
-        setRestyleResult(`data:image/png;base64,${data.b64}`);
-
-      } else if (apiKeys.gemini) {
-        // Route through server proxy — matches OpenAI path, adds multi-model
-        // fallback, and avoids direct browser-to-Google calls hanging with no
-        // timeout or retry.
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 55000);
-        let res;
-        try {
-          res = await fetch("/api/image-generate", {
-            method:  "POST",
-            headers: { "Content-Type": "application/json" },
-            body:    JSON.stringify({
-              provider:     "gemini-edit",
-              prompt:       `Transform this image in the following style while keeping the same composition and subjects: ${restylePrompt}`,
-              apiKey:       apiKeys.gemini,
-              imageBase64:  base64Image,
-            }),
-            signal: controller.signal,
-          });
-        } catch (fetchErr) {
-          if (fetchErr.name === "AbortError") throw new Error("Gemini took too long to respond (55s) — try again or switch to OpenAI in Settings → API Keys.");
-          throw fetchErr;
-        } finally {
-          clearTimeout(timeoutId);
-        }
-        const text = await res.text();
-        if (text.trimStart().startsWith("<")) throw new Error("Server timeout — try again");
-        if (!text.trim()) throw new Error("The image edit took too long and the connection was cut off before Gemini finished responding. Try again — if it keeps happening, try a smaller image or switch to OpenAI.");
-        let data;
-        try { data = JSON.parse(text); }
-        catch { throw new Error("The server response was cut off before finishing (likely a timeout on a slow edit). Try again."); }
-        if (data.error) throw new Error(`Gemini: ${data.error}`);
-        if (!data.b64) throw new Error("No image data returned");
-        setRestyleResult(`data:${data.mimeType || "image/png"};base64,${data.b64}`);
-
-      } else {
-        throw new Error("Add an OpenAI or Gemini API key in Settings → API Keys to use AI Restyle.");
-      }
+      setRestyleStatus("Starting the edit…");
+      const { b64, mimeType } = await runBackgroundImageEdit({
+        provider:    provider === "openai" ? "openai-edit" : "gemini-edit",
+        prompt:      provider === "openai"
+          ? `${restylePrompt}. Keep the same scene, subjects, and composition. Only change the visual style, lighting, color grading, and atmosphere.`
+          : `Transform this image in the following style while keeping the same composition and subjects: ${restylePrompt}`,
+        apiKey:      apiKeys[provider],
+        imageBase64: base64Image,
+        onWaiting:   () => setRestyleStatus("Still working — this can take a minute…"),
+      });
+      setRestyleResult(`data:${mimeType || "image/png"};base64,${b64}`);
     } catch(e) {
       setRestyleError(e.message);
     }
+    setRestyleStatus("");
     setRestyleLoading(false);
   };
 
@@ -7498,7 +7491,7 @@ function MediaLibrary({ userId }) {
                   ) : (
                     <button onClick={runRestyle} disabled={restyleLoading || !restylePrompt.trim()}
                       style={{ padding:"10px 24px", borderRadius:8, border:"none", background:restyleLoading||!restylePrompt.trim()?"var(--bg-elevated)":"var(--amber)", color:restyleLoading||!restylePrompt.trim()?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:restyleLoading||!restylePrompt.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
-                      {restyleLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Restyling…</> : "✦ Generate Restyle"}
+                      {restyleLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{restyleStatus || "Restyling…"}</> : "✦ Generate Restyle"}
                     </button>
                   )}
                 </div>
