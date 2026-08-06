@@ -4217,16 +4217,12 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
     { id:"scheduled",  label:"Social Posts",      icon:"▤", badge: socialPosts.length || null },
     { id:"media",      label:"Media Library",     icon:"🖼" },
     { id:"video",      label:"Video Planning",    icon:"🎬" },
-    { id:"create",     label:"Quick Post",        icon:"✎" },
     { id:"email",      label:"Email",             icon:"✉" },
-    { id:"pinterest",  label:"Pinterest",         icon:"📌" },
     { id:"seo",        label:"Keyword Research",  icon:"◎" },
     { id:"research",   label:"Research",          icon:"⊕" },
-    { id:"hashtags",   label:"Hashtags",          icon:"#" },
     { id:"image",      label:"Image Studio",      icon:"▣" },
-    { id:"ideas",      label:"Post Ideas",        icon:"✦" },
-    { id:"competitor", label:"Competitors",       icon:"⊗" },
   ];
+  const [researchSubTab, setResearchSubTab] = useState("research");
 
   return (
     <div>
@@ -4291,31 +4287,9 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
         />
       )}
 
-      {/* ── QUICK POST ── */}
-      {tab === "create" && (
-        <SocialPostTab
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-          dark={dark}
-          metaConfig={metaConfig}
-        />
-      )}
-
       {/* ── EMAIL NEWSLETTER ── */}
       {tab === "email" && (
         <EmailNewsletterStudio
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-          posts={posts}
-          brandGuide={brandGuide}
-        />
-      )}
-
-      {/* ── PINTEREST ── */}
-      {tab === "pinterest" && (
-        <PinterestStudio
           activeProvider={activeProvider}
           activeModel={activeModel}
           apiKeys={apiKeys}
@@ -4336,25 +4310,59 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
         />
       )}
 
-      {/* ── RESEARCH ── */}
+      {/* ── RESEARCH (Research, Post Ideas, Hashtags, Competitors) ── */}
       {tab === "research" && (
-        <SocialResearch
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-          posts={posts}
-          inspiration={inspiration}
-          onAddInspiration={onAddInspiration}
-        />
-      )}
+        <div>
+          <div style={{display:"flex",gap:4,marginBottom:20,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content"}}>
+            {[{id:"research",label:"Research",icon:"⊕"},{id:"ideas",label:"Post Ideas",icon:"✦"},{id:"hashtags",label:"Hashtags",icon:"#"},{id:"competitor",label:"Competitors",icon:"⊗"}].map(t=>(
+              <button key={t.id} onClick={()=>setResearchSubTab(t.id)} style={{padding:"7px 14px",borderRadius:7,border:"none",background:researchSubTab===t.id?"var(--amber)":"transparent",color:researchSubTab===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:5}}>
+                <span>{t.icon}</span>{t.label}
+              </button>
+            ))}
+          </div>
 
-      {/* ── HASHTAGS ── */}
-      {tab === "hashtags" && (
-        <HashtagOptimizer
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-        />
+          {researchSubTab === "research" && (
+            <SocialResearch
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+              posts={posts}
+              inspiration={inspiration}
+              onAddInspiration={onAddInspiration}
+            />
+          )}
+
+          {researchSubTab === "ideas" && (
+            <SocialPostIdeas
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+              posts={posts}
+              inspiration={inspiration}
+              onAddInspiration={onAddInspiration}
+            />
+          )}
+
+          {researchSubTab === "hashtags" && (
+            <HashtagOptimizer
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+            />
+          )}
+
+          {researchSubTab === "competitor" && (
+            <CompetitorMarketingPanel
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+              competitors={competitors}
+              posts={posts}
+              inspiration={inspiration}
+              onAddInspiration={onAddInspiration}
+            />
+          )}
+        </div>
       )}
 
       {/* ── IMAGE STUDIO ── */}
@@ -4363,31 +4371,6 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           activeProvider={activeProvider}
           activeModel={activeModel}
           apiKeys={apiKeys}
-        />
-      )}
-
-      {/* ── POST IDEAS ── */}
-      {tab === "ideas" && (
-        <SocialPostIdeas
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-          posts={posts}
-          inspiration={inspiration}
-          onAddInspiration={onAddInspiration}
-        />
-      )}
-
-      {/* ── COMPETITORS ── */}
-      {tab === "competitor" && (
-        <CompetitorMarketingPanel
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-          competitors={competitors}
-          posts={posts}
-          inspiration={inspiration}
-          onAddInspiration={onAddInspiration}
         />
       )}
     </div>
@@ -5297,12 +5280,33 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     status,
   });
 
-  const handleSaveAsDraft = () => {
+  const handleSaveAsDraft = async () => {
+    setLoading(true); setError(""); setLoadMsg("Saving draft…");
+
+    // Same fix as handleSchedule() — blob:/data: URLs only exist in this browser
+    // tab and are meaningless once read back later (e.g. from Social Posts, or
+    // if this draft later gets scheduled/published). This was the actual bug
+    // behind "image doesn't stay with the caption" — Save as Draft never
+    // uploaded the image at all, unlike Schedule.
+    let finalImageUrl = imageData.url;
+    let imageWarning = "";
+    if (finalImageUrl?.startsWith("blob:") || finalImageUrl?.startsWith("data:")) {
+      setLoadMsg("Uploading image to cloud…");
+      try {
+        finalImageUrl = await ensurePublicImageUrl(finalImageUrl);
+      } catch(e) {
+        finalImageUrl = null; // don't save an unusable blob:/data: reference
+        imageWarning = ` Note: the image couldn't be uploaded (${e.message}) — this draft was saved without it. Re-add it before scheduling or publishing.`;
+      }
+    }
+
     const post = buildSocialPostRecord("draft");
+    post.imageUrl = finalImageUrl;
     if (onSaveSocialPost) onSaveSocialPost(post);
-    setSuccess("✓ Saved as draft — find it in Social Posts tab.");
+    setSuccess(`✓ Saved as draft — find it in Social Posts tab.${imageWarning}`);
     markDone("publish");
     clearSocialPipelineDraft();
+    setLoading(false); setLoadMsg("");
   };
 
   const handleSchedule = async () => {
@@ -6688,12 +6692,8 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
   const [posting,  setPosting]  = useState({});
   const [postResults, setPostResults] = useState({});
 
-  const PLATFORMS = [
-    { id:"instagram", label:"Instagram", color:"#e1306c", icon:"📸" },
-    { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
-    { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
-    { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
-  ];
+  const PLATFORMS = SOCIAL_PLATFORMS.filter(p => ["instagram","facebook","tiktok","twitter","pinterest","reddit"].includes(p.id))
+    .map(p => ({ id:p.id, label:p.name.replace(" (Twitter)",""), color:p.color, icon:p.icon }));
 
   const filtered = filter === "all" ? socialPosts : socialPosts.filter(p => p.status === filter);
   const counts = { all: socialPosts.length, draft: socialPosts.filter(p=>p.status==="draft").length, scheduled: socialPosts.filter(p=>p.status==="scheduled").length, published: socialPosts.filter(p=>p.status==="published").length };
@@ -6705,29 +6705,57 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
     setPosting(p => ({ ...p, [post.id]: true }));
     const results = {};
     const selectedPlats = PLATFORMS.filter(p => post.platforms?.includes(p.id));
+    const bufferCfg = loadBufferConfig();
+
+    // Image must be a public https:// URL for Meta/Buffer to fetch it — if this
+    // post was saved before the Save-as-Draft/Schedule image-upload fix, it may
+    // still be null or a stale blob: URL. Try to recover it once, upfront.
+    let publicImageUrl = post.imageUrl;
+    if (publicImageUrl?.startsWith("blob:") || publicImageUrl?.startsWith("data:")) {
+      try { publicImageUrl = await ensurePublicImageUrl(publicImageUrl); }
+      catch { publicImageUrl = null; }
+    }
 
     for (const plat of selectedPlats) {
       const captionRaw = post.captions?.[plat.id]; const captionText = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
-      const fullMessage = `${captionText}\n\n${post.hashtags || ""}`;
+      const fullMessage = `${captionText}\n\n${post.hashtags || ""}`.trim();
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
           const page = metaConfig.pages[0];
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: post.imageUrl, platforms: ["facebook"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: publicImageUrl, platforms: ["facebook"] });
           results[plat.id] = res.facebook?.success ? "✓ Posted" : `Error: ${res.facebook?.error}`;
         } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
           const page = metaConfig.pages.find(p => p.instagram_id);
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: post.imageUrl, platforms: ["instagram"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: publicImageUrl, platforms: ["instagram"] });
           results[plat.id] = res.instagram?.success ? "✓ Posted" : `Error: ${res.instagram?.error}`;
+        } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
+          const res = await fetch("/api/buffer-post", {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify({
+              apiKey:      bufferCfg.apiKey,
+              action:      "createPost",
+              channelId:   bufferCfg.mapping[plat.id],
+              text:        fullMessage,
+              imageUrl:    publicImageUrl || "",
+              scheduledAt: null,
+            }),
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          results[plat.id] = `✓ Sent to Buffer → ${plat.label}`;
         } else {
           navigator.clipboard.writeText(fullMessage);
-          results[plat.id] = "Copied to clipboard";
+          results[plat.id] = "Not connected — copied to clipboard, paste manually";
         }
       } catch(e) { results[plat.id] = `Error: ${e.message}`; }
     }
 
     setPostResults(r => ({ ...r, [post.id]: results }));
-    const allOk = Object.values(results).every(r => r.startsWith("✓") || r === "Copied to clipboard");
-    if (allOk) onSave({ ...post, status:"published", publishedAt: new Date().toISOString(), results });
+    // Only mark as actually published if every platform genuinely posted —
+    // a manual clipboard copy is not a successful post.
+    const allOk = Object.values(results).every(r => r.startsWith("✓"));
+    if (allOk) onSave({ ...post, status:"published", publishedAt: new Date().toISOString(), imageUrl: publicImageUrl, results });
     setPosting(p => ({ ...p, [post.id]: false }));
   };
 
@@ -6916,16 +6944,28 @@ function saveMediaLibraryToStorage(items) {
 // Normalizes arbitrary image bytes (JPEG, WEBP, indexed/palette PNG, CMYK, etc.) into a
 // guaranteed-valid RGBA PNG by round-tripping through a canvas. Fixes OpenAI images/edits
 // rejecting files with "Invalid image file or mode" when the source isn't a true RGBA PNG.
-function normalizeToPngBase64(base64) {
+// Also caps the output size — Netlify's base64-encoded request body limit is effectively
+// ~4.5MB (30% base64 overhead on top of a ~6MB raw limit), and a lossless canvas PNG export
+// of a detailed image can easily exceed that, causing a 413 on the edit request.
+function normalizeToPngBase64(base64, maxBytes = 3500000) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width  = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(img, 0, 0);
-      resolve(canvas.toDataURL("image/png").split(",")[1]);
+      const exportAtScale = (scale) => {
+        const canvas = document.createElement("canvas");
+        canvas.width  = Math.max(1, Math.round(img.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const b64 = canvas.toDataURL("image/png").split(",")[1];
+        const approxBytes = b64.length * 0.75; // base64 -> raw bytes
+        if (approxBytes > maxBytes && scale > 0.15) {
+          exportAtScale(scale * 0.8);
+        } else {
+          resolve(b64);
+        }
+      };
+      exportAtScale(1);
     };
     img.onerror = () => reject(new Error("Could not decode image for normalization"));
     img.src = `data:image/*;base64,${base64}`;
@@ -6944,7 +6984,10 @@ async function runBackgroundImageEdit({ provider, prompt, apiKey, imageBase64, s
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify({ jobId, provider, prompt, apiKey, imageBase64, size, quality }),
   });
-  if (!startRes.ok && startRes.status !== 202) throw new Error(`Could not start the image edit (${startRes.status})`);
+  if (!startRes.ok && startRes.status !== 202) {
+    if (startRes.status === 413) throw new Error("This image is too large to edit even after compression. Try a smaller source image.");
+    throw new Error(`Could not start the image edit (${startRes.status})`);
+  }
 
   const deadline = Date.now() + maxWaitMs;
   let firstPoll = true;
