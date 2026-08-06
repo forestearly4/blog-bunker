@@ -144,6 +144,38 @@ function parseAIJson(text) {
   throw new Error("AI response was cut off and couldn't be repaired — try again.");
 }
 
+// Plain-text fallback that keeps links VISIBLE as "text (url)" instead of silently
+// discarding the URL — for paste destinations that don't accept rich HTML.
+function markdownToPlainWithLinks(md) {
+  return (md || "")
+    .replace(/^#{1,3}\s+/gm, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
+    .trim();
+}
+
+// Writes both HTML and plain-text to the clipboard so links survive when pasted into
+// a rich-text editor, with a plain-text-only fallback for older browsers/permissions.
+// Reuses the app's existing markdownToHtml() converter (defined later in this file,
+// used by RichTextEditor — safe to call here due to function hoisting).
+async function copyPostWithLinks(title, body) {
+  const plainText = `${title}\n\n${markdownToPlainWithLinks(body)}`;
+  const html = `<p><strong>${(title||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</strong></p>\n${markdownToHtml(body)}`;
+  try {
+    if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": new Blob([plainText], { type: "text/plain" }),
+          "text/html":  new Blob([html], { type: "text/html" }),
+        }),
+      ]);
+      return;
+    }
+  } catch {} // fall through to plain-text copy below
+  await navigator.clipboard.writeText(plainText);
+}
+
 const DEFAULT_POSTS = [
   { id:1, title:"Cast at Dawn, Sip at Dusk: A Philosophy",           status:"published", date:"2026-03-28", views:1843, category:"Culture"      },
   { id:2, title:"Whiskey & Waders: Perfect Pairings for the Stream",  status:"published", date:"2026-03-22", views:1204, category:"Whiskey"      },
@@ -3173,6 +3205,55 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               <RichTextEditor value={draft.body} onChange={(md)=>setDraft(d=>({...d,body:md}))} minHeight={380} activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys} />
             </div>
           </div>
+
+          {/* Link Finder — shown once the initial article is written */}
+          {draft.body.trim().length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>
+                🔗 Link Finder
+              </div>
+              <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 14px", lineHeight:1.6 }}>
+                Nothing gets inserted automatically — review and pick which links to add. Links you insert here carry through the rest of the Pipeline into the final copyable post.
+              </p>
+              <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+                <button onClick={findInternalLinks} disabled={linkLoading.internal} style={{ ...btnS, fontSize:11 }}>
+                  {linkLoading.internal ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span> Searching your posts…</> : "🔗 Find Internal Links"}
+                </button>
+                <button onClick={findExternalLinks} disabled={linkLoading.external} style={{ ...btnS, fontSize:11 }}>
+                  {linkLoading.external ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span> Searching the web…</> : "🌐 Find External Links"}
+                </button>
+              </div>
+
+              {linkError && <div style={{ fontSize:12, color:"var(--red)", marginBottom:10 }}>{linkError}</div>}
+              {linkInserted && <div style={{ fontSize:12, color:"#5cba6c", marginBottom:10 }}>✓ Links inserted into the draft body.</div>}
+
+              {[...linkSuggestions.internal, ...linkSuggestions.external].length > 0 && (
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {[...linkSuggestions.internal, ...linkSuggestions.external].map(l => (
+                    <label key={l.key} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", cursor:"pointer" }}>
+                      <input type="checkbox" checked={!!linkSelected[l.key]} onChange={e=>setLinkSelected(s=>({...s,[l.key]:e.target.checked}))} style={{ marginTop:3 }} />
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:12, color:"var(--text)" }}>
+                          <span style={{ fontWeight:700 }}>"{l.anchorText}"</span> → {l.targetTitle}
+                          <span style={{ marginLeft:6, fontSize:10, padding:"1px 6px", borderRadius:99, background:l.kind==="internal"?"#7c9ce022":"#5cba6c22", color:l.kind==="internal"?"#7c9ce0":"#5cba6c" }}>{l.kind === "internal" ? "internal" : "external"}</span>
+                        </div>
+                        <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>{l.reason}</div>
+                        {l.kind === "internal" && !l.url && (
+                          <div style={{ fontSize:11, color:"var(--amber)", marginTop:3 }}>⚠ That post has no recorded URL yet — this will insert a placeholder link for you to fill in later.</div>
+                        )}
+                        {l.url && <div style={{ fontSize:11, color:"var(--muted)", marginTop:3, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{l.url}</div>}
+                      </div>
+                    </label>
+                  ))}
+                  <button onClick={insertSelectedLinks} disabled={![...linkSuggestions.internal, ...linkSuggestions.external].some(l=>linkSelected[l.key])}
+                    style={{ ...btnA, alignSelf:"flex-start", fontSize:12, padding:"8px 16px" }}>
+                    Insert Selected Links
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           <div style={{ display:"flex", gap:10 }}>
             <button onClick={proceedToDraft} disabled={!draft.title.trim()||!draft.body.trim()} style={{ ...btnA, background:draft.title.trim()&&draft.body.trim()?"var(--amber)":"var(--bg-elevated)", color:draft.title.trim()&&draft.body.trim()?"#0e0f11":"var(--muted)", cursor:draft.title.trim()&&draft.body.trim()?"pointer":"not-allowed" }}>
               Continue to Enhance →
@@ -3351,52 +3432,6 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                 )}
               </div>
 
-              {/* Link Finder */}
-              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>
-                  🔗 Link Finder
-                </div>
-                <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 14px", lineHeight:1.6 }}>
-                  Nothing gets inserted automatically — review and pick which links to add.
-                </p>
-                <div style={{ display:"flex", gap:8, marginBottom:14 }}>
-                  <button onClick={findInternalLinks} disabled={linkLoading.internal} style={{ ...btnS, fontSize:11 }}>
-                    {linkLoading.internal ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span> Searching your posts…</> : "🔗 Find Internal Links"}
-                  </button>
-                  <button onClick={findExternalLinks} disabled={linkLoading.external} style={{ ...btnS, fontSize:11 }}>
-                    {linkLoading.external ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span> Searching the web…</> : "🌐 Find External Links"}
-                  </button>
-                </div>
-
-                {linkError && <div style={{ fontSize:12, color:"var(--red)", marginBottom:10 }}>{linkError}</div>}
-                {linkInserted && <div style={{ fontSize:12, color:"#5cba6c", marginBottom:10 }}>✓ Links inserted into the draft body.</div>}
-
-                {[...linkSuggestions.internal, ...linkSuggestions.external].length > 0 && (
-                  <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-                    {[...linkSuggestions.internal, ...linkSuggestions.external].map(l => (
-                      <label key={l.key} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", cursor:"pointer" }}>
-                        <input type="checkbox" checked={!!linkSelected[l.key]} onChange={e=>setLinkSelected(s=>({...s,[l.key]:e.target.checked}))} style={{ marginTop:3 }} />
-                        <div style={{ flex:1, minWidth:0 }}>
-                          <div style={{ fontSize:12, color:"var(--text)" }}>
-                            <span style={{ fontWeight:700 }}>"{l.anchorText}"</span> → {l.kind === "internal" ? l.targetTitle : l.targetTitle}
-                            <span style={{ marginLeft:6, fontSize:10, padding:"1px 6px", borderRadius:99, background:l.kind==="internal"?"#7c9ce022":"#5cba6c22", color:l.kind==="internal"?"#7c9ce0":"#5cba6c" }}>{l.kind === "internal" ? "internal" : "external"}</span>
-                          </div>
-                          <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>{l.reason}</div>
-                          {l.kind === "internal" && !l.url && (
-                            <div style={{ fontSize:11, color:"var(--amber)", marginTop:3 }}>⚠ That post has no recorded URL yet — this will insert a placeholder link for you to fill in later.</div>
-                          )}
-                          {l.url && <div style={{ fontSize:11, color:"var(--muted)", marginTop:3, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{l.url}</div>}
-                        </div>
-                      </label>
-                    ))}
-                    <button onClick={insertSelectedLinks} disabled={![...linkSuggestions.internal, ...linkSuggestions.external].some(l=>linkSelected[l.key])}
-                      style={{ ...btnA, alignSelf:"flex-start", fontSize:12, padding:"8px 16px" }}>
-                      Insert Selected Links
-                    </button>
-                  </div>
-                )}
-              </div>
-
               <button onClick={runEnhancement} disabled={loading}
                 style={{ ...btnS, fontSize:11, padding:"6px 14px", alignSelf:"flex-start" }}>
                 ↻ Re-run Analysis
@@ -3551,7 +3586,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                       📋 Copy for Your Blog
                     </div>
                     <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 10px", lineHeight:1.6 }}>
-                      Copy your post as plain text, then paste it into whichever blog host you publish on. The post is automatically saved to your Posts tab.
+                      Copies with formatting and links intact, then paste it into whichever blog host you publish on. The post is automatically saved to your Posts tab.
                     </p>
                     <div style={{ display:"flex", gap:8 }}>
                       <button onClick={() => {
@@ -3575,14 +3610,11 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                           onAddCalEvent({ title: finalPost.title, type: finalPost.status, day });
                         }
                         markDone("publish");
-                        // Copy as plain text — title + body, markdown stripped
-                        const plainText = `${enhance.metaTitle || draft.title}\n\n${(draft.body || "")
-                          .replace(/^#{1,3}\s+/gm, "")
-                          .replace(/\*\*(.*?)\*\*/g, "$1")
-                          .replace(/\*(.*?)\*/g, "$1")
-                          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-                          .trim()}`;
-                        navigator.clipboard.writeText(plainText);
+                        // Copy with links preserved — rich HTML for editors that accept
+                        // it (real clickable hyperlinks), plain text with visible (url)
+                        // fallback otherwise. Previously this stripped links to bare text,
+                        // silently discarding the URL entirely.
+                        copyPostWithLinks(enhance.metaTitle || draft.title, draft.body);
                         setSuccess(`✓ Copied! Post saved to Posts tab as "${finalPost.status}".`);
                       }}
                         style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -10581,21 +10613,13 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
             📋 Copy for Your Blog
           </div>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-            <button onClick={() => {
-              const plainText = `${form.title}\n\n${(form.body || "")
-                .replace(/^#{1,3}\s+/gm, "")
-                .replace(/\*\*(.*?)\*\*/g, "$1")
-                .replace(/\*(.*?)\*/g, "$1")
-                .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-                .trim()}`;
-              navigator.clipboard.writeText(plainText);
-            }}
+            <button onClick={() => copyPostWithLinks(form.title, form.body)}
               style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
               📋 Copy Post Text
             </button>
           </div>
           <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"8px 0 0", lineHeight:1.5 }}>
-            Copy plain text → paste into your blog host's editor when you're ready to publish.
+            Copies with formatting and links intact — paste into your blog host's editor when you're ready to publish.
           </p>
         </div>
 
