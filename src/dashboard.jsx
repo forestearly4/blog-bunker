@@ -204,8 +204,8 @@ const AI_PROVIDERS = [
     company: "Anthropic",
     logo: "◈",
     color: "#d4a054",
-    models: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
-    defaultModel: "claude-sonnet-4-20250514",
+    models: ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
+    defaultModel: "claude-sonnet-5",
     keyPrefix: "sk-ant-",
     keyPlaceholder: "sk-ant-api03-...",
     docsUrl: "https://console.anthropic.com",
@@ -270,7 +270,16 @@ function saveKeys(keys) {
   if (uid) cloudSet("api_keys", uid, keys);
 }
 function loadModels() {
-  try { return JSON.parse(localStorage.getItem(MODEL_STORAGE) || "{}"); } catch { return {}; }
+  try {
+    const m = JSON.parse(localStorage.getItem(MODEL_STORAGE) || "{}");
+    // Migrate deprecated dated model snapshots saved before this fix
+    const DEPRECATED_MODEL_MAP = { "claude-sonnet-4-20250514": "claude-sonnet-5", "claude-opus-4-20250514": "claude-opus-4-8" };
+    if (m.anthropic && DEPRECATED_MODEL_MAP[m.anthropic]) {
+      m.anthropic = DEPRECATED_MODEL_MAP[m.anthropic];
+      saveModels(m);
+    }
+    return m;
+  } catch { return {}; }
 }
 function saveModels(models) {
   try { localStorage.setItem(MODEL_STORAGE, JSON.stringify(models)); } catch {}
@@ -2872,7 +2881,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
       const headers = useProxy
         ? { "Content-Type": "application/json" }
         : { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" };
-      const model = activeProvider === "anthropic" ? activeModel : (AI_PROVIDERS.find(p=>p.id==="anthropic")?.defaultModel || "claude-sonnet-4-20250514");
+      const model = activeProvider === "anthropic" ? activeModel : (AI_PROVIDERS.find(p=>p.id==="anthropic")?.defaultModel || "claude-sonnet-5");
 
       const res = await fetch(endpoint, {
         method: "POST", headers,
