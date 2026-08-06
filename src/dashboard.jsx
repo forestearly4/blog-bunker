@@ -2657,6 +2657,11 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const [enhance, setEnhance] = useState(saved?.enhance || {
     metaTitle: "", metaDescription: "", primaryKeyword: "", suggestions: [], headlines: [], improved: "",
   });
+  const [linkSuggestions, setLinkSuggestions] = useState({ internal: [], external: [] });
+  const [linkSelected,    setLinkSelected]    = useState({});
+  const [linkLoading,     setLinkLoading]     = useState({ internal: false, external: false });
+  const [linkError,       setLinkError]       = useState("");
+  const [linkInserted,    setLinkInserted]    = useState(false);
   const [social, setSocial] = useState(saved?.social || { posts: {}, images: {} });
   const [schedule, setSchedule] = useState(saved?.schedule || {
     publishDate: new Date(Date.now() + 86400000).toISOString().split("T")[0],
@@ -2820,6 +2825,104 @@ Titles and descriptions MUST be under their character limits. Score each on: key
     setLoading(false); setLoadMsg("");
   };
 
+  // ── LINK FINDER (internal + external links for the draft body) ──────────────
+  // Internal: matched against Forest's own known posts — no hallucination risk,
+  // since the AI is just pattern-matching against real titles it's given.
+  // External: grounded via Anthropic's native web_search tool (server executes
+  // the search and returns real URLs) — never asks the model to recall a URL
+  // from memory, which is how AI link tools produce dead/hallucinated links.
+  const LINK_MAX_BODY_CHARS = 6000;
+
+  const findInternalLinks = async () => {
+    setLinkLoading(l => ({ ...l, internal: true })); setLinkError("");
+    try {
+      const candidates = posts
+        .filter(p => p.id !== pipelinePostId && (p.title || "").trim())
+        .map(p => ({ id: p.id, title: p.title, category: p.category, hasUrl: !!p.url }));
+      if (candidates.length === 0) throw new Error("No other posts to link to yet — write a few more posts first.");
+
+      const text = await callAI(activeProvider, activeModel,
+        `You suggest internal links for a blog post. You will get the post's text and a list of the site's OTHER existing posts (title, category, id). Find natural places in the text that would benefit from linking to one of those other posts — ONLY suggest a link when it's genuinely topically relevant, not just because a word matches. Return ONLY valid JSON (no fences): {"links":[{"postId": <id from the list>, "anchorText": "exact short phrase copied VERBATIM from the post text (3-8 words)", "reason": "one short sentence"}]}. Suggest at most 5. anchorText MUST be an exact substring of the post text — do not paraphrase it.`,
+        `POST TEXT:\n${draft.body.slice(0, LINK_MAX_BODY_CHARS)}\n\nOTHER POSTS ON THE SITE:\n${JSON.stringify(candidates)}`,
+        apiKeys[activeProvider],
+        1500
+      );
+      const parsed = parseAIJson(text);
+      const bodyLower = draft.body.toLowerCase();
+      const valid = (parsed.links || [])
+        .map(l => {
+          const post = posts.find(p => p.id === l.postId);
+          if (!post) return null;
+          if (!l.anchorText || !bodyLower.includes(l.anchorText.toLowerCase())) return null; // reject hallucinated anchors that don't actually appear in the draft
+          return { kind: "internal", key: `int-${l.postId}-${l.anchorText}`, anchorText: l.anchorText, url: post.url || "", targetTitle: post.title, reason: l.reason || "" };
+        })
+        .filter(Boolean);
+      setLinkSuggestions(s => ({ ...s, internal: valid }));
+      if (valid.length === 0) setLinkError("No confident internal link matches found for this draft.");
+    } catch(e) { setLinkError(e.message); }
+    setLinkLoading(l => ({ ...l, internal: false }));
+  };
+
+  const findExternalLinks = async () => {
+    setLinkLoading(l => ({ ...l, external: true })); setLinkError("");
+    try {
+      const key = apiKeys.anthropic; // web search only available via Anthropic
+      const useProxy = !key;
+      const endpoint = useProxy ? "/api/claude" : "https://api.anthropic.com/v1/messages";
+      const headers = useProxy
+        ? { "Content-Type": "application/json" }
+        : { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" };
+      const model = activeProvider === "anthropic" ? activeModel : (AI_PROVIDERS.find(p=>p.id==="anthropic")?.defaultModel || "claude-sonnet-4-20250514");
+
+      const res = await fetch(endpoint, {
+        method: "POST", headers,
+        body: JSON.stringify({
+          model,
+          max_tokens: 1500,
+          system: `You find real, currently-live, authoritative external sources worth linking to from a blog post — official sites, studies, well-known publications. Use web search to verify each URL is real before suggesting it; never invent a URL. After searching, respond with ONLY valid JSON (no fences, no other text): {"links":[{"anchorText":"exact short phrase copied VERBATIM from the post text (3-8 words)","url":"https://real-verified-url","reason":"one short sentence on why this source is worth citing here"}]}. Suggest at most 4. Only include a link if you actually found and verified a real URL via search.`,
+          messages: [{ role: "user", content: `POST TEXT:\n${draft.body.slice(0, LINK_MAX_BODY_CHARS)}` }],
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message || "Anthropic error");
+      const textBlocks = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
+      const parsed = parseAIJson(textBlocks);
+      const bodyLower = draft.body.toLowerCase();
+      const valid = (parsed.links || [])
+        .map(l => {
+          if (!l.anchorText || !l.url || !bodyLower.includes(l.anchorText.toLowerCase())) return null;
+          if (!/^https?:\/\//i.test(l.url)) return null;
+          let hostname;
+          try { hostname = new URL(l.url).hostname.replace(/^www\./,""); } catch { return null; }
+          return { kind: "external", key: `ext-${l.url}-${l.anchorText}`, anchorText: l.anchorText, url: l.url, targetTitle: hostname, reason: l.reason || "" };
+        })
+        .filter(Boolean);
+      setLinkSuggestions(s => ({ ...s, external: valid }));
+      if (valid.length === 0) setLinkError("No verified external sources found for this draft.");
+    } catch(e) { setLinkError(e.message); }
+    setLinkLoading(l => ({ ...l, external: false }));
+  };
+
+  const insertSelectedLinks = () => {
+    const all = [...linkSuggestions.internal, ...linkSuggestions.external].filter(l => linkSelected[l.key]);
+    if (all.length === 0) return;
+    let body = draft.body;
+    for (const l of all) {
+      const href = l.url || "PASTE-URL-HERE"; // internal links to unpublished posts get a clear placeholder, never a fake URL
+      // Replace only the first occurrence, case-insensitively, preserving the original casing found in the body
+      const idx = body.toLowerCase().indexOf(l.anchorText.toLowerCase());
+      if (idx === -1) continue;
+      const actualText = body.slice(idx, idx + l.anchorText.length);
+      body = body.slice(0, idx) + `[${actualText}](${href})` + body.slice(idx + l.anchorText.length);
+    }
+    setDraft(d => ({ ...d, body }));
+    setLinkSuggestions({ internal: [], external: [] });
+    setLinkSelected({});
+    setLinkInserted(true);
+    setTimeout(() => setLinkInserted(false), 3000);
+  };
+
   // ── STAGE 4: SOCIAL ─────────────────────────────────────────────────────────
 
   const generateSocialPosts = async () => {
@@ -2869,6 +2972,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
         metaTitle: enhance.metaTitle,
         metaDescription: enhance.metaDescription,
         primaryKeyword: enhance.primaryKeyword,
+        url: posts.find(p => p.id === pipelinePostId)?.url || "",
       };
 
       // Save to Blog Bunker
@@ -3238,6 +3342,52 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                 )}
               </div>
 
+              {/* Link Finder */}
+              <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>
+                  🔗 Link Finder
+                </div>
+                <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 14px", lineHeight:1.6 }}>
+                  Nothing gets inserted automatically — review and pick which links to add.
+                </p>
+                <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+                  <button onClick={findInternalLinks} disabled={linkLoading.internal} style={{ ...btnS, fontSize:11 }}>
+                    {linkLoading.internal ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span> Searching your posts…</> : "🔗 Find Internal Links"}
+                  </button>
+                  <button onClick={findExternalLinks} disabled={linkLoading.external} style={{ ...btnS, fontSize:11 }}>
+                    {linkLoading.external ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span> Searching the web…</> : "🌐 Find External Links"}
+                  </button>
+                </div>
+
+                {linkError && <div style={{ fontSize:12, color:"var(--red)", marginBottom:10 }}>{linkError}</div>}
+                {linkInserted && <div style={{ fontSize:12, color:"#5cba6c", marginBottom:10 }}>✓ Links inserted into the draft body.</div>}
+
+                {[...linkSuggestions.internal, ...linkSuggestions.external].length > 0 && (
+                  <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                    {[...linkSuggestions.internal, ...linkSuggestions.external].map(l => (
+                      <label key={l.key} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", cursor:"pointer" }}>
+                        <input type="checkbox" checked={!!linkSelected[l.key]} onChange={e=>setLinkSelected(s=>({...s,[l.key]:e.target.checked}))} style={{ marginTop:3 }} />
+                        <div style={{ flex:1, minWidth:0 }}>
+                          <div style={{ fontSize:12, color:"var(--text)" }}>
+                            <span style={{ fontWeight:700 }}>"{l.anchorText}"</span> → {l.kind === "internal" ? l.targetTitle : l.targetTitle}
+                            <span style={{ marginLeft:6, fontSize:10, padding:"1px 6px", borderRadius:99, background:l.kind==="internal"?"#7c9ce022":"#5cba6c22", color:l.kind==="internal"?"#7c9ce0":"#5cba6c" }}>{l.kind === "internal" ? "internal" : "external"}</span>
+                          </div>
+                          <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>{l.reason}</div>
+                          {l.kind === "internal" && !l.url && (
+                            <div style={{ fontSize:11, color:"var(--amber)", marginTop:3 }}>⚠ That post has no recorded URL yet — this will insert a placeholder link for you to fill in later.</div>
+                          )}
+                          {l.url && <div style={{ fontSize:11, color:"var(--muted)", marginTop:3, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{l.url}</div>}
+                        </div>
+                      </label>
+                    ))}
+                    <button onClick={insertSelectedLinks} disabled={![...linkSuggestions.internal, ...linkSuggestions.external].some(l=>linkSelected[l.key])}
+                      style={{ ...btnA, alignSelf:"flex-start", fontSize:12, padding:"8px 16px" }}>
+                      Insert Selected Links
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <button onClick={runEnhancement} disabled={loading}
                 style={{ ...btnS, fontSize:11, padding:"6px 14px", alignSelf:"flex-start" }}>
                 ↻ Re-run Analysis
@@ -3408,6 +3558,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                           metaTitle: enhance.metaTitle,
                           metaDescription: enhance.metaDescription,
                           primaryKeyword: enhance.primaryKeyword,
+                          url: posts.find(p => p.id === pipelinePostId)?.url || "",
                         };
                         onSavePost(finalPost);
                         if (schedule.addToCalendar) {
@@ -10285,6 +10436,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
     category: post?.category || "Culture",
     status:   post?.status   || "draft",
     date:     post?.date     || new Date().toISOString().split("T")[0],
+    url:      post?.url      || "",
   });
   const [saved,        setSaved]        = useState(false);
   const [saveStatus,   setSaveStatus]   = useState(""); // "saving" | "saved" | ""
@@ -10386,6 +10538,15 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           <div>
             <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Date</label>
             <input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} style={iS} />
+          </div>
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+            Published URL <span style={{textTransform:"none", fontWeight:400, color:"var(--text-secondary)"}}>— optional, once this post is live somewhere</span>
+          </label>
+          <input style={iS} placeholder="https://caskandstream.com/blog/your-post-slug" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} />
+          <div style={{ fontSize:11, color:"var(--muted)", marginTop:5, lineHeight:1.5 }}>
+            Recording this lets other posts link to this one when you use Find Internal Links in the Pipeline.
           </div>
         </div>
         <div>
