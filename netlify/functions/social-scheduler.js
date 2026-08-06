@@ -47,12 +47,26 @@ async function postToInstagram(page, fullMessage, imageUrl) {
   });
   const cData = await cRes.json();
   if (cData.error) throw new Error(`Container: ${cData.error.message} (${cData.error.code})`);
-  const pRes  = await fetch(`https://graph.facebook.com/v19.0/${page.instagram_id}/media_publish`, {
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ creation_id: cData.id, access_token: page.access_token }),
-  });
-  const pData = await pRes.json();
-  if (pData.error) throw new Error(`Publish: ${pData.error.message} (${pData.error.code})`);
+
+  // Retry on the well-documented transient "Media ID is not available" (code
+  // 9007) error — the container hasn't finished processing yet. Same fix as
+  // meta-post.js's immediate-publish path; kept short since this isn't a
+  // background function.
+  let pData;
+  const maxAttempts = 4;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const pRes = await fetch(`https://graph.facebook.com/v19.0/${page.instagram_id}/media_publish`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ creation_id: cData.id, access_token: page.access_token }),
+    });
+    pData = await pRes.json();
+    if (!pData.error) break;
+    if (pData.error.code === 9007 && attempt < maxAttempts) {
+      await new Promise(r => setTimeout(r, 1500 * attempt));
+      continue;
+    }
+    throw new Error(`Publish: ${pData.error.message} (${pData.error.code})`);
+  }
   return pData.id;
 }
 

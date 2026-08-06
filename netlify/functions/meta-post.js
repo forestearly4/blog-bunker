@@ -93,14 +93,29 @@ export default async (req) => {
         throw new Error(`Instagram container: ${containerData.error.message} (code ${containerData.error.code})`);
       }
 
-      // Step 2: Publish
-      const publishRes = await fetch(`https://graph.facebook.com/v19.0/${instagramId}/media_publish`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ creation_id: containerData.id, access_token: pageToken }),
-      });
-      const publishData = await publishRes.json();
-      if (publishData.error) {
+      // Step 2: Publish — retry on the well-documented transient "Media ID is
+      // not available" (code 9007 / subcode 2207027) error, which just means
+      // Instagram hasn't finished processing the container yet. Every major
+      // social tool (Buffer, Agorapulse, Statusbrew, etc.) handles this the
+      // same way: wait a moment and try again — it almost always succeeds
+      // within a few attempts. Kept short (this is a sync function with a
+      // ~10-26s ceiling) — image containers process fast, unlike video.
+      let publishData;
+      const maxAttempts = 4;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const publishRes = await fetch(`https://graph.facebook.com/v19.0/${instagramId}/media_publish`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ creation_id: containerData.id, access_token: pageToken }),
+        });
+        publishData = await publishRes.json();
+
+        const isMediaNotReady = publishData.error?.code === 9007;
+        if (!publishData.error) break; // success
+        if (isMediaNotReady && attempt < maxAttempts) {
+          await new Promise(r => setTimeout(r, 1500 * attempt)); // 1.5s, 3s, 4.5s backoff
+          continue;
+        }
         throw new Error(`Instagram publish: ${publishData.error.message} (code ${publishData.error.code})`);
       }
       results.instagram = { success: true, id: publishData.id };
