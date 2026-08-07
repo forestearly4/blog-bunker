@@ -159,9 +159,10 @@ function markdownToPlainWithLinks(md) {
 // a rich-text editor, with a plain-text-only fallback for older browsers/permissions.
 // Reuses the app's existing markdownToHtml() converter (defined later in this file,
 // used by RichTextEditor — safe to call here due to function hoisting).
-async function copyPostWithLinks(title, body) {
-  const plainText = `${title}\n\n${markdownToPlainWithLinks(body)}`;
-  const html = `<p><strong>${(title||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</strong></p>\n${markdownToHtml(body)}`;
+async function copyPostWithLinks(title, body, headlineImageUrl = null) {
+  const plainText = `${title}${headlineImageUrl ? `\n[Headline image: ${headlineImageUrl}]` : ""}\n\n${markdownToPlainWithLinks(body)}`;
+  const escTitle = (title||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const html = `<p><strong>${escTitle}</strong></p>\n${headlineImageUrl ? `<p><img src="${headlineImageUrl}" alt="${escTitle}"></p>\n` : ""}${markdownToHtml(body)}`;
   try {
     if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
       await navigator.clipboard.write([
@@ -207,11 +208,11 @@ const CALENDAR_EVENTS = [
 ];
 
 const COMPETITORS = [
-  { name:"Hatch Magazine",  url:"hatchmag.com",       da:52, posts:"4/wk", traffic:"120K", strengths:"Strong SEO, video content",   threat:"high"   },
-  { name:"MidCurrent",      url:"midcurrent.com",      da:48, posts:"3/wk", traffic:"95K",  strengths:"Expert contributors, guides", threat:"high"   },
-  { name:"Gink & Gasoline", url:"ginkandgasoline.com", da:41, posts:"2/wk", traffic:"45K",  strengths:"Community, humor",            threat:"medium" },
-  { name:"The Drake",       url:"drakemag.com",        da:38, posts:"1/wk", traffic:"30K",  strengths:"Literary voice, photography", threat:"low"    },
-  { name:"Whisky Advocate", url:"whiskyadvocate.com",  da:61, posts:"5/wk", traffic:"310K", strengths:"Authority, reviews",          threat:"medium" },
+  { name:"Hatch Magazine",  url:"hatchmag.com",       posts:"4/wk", traffic:"120K", strengths:"Strong SEO, video content",   threat:"high"   },
+  { name:"MidCurrent",      url:"midcurrent.com",      posts:"3/wk", traffic:"95K",  strengths:"Expert contributors, guides", threat:"high"   },
+  { name:"Gink & Gasoline", url:"ginkandgasoline.com", posts:"2/wk", traffic:"45K",  strengths:"Community, humor",            threat:"medium" },
+  { name:"The Drake",       url:"drakemag.com",        posts:"1/wk", traffic:"30K",  strengths:"Literary voice, photography", threat:"low"    },
+  { name:"Whisky Advocate", url:"whiskyadvocate.com",  posts:"5/wk", traffic:"310K", strengths:"Authority, reviews",          threat:"medium" },
 ];
 
 const INSPIRATION = [
@@ -2543,7 +2544,7 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
                 </div>
                 <div>
                   <div style={{ fontWeight:700, fontSize:14 }}>{comp.name}</div>
-                  <div style={{ fontSize:11, color:"var(--text-secondary)" }}>{comp.url} · {comp.posts} · DA {comp.da}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)" }}>{comp.url} · {comp.posts}</div>
                 </div>
               </div>
               <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -2680,7 +2681,7 @@ function clearPipelineDraft() {
   try { localStorage.removeItem(PIPELINE_STORAGE); } catch {}
 }
 
-function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null, initialPost = null, onConsumedInitialPost = null }) {
+function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null, initialPost = null, onConsumedInitialPost = null, onSendToSocialPipeline = null }) {
   const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
   const saved = loadPipelineDraft();
   const [stage,     setStage]    = useState(saved?.stage     || "brief");
@@ -2744,7 +2745,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       if (onConsumedInitialPost) onConsumedInitialPost();
       return;
     }
-    setDraft({ title: initialPost.title || "", body: initialPost.body || "", category: initialPost.category || "Culture", tone: "literary" });
+    setDraft({ title: initialPost.title || "", body: initialPost.body || "", category: initialPost.category || "Culture", tone: "literary", headlineImageUrl: initialPost.headlineImageUrl || "" });
     setBrief(b => ({ ...b, topic: initialPost.title || b.topic }));
     setPipelinePostId(initialPost.id);
     setCompleted(c => [...new Set([...c, "brief", "draft"])]);
@@ -3014,6 +3015,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
         metaDescription: enhance.metaDescription,
         primaryKeyword: enhance.primaryKeyword,
         url: posts.find(p => p.id === pipelinePostId)?.url || "",
+        headlineImageUrl: draft.headlineImageUrl || posts.find(p => p.id === pipelinePostId)?.headlineImageUrl || "",
       };
 
       // Save to Blog Bunker
@@ -3269,6 +3271,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               activeModel={activeModel}
               apiKeys={apiKeys}
               onImageSaved={(url) => setDraft(d => ({ ...d, headlineImageUrl: url }))}
+              existingImageUrl={draft.headlineImageUrl || null}
             />
           )}
         </div>
@@ -3452,9 +3455,25 @@ Titles and descriptions MUST be under their character limits. Score each on: key
       {/* ── STAGE 4: SOCIAL ── */}
       {stage === "social" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <div style={{ background:"var(--amber-glow)", border:"1px solid var(--amber)", borderRadius:12, padding:20 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:16, flexWrap:"wrap" }}>
+              <div>
+                <h3 style={{ fontFamily:"var(--font-display)", fontSize:16, fontWeight:700, margin:"0 0 4px", color:"var(--amber)" }}>🔗 Use the Social Pipeline</h3>
+                <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0, maxWidth:520 }}>
+                  For hashtags, per-platform character checks, best-posting-times, and scheduling/publishing, send this article to the full Social Pipeline. The quick generator below is still here for a fast one-off caption.
+                </p>
+              </div>
+              <button onClick={() => onSendToSocialPipeline && onSendToSocialPipeline({ title: draft.title, body: draft.body, headlineImageUrl: draft.headlineImageUrl })}
+                disabled={!draft.title.trim()}
+                style={{ padding:"10px 20px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:draft.title.trim()?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", opacity:draft.title.trim()?1:0.5 }}>
+                → Send to Social Pipeline
+              </button>
+            </div>
+          </div>
+
           <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
-              <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Social Media Posts</h3>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Quick Social Posts</h3>
               <button onClick={generateSocialPosts} disabled={loading} style={{ ...btnA, padding:"8px 18px", fontSize:12, background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", cursor:loading?"not-allowed":"pointer" }}>
                 {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Generate All Platforms`}
               </button>
@@ -3603,6 +3622,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                           metaDescription: enhance.metaDescription,
                           primaryKeyword: enhance.primaryKeyword,
                           url: posts.find(p => p.id === pipelinePostId)?.url || "",
+                          headlineImageUrl: draft.headlineImageUrl || posts.find(p => p.id === pipelinePostId)?.headlineImageUrl || "",
                         };
                         onSavePost(finalPost);
                         if (schedule.addToCalendar) {
@@ -3614,7 +3634,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                         // it (real clickable hyperlinks), plain text with visible (url)
                         // fallback otherwise. Previously this stripped links to bare text,
                         // silently discarding the URL entirely.
-                        copyPostWithLinks(enhance.metaTitle || draft.title, draft.body);
+                        copyPostWithLinks(enhance.metaTitle || draft.title, draft.body, draft.headlineImageUrl);
                         setSuccess(`✓ Copied! Post saved to Posts tab as "${finalPost.status}".`);
                       }}
                         style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -4399,10 +4419,23 @@ class MarketingErrorBoundary extends React.Component {
   }
 }
 
-function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous" }) {
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null }) {
   const [tab, setTab] = useState("pipeline");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const scheduledCount = socialPosts.filter(p => p.status === "scheduled").length;
+  const [addSocialInspirationOpen, setAddSocialInspirationOpen] = useState(false);
+  const [addSocialCompetitorOpen,  setAddSocialCompetitorOpen]  = useState(false);
+  const [pipelineInitialIdea,      setPipelineInitialIdea]      = useState(null);
+  const sendInspirationToPipeline = (item) => { setPipelineInitialIdea(item); setTab("pipeline"); };
+
+  // Article Pipeline "→ Send to Social Pipeline" hand-off — routes through the
+  // same mechanism as the Inspiration hand-off above.
+  useEffect(() => {
+    if (!externalInitialIdea) return;
+    setPipelineInitialIdea(externalInitialIdea);
+    setTab("pipeline");
+    if (onConsumedExternalInitialIdea) onConsumedExternalInitialIdea();
+  }, [externalInitialIdea]);
 
   const TABS = [
     { id:"pipeline",   label:"Social Pipeline",  icon:"◈", highlight:true },
@@ -4476,6 +4509,8 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           inspiration={inspiration}
           onAddInspiration={onAddInspiration}
           onSaveSocialPost={onSaveSocialPost}
+          initialIdea={pipelineInitialIdea}
+          onConsumedInitialIdea={() => setPipelineInitialIdea(null)}
         />
       )}
 
@@ -4502,16 +4537,56 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
         />
       )}
 
-      {/* ── RESEARCH (Research, Post Ideas, Hashtags, Competitors) ── */}
+      {/* ── RESEARCH (Competitors, Research, Inspiration, Post Ideas, Hashtags, Competitor Insights) ── */}
       {tab === "research" && (
         <div>
-          <div style={{display:"flex",gap:4,marginBottom:20,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content"}}>
-            {[{id:"research",label:"Research",icon:"⊕"},{id:"ideas",label:"Post Ideas",icon:"✦"},{id:"hashtags",label:"Hashtags",icon:"#"},{id:"competitor",label:"Competitors",icon:"⊗"}].map(t=>(
+          <div style={{display:"flex",gap:4,marginBottom:20,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content",flexWrap:"wrap"}}>
+            {[{id:"socialCompetitors",label:"Competitors",icon:"⊞"},{id:"research",label:"Research",icon:"⊕"},{id:"inspiration",label:"Inspiration",icon:"◐"},{id:"ideas",label:"Post Ideas",icon:"✦"},{id:"hashtags",label:"Hashtags",icon:"#"},{id:"competitor",label:"Competitor Insights",icon:"⊗"}].map(t=>(
               <button key={t.id} onClick={()=>setResearchSubTab(t.id)} style={{padding:"7px 14px",borderRadius:7,border:"none",background:researchSubTab===t.id?"var(--amber)":"transparent",color:researchSubTab===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:5}}>
                 <span>{t.icon}</span>{t.label}
               </button>
             ))}
           </div>
+
+          {researchSubTab === "socialCompetitors" && (
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                <div>
+                  <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:0}}>Social Competitors</h2>
+                  <p style={{color:"var(--text-secondary)",fontSize:12,margin:"4px 0 0"}}>Track accounts competing for the same audience</p>
+                </div>
+                <button onClick={()=>setAddSocialCompetitorOpen(true)} style={{padding:"9px 18px",borderRadius:8,border:"none",background:"var(--amber)",color:dark?"#0e0f11":"#fff",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"var(--font-body)"}}>+ Add Competitor</button>
+              </div>
+              {socialCompetitors.length === 0 ? (
+                <div style={{padding:"40px 20px",textAlign:"center",background:"var(--bg-surface)",border:"1px solid var(--border)",borderRadius:12,color:"var(--text-secondary)",fontSize:13}}>
+                  No social competitors tracked yet — add an account to start.
+                </div>
+              ) : (
+                <div style={{background:"var(--bg-surface)",border:"1px solid var(--border)",borderRadius:12,padding:0,overflow:"hidden"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse"}}>
+                    <thead><tr style={{borderBottom:"1px solid var(--border)"}}>
+                      {["Account","Platform","Followers","Post Frequency","Engagement","Threat"].map(h=>(
+                        <th key={h} style={{textAlign:"left",padding:"12px 16px",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{h}</th>
+                      ))}
+                    </tr></thead>
+                    <tbody>
+                      {socialCompetitors.map(c=>(
+                        <tr key={c.name||c.id} style={{borderBottom:"1px solid var(--border)"}}>
+                          <td style={{padding:"14px 16px"}}><div style={{fontWeight:600,fontSize:13}}>{c.name}</div><div style={{fontSize:11,color:"var(--text-secondary)"}}>{c.handle}</div></td>
+                          <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{c.platform}</td>
+                          <td style={{padding:"14px 16px",fontSize:12,fontWeight:600}}>{c.followers}</td>
+                          <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{c.posts}</td>
+                          <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{c.engagement}</td>
+                          <td style={{padding:"14px 16px"}}><ThreatBadge level={c.threat}/></td>
+                          <td style={{padding:"14px 16px"}}><button onClick={()=>onDeleteSocialCompetitor(c.name)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14}} title="Remove">✕</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
 
           {researchSubTab === "research" && (
             <SocialResearch
@@ -4521,6 +4596,19 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
               posts={posts}
               inspiration={inspiration}
               onAddInspiration={onAddInspiration}
+            />
+          )}
+
+          {researchSubTab === "inspiration" && (
+            <InspirationBoard
+              inspiration={socialInspiration}
+              onAddNew={()=>setAddSocialInspirationOpen(true)}
+              onDelete={onDeleteSocialInspiration}
+              onToDraft={sendInspirationToPipeline}
+              toDraftLabel="→ Social Pipeline"
+              card={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}
+              btnS={{ padding:"7px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}
+              btnP={{ padding:"9px 18px", borderRadius:8, border:"none", background:"var(--amber)", color:dark?"#0e0f11":"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}
             />
           )}
 
@@ -4563,6 +4651,20 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           activeProvider={activeProvider}
           activeModel={activeModel}
           apiKeys={apiKeys}
+        />
+      )}
+
+      {addSocialInspirationOpen && (
+        <AddInspirationModal
+          onSave={(item) => { onAddSocialInspiration({ ...item, id: Date.now() }); setAddSocialInspirationOpen(false); }}
+          onClose={() => setAddSocialInspirationOpen(false)}
+        />
+      )}
+      {addSocialCompetitorOpen && (
+        <AddSocialCompetitorModal
+          onSave={onAddSocialCompetitor}
+          onClose={() => setAddSocialCompetitorOpen(false)}
+          dark={dark}
         />
       )}
     </div>
@@ -5264,7 +5366,7 @@ function SocialPipelineProgress({ stage, setStage, completed }) {
   );
 }
 
-function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost }) {
+function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null }) {
   let saved = loadSocialPipelineDraft();
 
   // Migrate old single-platform draft schema (idea.platform: string) to new multi-platform (idea.platforms: array)
@@ -5290,6 +5392,15 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
   // idea.platforms is now an ARRAY — supports multi-select
   const [idea, setIdea] = useState(saved?.idea || { topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
+
+  // Load an idea handed off from Inspiration ("→ Social Pipeline" button)
+  useEffect(() => {
+    if (!initialIdea) return;
+    setIdea(i => ({ ...i, topic: initialIdea.title || i.topic, inspirationSource: initialIdea.source || null }));
+    setStage("idea");
+    if (onConsumedInitialIdea) onConsumedInitialIdea();
+  }, [initialIdea]);
+
   // captions is keyed by platform id: { instagram: {text}, facebook: {text}, ... }
   const [captions, setCaptions] = useState(saved?.captions || {});
   const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"" });
@@ -7136,10 +7247,11 @@ function saveMediaLibraryToStorage(items) {
 // Normalizes arbitrary image bytes (JPEG, WEBP, indexed/palette PNG, CMYK, etc.) into a
 // guaranteed-valid RGBA PNG by round-tripping through a canvas. Fixes OpenAI images/edits
 // rejecting files with "Invalid image file or mode" when the source isn't a true RGBA PNG.
-// Also caps the output size — Netlify's base64-encoded request body limit is effectively
-// ~4.5MB (30% base64 overhead on top of a ~6MB raw limit), and a lossless canvas PNG export
-// of a detailed image can easily exceed that, causing a 413 on the edit request.
-function normalizeToPngBase64(base64, maxBytes = 3500000) {
+// Also caps the output size. OpenAI documents a 50MB per-image limit for gpt-image-2, but
+// real-world reports (including OpenAI's own community forum) show intermediate gateways
+// commonly 413 well below that — the vetted safe practice is keeping uploads under ~1.5MB,
+// which is what this targets (with headroom, well under Netlify's own ~4.5MB body cap too).
+function normalizeToPngBase64(base64, maxBytes = 1400000) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
@@ -8101,7 +8213,7 @@ function VideoPlanningStudio({ activeProvider, activeModel, apiKeys, posts, user
 
 // ─── INSPIRATION BOARD ───────────────────────────────────────────────────────
 
-function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, btnS, btnP }) {
+function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, btnS, btnP, toDraftLabel = "→ Draft" }) {
   const [inspFilter, setInspFilter] = useState("all");
   const [inspSearch, setInspSearch] = useState("");
 
@@ -8192,7 +8304,7 @@ function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, bt
                     {item.notes&&<div style={{fontSize:12,color:"var(--text-secondary)",fontStyle:"italic"}}>💡 {item.notes}</div>}
                   </div>
                   <div style={{display:"flex",gap:6,flexShrink:0}}>
-                    <button onClick={()=>onToDraft(item)} style={{...btnS,fontSize:11,padding:"5px 10px"}}>→ Draft</button>
+                    <button onClick={()=>onToDraft(item)} style={{...btnS,fontSize:11,padding:"5px 10px"}}>{toDraftLabel}</button>
                     <button onClick={()=>onDelete(item.id)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14,padding:"5px"}} title="Remove">✕</button>
                   </div>
                 </div>
@@ -9829,9 +9941,9 @@ const HEADLINE_IMAGE_SPEC = {
   style: "cinematic editorial photography, moody atmospheric, fly fishing and whiskey lifestyle, amber and teal tones, wide landscape",
 };
 
-function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys, onImageSaved }) {
-  const [imageUrl,    setImageUrl]    = useState(null);
-  const [cloudUrl,    setCloudUrl]    = useState(null); // permanent GCS URL
+function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys, onImageSaved, existingImageUrl = null }) {
+  const [imageUrl,    setImageUrl]    = useState(existingImageUrl);
+  const [cloudUrl,    setCloudUrl]    = useState(existingImageUrl); // permanent GCS URL
   const [prompt,      setPrompt]      = useState("");
   const [loading,     setLoading]     = useState(false);
   const [uploading,   setUploading]   = useState(false);
@@ -9846,6 +9958,11 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
   const provider = imgProvider;
   const providerLabel = getImageProviderLabel(provider);
   const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
+
+  useEffect(() => {
+    setImageUrl(existingImageUrl);
+    setCloudUrl(existingImageUrl);
+  }, [existingImageUrl]);
 
   // Convert any image URL to a JPEG data URL via canvas before saving
   const toJpegDataUrl = (url) => new Promise((resolve, reject) => {
@@ -10478,6 +10595,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
     status:   post?.status   || "draft",
     date:     post?.date     || new Date().toISOString().split("T")[0],
     url:      post?.url      || "",
+    headlineImageUrl: post?.headlineImageUrl || "",
   });
   const [saved,        setSaved]        = useState(false);
   const [saveStatus,   setSaveStatus]   = useState(""); // "saving" | "saved" | ""
@@ -10605,6 +10723,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           activeModel={activeModel || "claude-sonnet-4-6"}
           apiKeys={apiKeys || {}}
           onImageSaved={(url) => setForm(f => ({ ...f, headlineImageUrl: url }))}
+          existingImageUrl={form.headlineImageUrl || null}
         />
 
         {/* Copy for blog host */}
@@ -10613,7 +10732,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
             📋 Copy for Your Blog
           </div>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-            <button onClick={() => copyPostWithLinks(form.title, form.body)}
+            <button onClick={() => copyPostWithLinks(form.title, form.body, form.headlineImageUrl)}
               style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
               📋 Copy Post Text
             </button>
@@ -10648,8 +10767,70 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
 
 // ─── ADD COMPETITOR MODAL ─────────────────────────────────────────────────────
 
+// ─── ADD SOCIAL COMPETITOR MODAL ──────────────────────────────────────────────
+
+function AddSocialCompetitorModal({ onSave, onClose, dark }) {
+  const [form, setForm] = useState({ name:"", handle:"", platform:"Instagram", followers:"", posts:"", engagement:"", threat:"medium" });
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
+  const valid = form.name.trim() && form.handle.trim();
+  return (
+    <Modal title="Add Social Competitor" onClose={onClose}>
+      <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Account Name *</label>
+            <input style={iS} placeholder="Hatch Magazine" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} autoFocus />
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Handle *</label>
+            <input style={iS} placeholder="@hatchmag" value={form.handle} onChange={e=>setForm(f=>({...f,handle:e.target.value}))} />
+          </div>
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Platform</label>
+          <select style={{ ...iS, cursor:"pointer" }} value={form.platform} onChange={e=>setForm(f=>({...f,platform:e.target.value}))}>
+            {["Instagram","Facebook","TikTok","X","Pinterest","Reddit","YouTube"].map(p=><option key={p} value={p}>{p}</option>)}
+          </select>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Followers</label>
+            <input style={iS} placeholder="45K" value={form.followers} onChange={e=>setForm(f=>({...f,followers:e.target.value}))} />
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Post Freq</label>
+            <input style={iS} placeholder="5/wk" value={form.posts} onChange={e=>setForm(f=>({...f,posts:e.target.value}))} />
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Engagement</label>
+            <input style={iS} placeholder="3.2%" value={form.engagement} onChange={e=>setForm(f=>({...f,engagement:e.target.value}))} />
+          </div>
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Threat Level</label>
+          <div style={{ display:"flex", gap:8 }}>
+            {["low","medium","high"].map(t => (
+              <button key={t} onClick={()=>setForm(f=>({...f,threat:t}))}
+                style={{ flex:1, padding:"8px", borderRadius:8, border:form.threat===t?`1px solid ${t==="high"?"var(--red)":t==="medium"?"var(--amber)":"var(--green)"}`:"1px solid var(--border)", background:form.threat===t?(t==="high"?"var(--red)":t==="medium"?"var(--amber)":"var(--green)")+"18":"var(--bg-elevated)", color:form.threat===t?(t==="high"?"var(--red)":t==="medium"?"var(--amber)":"var(--green)"):"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textTransform:"capitalize" }}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginTop:4 }}>
+          <button onClick={onClose} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Cancel</button>
+          <button onClick={()=>{ if(valid){ onSave({...form, id:Date.now()}); onClose(); }}} disabled={!valid}
+            style={{ padding:"9px 24px", borderRadius:8, border:"none", background:valid?"var(--amber)":"var(--bg-elevated)", color:valid?(dark?"#0e0f11":"#fff"):"var(--muted)", fontSize:13, fontWeight:700, cursor:valid?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif" }}>
+            Add Competitor
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function AddCompetitorModal({ onSave, onClose }) {
-  const [form, setForm] = useState({ name:"", url:"", da:"", posts:"", traffic:"", strengths:"", threat:"medium" });
+  const [form, setForm] = useState({ name:"", url:"", posts:"", traffic:"", strengths:"", threat:"medium" });
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
   const valid = form.name.trim() && form.url.trim();
   const normalizeUrl = (u) => {
@@ -10670,11 +10851,7 @@ function AddCompetitorModal({ onSave, onClose }) {
             <input style={iS} placeholder="hatchmag.com" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} />
           </div>
         </div>
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
-          <div>
-            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Domain Authority</label>
-            <input style={iS} type="number" placeholder="45" value={form.da} onChange={e=>setForm(f=>({...f,da:e.target.value}))} />
-          </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
           <div>
             <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Post Freq</label>
             <input style={iS} placeholder="3/wk" value={form.posts} onChange={e=>setForm(f=>({...f,posts:e.target.value}))} />
@@ -10701,7 +10878,7 @@ function AddCompetitorModal({ onSave, onClose }) {
         </div>
         <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginTop:4 }}>
           <button onClick={onClose} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Cancel</button>
-          <button onClick={()=>{ if(valid){ onSave({...form, url: normalizeUrl(form.url), da:Number(form.da)||0, id:Date.now()}); onClose(); }}} disabled={!valid}
+          <button onClick={()=>{ if(valid){ onSave({...form, url: normalizeUrl(form.url), id:Date.now()}); onClose(); }}} disabled={!valid}
             style={{ padding:"9px 24px", borderRadius:8, border:"none", background:valid?"var(--amber)":"var(--bg-elevated)", color:valid?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:valid?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif" }}>
             Add Competitor
           </button>
@@ -10834,7 +11011,9 @@ export default function Dashboard({ user, workspace }) {
   // ── Persistent state (localStorage)
   const [posts,       setPosts]       = useState(() => { try { const s = localStorage.getItem("bb_posts"); return s ? JSON.parse(s) : DEFAULT_POSTS; } catch { return DEFAULT_POSTS; } });
   const [competitors, setCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_competitors"); return s ? JSON.parse(s) : COMPETITORS; } catch { return COMPETITORS; } });
+  const [socialCompetitors, setSocialCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_social_competitors"); return s ? JSON.parse(s) : []; } catch { return []; } });
   const [inspiration, setInspiration] = useState(() => { try { const s = localStorage.getItem("bb_inspiration"); return s ? JSON.parse(s) : INSPIRATION; } catch { return INSPIRATION; } });
+  const [socialInspiration, setSocialInspiration] = useState(() => { try { const s = localStorage.getItem("bb_social_inspiration"); return s ? JSON.parse(s) : []; } catch { return []; } });
   const [calEvents,   setCalEvents]   = useState(() => { try { const s = localStorage.getItem("bb_cal_events"); return s ? JSON.parse(s) : CALENDAR_EVENTS; } catch { return CALENDAR_EVENTS; } });
   const [wsSettings,  setWsSettings]  = useState(() => { try { const s = localStorage.getItem("bb_ws_settings"); return s ? JSON.parse(s) : null; } catch { return null; } });
 
@@ -10938,6 +11117,8 @@ export default function Dashboard({ user, workspace }) {
   useEffect(() => { try { localStorage.setItem("bb_posts",       JSON.stringify(posts));       } catch {} }, [posts]);
   useEffect(() => { try { localStorage.setItem("bb_competitors", JSON.stringify(competitors)); } catch {} }, [competitors]);
   useEffect(() => { try { localStorage.setItem("bb_inspiration", JSON.stringify(inspiration)); } catch {} }, [inspiration]);
+  useEffect(() => { try { localStorage.setItem("bb_social_inspiration", JSON.stringify(socialInspiration)); } catch {} }, [socialInspiration]);
+  useEffect(() => { try { localStorage.setItem("bb_social_competitors", JSON.stringify(socialCompetitors)); } catch {} }, [socialCompetitors]);
   useEffect(() => { try { localStorage.setItem("bb_cal_events",  JSON.stringify(calEvents));  } catch {} }, [calEvents]);
 
   // ── Modal state
@@ -10945,6 +11126,11 @@ export default function Dashboard({ user, workspace }) {
   const [editingPost,       setEditingPost]       = useState(null);
   const [pipelineInitialPost, setPipelineInitialPost] = useState(null);
   const sendPostToPipeline = (post) => { setPipelineInitialPost(post); setActiveTab("blog"); setBlogTab("pipeline"); };
+  const [socialPipelineHandoff, setSocialPipelineHandoff] = useState(null);
+  const sendArticleToSocialPipeline = (article) => {
+    setSocialPipelineHandoff({ title: article.title, source: "Blog article", headlineImageUrl: article.headlineImageUrl || null });
+    setActiveTab("social");
+  };
   const [addCompetitorOpen, setAddCompetitorOpen] = useState(false);
   const [addInspirationOpen,setAddInspirationOpen]= useState(false);
   const [calModalDay,       setCalModalDay]       = useState(null);
@@ -10961,9 +11147,13 @@ export default function Dashboard({ user, workspace }) {
 
   const saveCompetitor = (c) => setCompetitors(all => [...all, c]);
   const deleteCompetitor = (name) => setCompetitors(all => all.filter(c => c.name !== name));
+  const saveSocialCompetitor = (item) => setSocialCompetitors(all => [item, ...all]);
+  const deleteSocialCompetitor = (name) => setSocialCompetitors(all => all.filter(c => c.name !== name));
 
   const saveInspiration = (item) => setInspiration(all => [item, ...all]);
   const deleteInspiration = (id) => setInspiration(all => all.filter(i => i.id !== id));
+  const saveSocialInspiration = (item) => setSocialInspiration(all => [item, ...all]);
+  const deleteSocialInspiration = (id) => setSocialInspiration(all => all.filter(i => i.id !== id));
   const inspirationToDraft = (item) => {
     const newPost = { id:Date.now(), title:item.title, body:`Source: ${item.source}\n\nNotes: ${item.notes}\n\n`, category:"Culture", status:"draft", date:new Date().toISOString().split("T")[0], views:0 };
     setPosts(all => [newPost, ...all]);
@@ -11087,9 +11277,9 @@ export default function Dashboard({ user, workspace }) {
 
   const TABS = [
     { id:"blog",      label:"Blog",       icon:"◈", highlight:true },
+    { id:"social",    label:"Marketing",  icon:"▣" },
     { id:"analytics", label:"Analytics",  icon:"◔" },
     { id:"calendar",  label:"Calendar",   icon:"▦" },
-    { id:"social",    label:"Marketing",  icon:"▣" },
     { id:"settings",  label:"Settings",   icon:"⚙" },
   ];
 
@@ -11287,6 +11477,7 @@ export default function Dashboard({ user, workspace }) {
               brandGuide={brandGuide}
               initialPost={pipelineInitialPost}
               onConsumedInitialPost={() => setPipelineInitialPost(null)}
+              onSendToSocialPipeline={sendArticleToSocialPipeline}
             />
               )}
 
@@ -11326,7 +11517,7 @@ export default function Dashboard({ user, workspace }) {
                   <div style={{...card,padding:0,overflow:"hidden"}}>
                     <table style={{width:"100%",borderCollapse:"collapse"}}>
                       <thead><tr style={{borderBottom:"1px solid var(--border)"}}>
-                        {["Competitor","DA","Frequency","Est. Traffic","Strengths","Threat"].map(h=>(
+                        {["Competitor","Frequency","Est. Traffic","Strengths","Threat"].map(h=>(
                           <th key={h} style={{textAlign:"left",padding:"12px 16px",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{h}</th>
                         ))}
                       </tr></thead>
@@ -11334,7 +11525,6 @@ export default function Dashboard({ user, workspace }) {
                         {competitors.map(c=>(
                           <tr key={c.name||c.id} style={{borderBottom:"1px solid var(--border)",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                             <td style={{padding:"14px 16px"}}><div style={{fontWeight:600,fontSize:13}}>{c.name}</div><div style={{fontSize:11,color:"var(--text-secondary)"}}>{c.url}</div></td>
-                            <td style={{padding:"14px 16px",fontWeight:700,fontSize:14,color:"var(--amber)"}}>{c.da}</td>
                             <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{c.posts}</td>
                             <td style={{padding:"14px 16px",fontSize:12,fontWeight:600}}>{c.traffic}</td>
                             <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{c.strengths}</td>
@@ -11452,6 +11642,14 @@ export default function Dashboard({ user, workspace }) {
                 onSaveSocialPost={saveSocialPost}
                 onDeleteSocialPost={deleteSocialPost}
                 userId={userId}
+                socialInspiration={socialInspiration}
+                onAddSocialInspiration={saveSocialInspiration}
+                onDeleteSocialInspiration={deleteSocialInspiration}
+                socialCompetitors={socialCompetitors}
+                onAddSocialCompetitor={saveSocialCompetitor}
+                onDeleteSocialCompetitor={deleteSocialCompetitor}
+                externalInitialIdea={socialPipelineHandoff}
+                onConsumedExternalInitialIdea={() => setSocialPipelineHandoff(null)}
               />
             </MarketingErrorBoundary>
           )}
