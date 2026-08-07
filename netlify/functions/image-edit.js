@@ -50,7 +50,15 @@ export default async (req) => {
         headers: { "Authorization": `Bearer ${apiKey}` },
         body:    formData,
       });
-      const data = await res.json();
+      const rawText = await res.text();
+      let data;
+      try { data = JSON.parse(rawText); }
+      catch {
+        // Gateway-level rejection (e.g. a proxy/CDN 413) often isn't JSON at all
+        throw new Error(res.status === 413
+          ? "OpenAI rejected the image as too large, even though it was compressed before sending. Try a smaller/simpler source image."
+          : `OpenAI returned an unexpected response (HTTP ${res.status})`);
+      }
       if (data.error) throw new Error(data.error.message);
       b64 = data.data?.[0]?.b64_json;
       if (!b64) throw new Error("No image data returned from OpenAI edits");
