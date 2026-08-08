@@ -134,7 +134,12 @@ export default async () => {
           try {
             const captionRaw  = post.captions?.[platId];
             const caption     = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
-            const fullMessage = [caption, post.hashtags].filter(Boolean).join("\n\n").trim();
+            // X performs best with far fewer hashtags than other platforms — cap
+            // to 2, matching the same limit enforced client-side.
+            const hashtagsForPlat = platId === "twitter"
+              ? (post.hashtags || "").split(/\s+/).filter(Boolean).slice(0, 2).join(" ")
+              : post.hashtags;
+            const fullMessage = [caption, hashtagsForPlat].filter(Boolean).join("\n\n").trim();
 
             if (platId === "facebook" && metaConfig?.pages?.length > 0) {
               const id = await postToFacebook(metaConfig.pages[0], fullMessage, imageUrl);
@@ -164,6 +169,10 @@ export default async () => {
                 results[platId] = { success:false, error:`No Buffer channel mapped for ${platId} — configure in Settings → Buffer` };
                 continue;
               }
+              if (platId === "pinterest" && !bufferConfig?.boardMapping?.[channelId]) {
+                results[platId] = { success:false, error:"No Pinterest board selected — set one in Settings → Buffer" };
+                continue;
+              }
 
               const bufferRes = await fetch("https://blogbunker.netlify.app/api/buffer-post", {
                 method:  "POST",
@@ -175,6 +184,7 @@ export default async () => {
                   text:     fullMessage,
                   imageUrl: imageUrl || "",
                   scheduledAt: post.scheduledAt,
+                  pinterestBoardId: platId === "pinterest" ? bufferConfig?.boardMapping?.[channelId] : undefined,
                 }),
               });
               const bufferData = await bufferRes.json();

@@ -55,6 +55,19 @@ const GET_CHANNELS = `
   }
 `;
 
+// Fetch a Pinterest channel's boards (required to publish a pin)
+const GET_PINTEREST_BOARDS = `
+  query GetChannelBoards($input: ChannelInput!) {
+    channel(input: $input) {
+      metadata {
+        ... on PinterestMetadata {
+          boards { serviceId name }
+        }
+      }
+    }
+  }
+`;
+
 // Create a post on a specific channel
 const CREATE_POST = `
   mutation CreatePost($input: CreatePostInput!) {
@@ -73,7 +86,7 @@ export default async (req) => {
   try { body = await req.json(); }
   catch { return new Response(JSON.stringify({ error:"Invalid JSON" }), { status: 400, headers: CORS }); }
 
-  const { apiKey, action, channelId, text, imageUrl, scheduledAt, organizationId } = body;
+  const { apiKey, action, channelId, text, imageUrl, scheduledAt, organizationId, pinterestBoardId } = body;
 
   if (!apiKey) return new Response(JSON.stringify({ error:"apiKey required" }), { status: 400, headers: CORS });
 
@@ -93,6 +106,13 @@ export default async (req) => {
       }), { status: 200, headers: CORS });
     }
 
+    // ── GET PINTEREST BOARDS (needed before a Pinterest post can publish) ──────
+    if (action === "getPinterestBoards") {
+      if (!channelId) return new Response(JSON.stringify({ error:"channelId required" }), { status: 400, headers: CORS });
+      const data = await bufferQuery(apiKey, GET_PINTEREST_BOARDS, { input: { id: channelId } });
+      return new Response(JSON.stringify({ boards: data.channel?.metadata?.boards || [] }), { status: 200, headers: CORS });
+    }
+
     // ── CREATE POST ─────────────────────────────────────────────────────────
     if (action === "createPost") {
       if (!channelId || !text) return new Response(JSON.stringify({ error:"channelId and text required" }), { status: 400, headers: CORS });
@@ -108,6 +128,9 @@ export default async (req) => {
         mode: scheduledAt ? "customScheduled" : "addToQueue",
         ...(scheduledAt ? { dueAt: new Date(scheduledAt).toISOString() } : {}),
         assets,
+        // Pinterest requires a board — without this, Buffer accepts the post but
+        // fails to actually publish it ("no Pinterest board was selected")
+        ...(pinterestBoardId ? { metadata: { pinterest: { boardServiceId: pinterestBoardId } } } : {}),
       };
 
       const data = await bufferQuery(apiKey, CREATE_POST, { input });
