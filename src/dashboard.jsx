@@ -159,6 +159,81 @@ function markdownToPlainWithLinks(md) {
 // a rich-text editor, with a plain-text-only fallback for older browsers/permissions.
 // Reuses the app's existing markdownToHtml() converter (defined later in this file,
 // used by RichTextEditor — safe to call here due to function hoisting).
+// Uploads a file to a GCS resumable-upload session URL, following Google's own
+// documented retry protocol: a bare single PUT with no retry logic (the previous
+// implementation) turns any transient GCS 500/503 into a permanent user-facing
+// failure. Per Google's docs, a 500/503 on a resumable upload is expected/normal
+// and the client must check how many bytes were actually received (an empty PUT
+// with Content-Range: bytes */total) and resume from that offset rather than
+// re-sending the whole file blind.
+function uploadToGCSResumable(uploadUrl, file, onProgress) {
+  const putRange = (blob, startByte) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", uploadUrl);
+    if (blob.size > 0) xhr.setRequestHeader("Content-Type", file.type);
+    if (startByte > 0 || blob.size < file.size) {
+      xhr.setRequestHeader("Content-Range", `bytes ${startByte}-${startByte + blob.size - 1}/${file.size}`);
+    }
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round(((startByte + e.loaded) / file.size) * 100));
+    };
+    xhr.onload = () => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range") });
+    xhr.onerror = () => reject(new Error("Network error during upload"));
+    xhr.send(blob);
+  });
+
+  const checkStatus = () => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", uploadUrl);
+    xhr.setRequestHeader("Content-Range", `bytes */${file.size}`);
+    xhr.onload = () => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range") });
+    xhr.onerror = () => reject(new Error("Network error checking upload status"));
+    xhr.send(new Blob([]));
+  });
+
+  return new Promise(async (resolve, reject) => {
+    const maxAttempts = 4;
+    let startByte = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const chunk = startByte > 0 ? file.slice(startByte) : file;
+        const result = await putRange(chunk, startByte);
+        if (result.status === 200 || result.status === 201) return resolve();
+        if (result.status === 500 || result.status === 503) {
+          if (attempt === maxAttempts) return reject(new Error(`Upload failed after ${maxAttempts} attempts: ${result.status}`));
+          await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1))); // 1s, 2s, 4s
+          // Ask GCS how many bytes it actually has before resuming — per Google's
+          // documented protocol, don't blindly re-send the whole file.
+          try {
+            const status = await checkStatus();
+            if (status.status === 200 || status.status === 201) return resolve(); // it actually succeeded despite the error
+            if (status.status === 308 && status.range) {
+              const match = status.range.match(/bytes=0-(\d+)/);
+              if (match) startByte = parseInt(match[1], 10) + 1;
+            }
+          } catch { /* status check failed — just retry from the current startByte */ }
+          continue;
+        }
+        return reject(new Error(`Upload failed: ${result.status}`));
+      } catch(e) {
+        if (attempt === maxAttempts) return reject(e);
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+      }
+    }
+  });
+}
+
+// The Hashtags stage produces one shared hashtag string used across every
+// selected platform, but some platforms want far fewer than others (X performs
+// best with ~1-2 hashtags, unlike Instagram's 20-30). Trims down per-platform
+// without touching the underlying hashtags.selected the user actually picked.
+function limitHashtagsForPlatform(hashtagString, platformId, maxCounts = { twitter: 2 }) {
+  const max = maxCounts[platformId];
+  if (max == null || !hashtagString) return hashtagString;
+  const tags = hashtagString.split(/\s+/).filter(Boolean);
+  return tags.slice(0, max).join(" ");
+}
+
 async function copyPostWithLinks(title, body, headlineImageUrl = null) {
   const plainText = `${title}${headlineImageUrl ? `\n[Headline image: ${headlineImageUrl}]` : ""}\n\n${markdownToPlainWithLinks(body)}`;
   const escTitle = (title||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -5648,7 +5723,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
     for (const plat of selectedPlatforms) {
       const captionText = captions[plat.id]?.text || "";
-      const fullMessage = [captionText, hashtags.selected].filter(Boolean).join("\n\n");
+      const fullMessage = [captionText, limitHashtagsForPlatform(hashtags.selected, plat.id)].filter(Boolean).join("\n\n");
       setLoadMsg(`Publishing to ${plat.label}…`);
 
       try {
@@ -5675,6 +5750,9 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
           }
 
           const channelId = bufferCfg.mapping[plat.id];
+          if (plat.id === "pinterest" && !bufferCfg.boardMapping?.[channelId]) {
+            throw new Error("No Pinterest board selected — set one in Settings → Buffer before posting to Pinterest.");
+          }
           setLoadMsg(`Publishing to ${plat.label} via Buffer…`);
           const res = await fetch("/api/buffer-post", {
             method:  "POST",
@@ -5686,6 +5764,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               text:      fullMessage,
               imageUrl:  publicImageUrl || "",
               scheduledAt: null,
+              pinterestBoardId: plat.id === "pinterest" ? bufferCfg.boardMapping?.[channelId] : undefined,
             }),
           });
           const data = await res.json();
@@ -6198,7 +6277,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   const overs = selectedPlatforms
                     .map(p => {
                       const captionText = captions[p.id]?.text || "";
-                      const combined = [captionText, hashtags.selected].filter(Boolean).join("\n\n");
+                      const combined = [captionText, limitHashtagsForPlatform(hashtags.selected, p.id)].filter(Boolean).join("\n\n");
                       return { p, len: combined.length };
                     })
                     .filter(({ p, len }) => len > p.charLimit);
@@ -7021,7 +7100,7 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
 
     for (const plat of selectedPlats) {
       const captionRaw = post.captions?.[plat.id]; const captionText = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
-      const fullMessage = `${captionText}\n\n${post.hashtags || ""}`.trim();
+      const fullMessage = `${captionText}\n\n${limitHashtagsForPlatform(post.hashtags || "", plat.id)}`.trim();
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
           const page = metaConfig.pages[0];
@@ -7032,16 +7111,21 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
           const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: publicImageUrl, platforms: ["instagram"] });
           results[plat.id] = res.instagram?.success ? "✓ Posted" : `Error: ${res.instagram?.error}`;
         } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
+          const channelId = bufferCfg.mapping[plat.id];
+          if (plat.id === "pinterest" && !bufferCfg.boardMapping?.[channelId]) {
+            throw new Error("No Pinterest board selected — set one in Settings → Buffer before posting to Pinterest.");
+          }
           const res = await fetch("/api/buffer-post", {
             method:  "POST",
             headers: { "Content-Type": "application/json" },
             body:    JSON.stringify({
               apiKey:      bufferCfg.apiKey,
               action:      "createPost",
-              channelId:   bufferCfg.mapping[plat.id],
+              channelId,
               text:        fullMessage,
               imageUrl:    publicImageUrl || "",
               scheduledAt: null,
+              pinterestBoardId: plat.id === "pinterest" ? bufferCfg.boardMapping?.[channelId] : undefined,
             }),
           });
           const data = await res.json();
@@ -7522,23 +7606,12 @@ function MediaLibrary({ userId }) {
       const { uploadUrl, objectId, item, error: sessionErr } = await sessionRes.json();
       if (sessionErr || !uploadUrl) throw new Error(sessionErr || "Failed to get upload URL");
 
-      // Step 2: upload directly from browser to GCS with progress tracking
-      await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("PUT", uploadUrl);
-        xhr.setRequestHeader("Content-Type", file.type);
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const pct = Math.round((e.loaded / e.total) * 100);
-            setUploadProgress(prev => ({ ...prev, [key]: pct }));
-          }
-        };
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) resolve();
-          else reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
-        };
-        xhr.onerror = () => reject(new Error("Network error during upload"));
-        xhr.send(file);
+      // Step 2: upload directly from browser to GCS with progress tracking and
+      // automatic retry-with-resume on transient 500/503 (expected/documented
+      // GCS behavior, not a bug — previously a single bare PUT with no retry
+      // meant any transient hiccup was a permanent user-facing failure)
+      await uploadToGCSResumable(uploadUrl, file, (pct) => {
+        setUploadProgress(prev => ({ ...prev, [key]: pct }));
       });
 
       // Step 3: finalize (make public + update status)
@@ -9445,6 +9518,28 @@ function BufferSettings() {
   const [saved,    setSaved]    = useState(false);
   const [error,    setError]    = useState("");
   const [mapping,  setMapping]  = useState(() => loadBufferConfig().mapping || {});
+  const [boardMapping, setBoardMapping] = useState(() => loadBufferConfig().boardMapping || {});
+  const [pinterestBoards, setPinterestBoards] = useState({}); // { channelId: [{serviceId,name}] }
+  const [loadingBoards, setLoadingBoards] = useState({}); // { channelId: bool }
+
+  const loadBoardsFor = async (channelId) => {
+    setLoadingBoards(b => ({ ...b, [channelId]: true }));
+    try {
+      const res = await fetch("/api/buffer-post", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ apiKey: apiKey.trim(), action: "getPinterestBoards", channelId }),
+      });
+      const data = await res.json();
+      if (!data.error) setPinterestBoards(p => ({ ...p, [channelId]: data.boards || [] }));
+    } catch {}
+    setLoadingBoards(b => ({ ...b, [channelId]: false }));
+  };
+
+  useEffect(() => {
+    const pinterestChannelId = mapping.pinterest;
+    if (pinterestChannelId && apiKey.trim() && !pinterestBoards[pinterestChannelId]) loadBoardsFor(pinterestChannelId);
+  }, [mapping.pinterest]);
 
   const PLATFORM_NAMES = {
     twitter: "X (Twitter)", tiktok: "TikTok", pinterest: "Pinterest",
@@ -9475,7 +9570,7 @@ function BufferSettings() {
   };
 
   const save = () => {
-    const cfg = { apiKey: apiKey.trim(), channels, mapping, orgId, account, connected: !!apiKey.trim() && channels.length > 0 };
+    const cfg = { apiKey: apiKey.trim(), channels, mapping, boardMapping, orgId, account, connected: !!apiKey.trim() && channels.length > 0 };
     saveBufferConfig(cfg);
     setConfig(cfg);
     setSaved(true);
@@ -9585,20 +9680,24 @@ function BufferSettings() {
             Map your Buffer channels
           </div>
           <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-            {channels.map(ch => (
-              <div key={ch.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+            {channels.map(ch => {
+              const mappedPlatform = Object.entries(mapping).find(([,v]) => v === ch.id)?.[0] || "";
+              return (
+              <div key={ch.id} style={{ display:"flex", flexDirection:"column", gap:8, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
                 <span style={{ fontSize:18 }}>{SERVICE_ICONS[ch.service?.toLowerCase()] || "📱"}</span>
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ch.name}</div>
                   <div style={{ fontSize:11, color:"var(--text-secondary)", textTransform:"capitalize" }}>{ch.service} · {ch.serviceId}</div>
                 </div>
                 <select
-                  value={Object.entries(mapping).find(([,v]) => v === ch.id)?.[0] || ""}
+                  value={mappedPlatform}
                   onChange={e => {
                     const platform = e.target.value;
                     const next = Object.fromEntries(Object.entries(mapping).filter(([,v]) => v !== ch.id));
                     if (platform) next[platform] = ch.id;
                     setMapping(next);
+                    if (platform === "pinterest" && !pinterestBoards[ch.id]) loadBoardsFor(ch.id);
                   }}
                   style={{ ...iS, width:"auto", minWidth:150, cursor:"pointer" }}>
                   <option value="">— not mapped —</option>
@@ -9606,8 +9705,34 @@ function BufferSettings() {
                     <option key={id} value={id}>{name}</option>
                   ))}
                 </select>
+                </div>
+                {mappedPlatform === "pinterest" && (
+                  <div style={{ display:"flex", alignItems:"center", gap:8, paddingLeft:30 }}>
+                    <span style={{ fontSize:11, color:"var(--muted)", whiteSpace:"nowrap" }}>📌 Board:</span>
+                    {loadingBoards[ch.id] ? (
+                      <span style={{ fontSize:11, color:"var(--muted)" }}>Loading boards…</span>
+                    ) : (
+                      <select
+                        value={boardMapping[ch.id] || ""}
+                        onChange={e => setBoardMapping(b => ({ ...b, [ch.id]: e.target.value }))}
+                        style={{ ...iS, width:"auto", minWidth:180, cursor:"pointer", padding:"6px 10px", fontSize:12 }}>
+                        <option value="">— select a board (required) —</option>
+                        {(pinterestBoards[ch.id] || []).map(b => (
+                          <option key={b.serviceId} value={b.serviceId}>{b.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    {!loadingBoards[ch.id] && (pinterestBoards[ch.id]?.length === 0) && (
+                      <span style={{ fontSize:11, color:"var(--red)" }}>No boards found — create one on Pinterest first</span>
+                    )}
+                    {!boardMapping[ch.id] && !loadingBoards[ch.id] && (
+                      <span style={{ fontSize:11, color:"var(--amber)" }}>⚠ Required — Pinterest posts fail without a board</span>
+                    )}
+                  </div>
+                )}
               </div>
-            ))}
+              );
+            })}
           </div>
           <p style={{ fontSize:11, color:"var(--muted)", marginTop:10, lineHeight:1.6 }}>
             Map each Buffer channel to the platform it represents. When you schedule a post to X in Blog Bunker, it sends to whichever Buffer channel is mapped to X.
