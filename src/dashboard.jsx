@@ -195,18 +195,40 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
     // Google's own client libraries retry near-indefinitely on 500/503 (bounded
     // only by an overall deadline, not a small fixed attempt count) — a short
     // retry window can give up before a slower-to-clear backend hiccup resolves.
-    const maxAttempts = 6;
+    const maxErrorAttempts = 6;
+    // 308 (Resume Incomplete) isn't a failure — it's normal progress on a
+    // connection that can't push the whole file in one shot (common on mobile).
+    // Give it a much larger budget so a flaky connection can still finish a
+    // large upload through many small resume cycles instead of giving up early.
+    const maxResumeAttempts = 40;
     let startByte = 0;
     let lastBody = "";
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let errorAttempts = 0;
+    for (let iteration = 1; iteration <= maxResumeAttempts; iteration++) {
       try {
         const chunk = startByte > 0 ? file.slice(startByte) : file;
         const result = await putRange(chunk, startByte);
         if (result.status === 200 || result.status === 201) return resolve();
+        if (result.status === 308) {
+          // Not an error — GCS received some bytes and is waiting for the rest.
+          // Common on mobile connections where a large single PUT doesn't
+          // complete in one shot. Resume immediately from the confirmed offset,
+          // no backoff needed since nothing actually failed.
+          if (result.range) {
+            const match = result.range.match(/bytes=0-(\d+)/);
+            if (match) {
+              const newStartByte = parseInt(match[1], 10) + 1;
+              if (newStartByte > startByte) startByte = newStartByte; // only advance, never regress
+            }
+          }
+          if (iteration === maxResumeAttempts) return reject(new Error(`Upload didn't finish after many attempts — the connection kept dropping partway through. Try again on a stronger connection.`));
+          continue; // no backoff — this is expected progress, not a failure
+        }
         if (result.status === 500 || result.status === 503) {
+          errorAttempts++;
           lastBody = result.body || "";
-          if (attempt === maxAttempts) return reject(new Error(`Upload failed after ${maxAttempts} attempts (${result.status}): ${lastBody.slice(0,300) || "no further detail from GCS"}`));
-          await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, attempt - 1), 16000))); // 1s,2s,4s,8s,16s,16s
+          if (errorAttempts >= maxErrorAttempts) return reject(new Error(`Upload failed after ${maxErrorAttempts} attempts (${result.status}): ${lastBody.slice(0,300) || "no further detail from GCS"}`));
+          await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, errorAttempts - 1), 16000))); // 1s,2s,4s,8s,16s
           // Ask GCS how many bytes it actually has before resuming — per Google's
           // documented protocol, don't blindly re-send the whole file.
           try {
@@ -221,8 +243,9 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
         }
         return reject(new Error(`Upload failed: ${result.status} — ${(result.body || "").slice(0,300)}`));
       } catch(e) {
-        if (attempt === maxAttempts) return reject(e);
-        await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, attempt - 1), 16000)));
+        errorAttempts++;
+        if (errorAttempts >= maxErrorAttempts) return reject(e);
+        await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, errorAttempts - 1), 16000)));
       }
     }
   });
@@ -1443,7 +1466,7 @@ function AIQuickSwitcher({ activeProvider, activeModel, onProviderChange, onMode
   const imgProviderLabel = getImageProviderLabel(getImageProvider(apiKeys));
 
   return (
-    <div style={{ position:"fixed", bottom:24, right:24, zIndex:999, display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
+    <div className="bb-ai-switcher" style={{ position:"fixed", bottom:24, right:24, zIndex:999, display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
       {open && (
         <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:14, padding:20, width:320, boxShadow:"0 8px 40px rgba(0,0,0,0.4)", display:"flex", flexDirection:"column", gap:16 }}>
           {/* Text AI */}
@@ -9502,6 +9525,7 @@ const MOBILE_CSS = `
     .bb-sidebar { display: none !important; }
     .bb-main-content { padding: 16px 14px 72px !important; }
     .bb-root { flex-direction: column !important; }
+    .bb-ai-switcher { bottom: 72px !important; right: 12px !important; } /* clear the 56px mobile nav — was overlapping the Settings tab */
   }
 `;
 
