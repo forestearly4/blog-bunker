@@ -270,9 +270,11 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
       try {
         const chunkEnd = Math.min(startByte + CHUNK_SIZE, file.size);
         const chunk = file.slice(startByte, chunkEnd);
+        console.log(`[gcs-upload] sending bytes ${startByte}-${chunkEnd-1} of ${file.size}…`);
         const result = await putChunk(chunk, startByte);
+        console.log(`[gcs-upload] response: status=${result.status} range=${result.range || "(none)"}`);
 
-        if (result.status === 200 || result.status === 201) return resolve();
+        if (result.status === 200 || result.status === 201) { console.log("[gcs-upload] COMPLETE"); return resolve(); }
 
         if (result.status === 308) {
           const confirmedByte = parseRange(result.range);
@@ -7691,9 +7693,11 @@ function MediaLibrary({ userId }) {
 
     const key = file.name + file.size;
     setUploadProgress(prev => ({ ...prev, [key]: 0 }));
+    console.log(`[upload] starting: ${file.name} (${file.size} bytes)`);
 
     try {
       // Step 1: get a resumable upload session URL from our server
+      console.log("[upload] step 1: requesting signed URL…");
       const sessionRes = await fetchWithTimeout("/api/gcs-signed-url", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
@@ -7709,28 +7713,35 @@ function MediaLibrary({ userId }) {
       }, 20000);
       const { uploadUrl, objectId, item, error: sessionErr } = await sessionRes.json();
       if (sessionErr || !uploadUrl) throw new Error(sessionErr || "Failed to get upload URL");
+      console.log("[upload] step 1 done — got signed URL, objectId:", objectId);
 
       // Step 2: upload directly from browser to GCS with progress tracking and
       // automatic retry-with-resume on transient 500/503 (expected/documented
       // GCS behavior, not a bug — previously a single bare PUT with no retry
       // meant any transient hiccup was a permanent user-facing failure)
+      console.log("[upload] step 2: uploading to GCS…");
       await uploadToGCSResumable(uploadUrl, file, (pct) => {
+        console.log(`[upload] progress: ${pct}%`);
         setUploadProgress(prev => ({ ...prev, [key]: pct }));
       });
+      console.log("[upload] step 2 done — GCS upload confirmed complete");
 
       // Step 3: finalize (make public + update status)
+      console.log("[upload] step 3: finalizing…");
       await fetchWithTimeout("/api/gcs-finalize", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ userId: resolvedUserId, objectId }),
       }, 15000);
+      console.log("[upload] step 3 done — finalized");
 
       // Add to local state
       setItems(prev => [{ ...item, status:"ready" }, ...prev.filter(i => i.id !== objectId)]);
       setUploadProgress(prev => { const next = {...prev}; delete next[key]; return next; });
+      console.log("[upload] DONE — added to local state, should now be visible without a refresh");
 
     } catch(e) {
-      console.error("Upload failed:", e);
+      console.error("[upload] FAILED at some step:", e);
       alert(`Upload failed: ${e.message}`);
       setUploadProgress(prev => { const next = {...prev}; delete next[key]; return next; });
     }
