@@ -275,10 +275,28 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
         if (result.status === 200 || result.status === 201) return resolve();
 
         if (result.status === 308) {
-          // Normal — this chunk was accepted, move on to the next one.
-          const newStartByte = parseRange(result.range);
-          startByte = newStartByte != null && newStartByte > startByte ? newStartByte : chunkEnd;
-          errorAttempts = 0; // reset — we're making real progress again
+          const confirmedByte = parseRange(result.range);
+          if (confirmedByte != null) {
+            // GCS explicitly confirmed how many bytes it has — trust it, even
+            // if it's less than this chunk's full range (a partial chunk write).
+            startByte = confirmedByte;
+            errorAttempts = 0; // real confirmed progress
+            continue;
+          }
+          // No Range header on the 308 means GCS is NOT confirming any bytes
+          // were persisted for this attempt — previously this blindly assumed
+          // success and advanced to chunkEnd anyway, which is exactly what
+          // caused "upload offset exceeds already uploaded size" errors (we'd
+          // move on to the next chunk while GCS's session still had 0 bytes).
+          // Ask GCS directly what it actually has before deciding what to do.
+          try {
+            const status = await checkStatus();
+            const confirmed = parseRange(status.range);
+            startByte = confirmed != null ? confirmed : startByte; // never advance without explicit confirmation
+          } catch { /* leave startByte where it was — retry this same chunk */ }
+          errorAttempts++;
+          if (errorAttempts >= maxErrorAttempts) return reject(new Error(`GCS never confirmed receiving the data after ${maxErrorAttempts} attempts — try again, possibly on a different network.`));
+          await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, errorAttempts - 1), 8000)));
           continue;
         }
 
