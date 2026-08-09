@@ -166,6 +166,22 @@ function markdownToPlainWithLinks(md) {
 // and the client must check how many bytes were actually received (an empty PUT
 // with Content-Range: bytes */total) and resume from that offset rather than
 // re-sending the whole file blind.
+// A plain fetch() has no timeout at all — if it stalls (mobile connectivity
+// blip), the caller just hangs forever with nothing to show the user. Used for
+// steps in the upload chain that aren't already XHR-based with their own abort.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch(e) {
+    if (e.name === "AbortError") throw new Error(`Request to ${url} stalled — no response after ${timeoutMs/1000}s`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function uploadToGCSResumable(uploadUrl, file, onProgress) {
   // Sending the whole remaining file in one PUT (the previous approach) is
   // exactly the pattern that struggles on mobile — one very large request is
@@ -177,8 +193,26 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
 
   const putChunk = (blob, startByte) => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    let settled = false;
+    // xhr.timeout alone isn't reliably honored by every mobile browser for a
+    // connection that stalls before any response starts (as opposed to one
+    // that's merely slow) — this was the actual cause of uploads sitting at 0%
+    // forever with no error ever surfacing. A manual hard-abort guarantees
+    // SOMETHING happens within a bounded time no matter what.
+    const hardAbort = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      xhr.abort();
+      reject(new Error("Upload stalled — no response from the server after 20s"));
+    }, 20000);
+    const finish = (fn) => (...args) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardAbort);
+      fn(...args);
+    };
     xhr.open("PUT", uploadUrl);
-    xhr.timeout = 30000; // a 2MB chunk should never legitimately take this long — fail fast and retry instead of hanging
+    xhr.timeout = 25000; // secondary — the manual hardAbort above is the real backstop
     if (blob.size > 0) xhr.setRequestHeader("Content-Type", file.type);
     if (startByte > 0 || blob.size < file.size) {
       xhr.setRequestHeader("Content-Range", `bytes ${startByte}-${startByte + blob.size - 1}/${file.size}`);
@@ -186,20 +220,35 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(Math.round(((startByte + e.loaded) / file.size) * 100));
     };
-    xhr.onload = () => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range"), body: xhr.responseText });
-    xhr.onerror = () => reject(new Error("Network error during upload"));
-    xhr.ontimeout = () => reject(new Error("Chunk upload timed out"));
+    xhr.onload    = finish(() => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range"), body: xhr.responseText }));
+    xhr.onerror   = finish(() => reject(new Error("Network error during upload")));
+    xhr.ontimeout = finish(() => reject(new Error("Chunk upload timed out")));
+    xhr.onabort   = finish(() => reject(new Error("Upload was aborted")));
     xhr.send(blob);
   });
 
   const checkStatus = () => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    let settled = false;
+    const hardAbort = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      xhr.abort();
+      reject(new Error("Status check stalled — no response after 15s"));
+    }, 15000);
+    const finish = (fn) => (...args) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardAbort);
+      fn(...args);
+    };
     xhr.open("PUT", uploadUrl);
-    xhr.timeout = 15000;
+    xhr.timeout = 12000;
     xhr.setRequestHeader("Content-Range", `bytes */${file.size}`);
-    xhr.onload = () => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range") });
-    xhr.onerror = () => reject(new Error("Network error checking upload status"));
-    xhr.ontimeout = () => reject(new Error("Status check timed out"));
+    xhr.onload    = finish(() => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range") }));
+    xhr.onerror   = finish(() => reject(new Error("Network error checking upload status")));
+    xhr.ontimeout = finish(() => reject(new Error("Status check timed out")));
+    xhr.onabort   = finish(() => reject(new Error("Status check was aborted")));
     xhr.send(new Blob([]));
   });
 
@@ -7627,7 +7676,7 @@ function MediaLibrary({ userId }) {
 
     try {
       // Step 1: get a resumable upload session URL from our server
-      const sessionRes = await fetch("/api/gcs-signed-url", {
+      const sessionRes = await fetchWithTimeout("/api/gcs-signed-url", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
@@ -7639,7 +7688,7 @@ function MediaLibrary({ userId }) {
           tags:     isVideo ? ["video","upload"] : ["upload"],
           source:   "upload",
         }),
-      });
+      }, 20000);
       const { uploadUrl, objectId, item, error: sessionErr } = await sessionRes.json();
       if (sessionErr || !uploadUrl) throw new Error(sessionErr || "Failed to get upload URL");
 
@@ -7652,11 +7701,11 @@ function MediaLibrary({ userId }) {
       });
 
       // Step 3: finalize (make public + update status)
-      await fetch("/api/gcs-finalize", {
+      await fetchWithTimeout("/api/gcs-finalize", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ userId: resolvedUserId, objectId }),
-      });
+      }, 15000);
 
       // Add to local state
       setItems(prev => [{ ...item, status:"ready" }, ...prev.filter(i => i.id !== objectId)]);
