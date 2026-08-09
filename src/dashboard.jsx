@@ -177,7 +177,7 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(Math.round(((startByte + e.loaded) / file.size) * 100));
     };
-    xhr.onload = () => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range") });
+    xhr.onload = () => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range"), body: xhr.responseText });
     xhr.onerror = () => reject(new Error("Network error during upload"));
     xhr.send(blob);
   });
@@ -192,16 +192,21 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
   });
 
   return new Promise(async (resolve, reject) => {
-    const maxAttempts = 4;
+    // Google's own client libraries retry near-indefinitely on 500/503 (bounded
+    // only by an overall deadline, not a small fixed attempt count) — a short
+    // retry window can give up before a slower-to-clear backend hiccup resolves.
+    const maxAttempts = 6;
     let startByte = 0;
+    let lastBody = "";
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const chunk = startByte > 0 ? file.slice(startByte) : file;
         const result = await putRange(chunk, startByte);
         if (result.status === 200 || result.status === 201) return resolve();
         if (result.status === 500 || result.status === 503) {
-          if (attempt === maxAttempts) return reject(new Error(`Upload failed after ${maxAttempts} attempts: ${result.status}`));
-          await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1))); // 1s, 2s, 4s
+          lastBody = result.body || "";
+          if (attempt === maxAttempts) return reject(new Error(`Upload failed after ${maxAttempts} attempts (${result.status}): ${lastBody.slice(0,300) || "no further detail from GCS"}`));
+          await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, attempt - 1), 16000))); // 1s,2s,4s,8s,16s,16s
           // Ask GCS how many bytes it actually has before resuming — per Google's
           // documented protocol, don't blindly re-send the whole file.
           try {
@@ -214,10 +219,10 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
           } catch { /* status check failed — just retry from the current startByte */ }
           continue;
         }
-        return reject(new Error(`Upload failed: ${result.status}`));
+        return reject(new Error(`Upload failed: ${result.status} — ${(result.body || "").slice(0,300)}`));
       } catch(e) {
         if (attempt === maxAttempts) return reject(e);
-        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+        await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, attempt - 1), 16000)));
       }
     }
   });
