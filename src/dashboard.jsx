@@ -167,9 +167,18 @@ function markdownToPlainWithLinks(md) {
 // with Content-Range: bytes */total) and resume from that offset rather than
 // re-sending the whole file blind.
 function uploadToGCSResumable(uploadUrl, file, onProgress) {
-  const putRange = (blob, startByte) => new Promise((resolve, reject) => {
+  // Sending the whole remaining file in one PUT (the previous approach) is
+  // exactly the pattern that struggles on mobile — one very large request is
+  // much more likely to get interrupted (backgrounding, network handoffs, OS-
+  // level suspension of long transfers) than several small ones. Explicit
+  // fixed-size chunking is what Google's own docs recommend for unreliable
+  // connections. Must be a multiple of 256 KiB for all but the final chunk.
+  const CHUNK_SIZE = 2 * 1024 * 1024; // 2 MiB
+
+  const putChunk = (blob, startByte) => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", uploadUrl);
+    xhr.timeout = 30000; // a 2MB chunk should never legitimately take this long — fail fast and retry instead of hanging
     if (blob.size > 0) xhr.setRequestHeader("Content-Type", file.type);
     if (startByte > 0 || blob.size < file.size) {
       xhr.setRequestHeader("Content-Range", `bytes ${startByte}-${startByte + blob.size - 1}/${file.size}`);
@@ -179,75 +188,75 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
     };
     xhr.onload = () => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range"), body: xhr.responseText });
     xhr.onerror = () => reject(new Error("Network error during upload"));
+    xhr.ontimeout = () => reject(new Error("Chunk upload timed out"));
     xhr.send(blob);
   });
 
   const checkStatus = () => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", uploadUrl);
+    xhr.timeout = 15000;
     xhr.setRequestHeader("Content-Range", `bytes */${file.size}`);
     xhr.onload = () => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range") });
     xhr.onerror = () => reject(new Error("Network error checking upload status"));
+    xhr.ontimeout = () => reject(new Error("Status check timed out"));
     xhr.send(new Blob([]));
   });
 
+  const parseRange = (rangeHeader) => {
+    if (!rangeHeader) return null;
+    const match = rangeHeader.match(/bytes=0-(\d+)/);
+    return match ? parseInt(match[1], 10) + 1 : null;
+  };
+
   return new Promise(async (resolve, reject) => {
     // Google's own client libraries retry near-indefinitely on 500/503 (bounded
-    // only by an overall deadline, not a small fixed attempt count) — a short
-    // retry window can give up before a slower-to-clear backend hiccup resolves.
-    const maxErrorAttempts = 6;
-    // 308 (Resume Incomplete) isn't a failure — it's normal progress on a
-    // connection that can't push the whole file in one shot (common on mobile).
-    // Give it a much larger budget so a flaky connection can still finish a
-    // large upload through many small resume cycles instead of giving up early.
-    const maxResumeAttempts = 40;
+    // only by an overall deadline, not a small fixed attempt count).
+    const maxErrorAttempts = 8;
     let startByte = 0;
     let lastBody = "";
     let errorAttempts = 0;
-    for (let iteration = 1; iteration <= maxResumeAttempts; iteration++) {
+
+    while (startByte < file.size) {
       try {
-        const chunk = startByte > 0 ? file.slice(startByte) : file;
-        const result = await putRange(chunk, startByte);
+        const chunkEnd = Math.min(startByte + CHUNK_SIZE, file.size);
+        const chunk = file.slice(startByte, chunkEnd);
+        const result = await putChunk(chunk, startByte);
+
         if (result.status === 200 || result.status === 201) return resolve();
+
         if (result.status === 308) {
-          // Not an error — GCS received some bytes and is waiting for the rest.
-          // Common on mobile connections where a large single PUT doesn't
-          // complete in one shot. Resume immediately from the confirmed offset,
-          // no backoff needed since nothing actually failed.
-          if (result.range) {
-            const match = result.range.match(/bytes=0-(\d+)/);
-            if (match) {
-              const newStartByte = parseInt(match[1], 10) + 1;
-              if (newStartByte > startByte) startByte = newStartByte; // only advance, never regress
-            }
-          }
-          if (iteration === maxResumeAttempts) return reject(new Error(`Upload didn't finish after many attempts — the connection kept dropping partway through. Try again on a stronger connection.`));
-          continue; // no backoff — this is expected progress, not a failure
+          // Normal — this chunk was accepted, move on to the next one.
+          const newStartByte = parseRange(result.range);
+          startByte = newStartByte != null && newStartByte > startByte ? newStartByte : chunkEnd;
+          errorAttempts = 0; // reset — we're making real progress again
+          continue;
         }
+
         if (result.status === 500 || result.status === 503) {
           errorAttempts++;
           lastBody = result.body || "";
           if (errorAttempts >= maxErrorAttempts) return reject(new Error(`Upload failed after ${maxErrorAttempts} attempts (${result.status}): ${lastBody.slice(0,300) || "no further detail from GCS"}`));
-          await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, errorAttempts - 1), 16000))); // 1s,2s,4s,8s,16s
-          // Ask GCS how many bytes it actually has before resuming — per Google's
-          // documented protocol, don't blindly re-send the whole file.
+          await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, errorAttempts - 1), 16000)));
           try {
             const status = await checkStatus();
-            if (status.status === 200 || status.status === 201) return resolve(); // it actually succeeded despite the error
-            if (status.status === 308 && status.range) {
-              const match = status.range.match(/bytes=0-(\d+)/);
-              if (match) startByte = parseInt(match[1], 10) + 1;
-            }
-          } catch { /* status check failed — just retry from the current startByte */ }
+            if (status.status === 200 || status.status === 201) return resolve();
+            const confirmed = parseRange(status.range);
+            if (confirmed != null) startByte = confirmed;
+          } catch { /* status check failed — retry this same chunk */ }
           continue;
         }
+
         return reject(new Error(`Upload failed: ${result.status} — ${(result.body || "").slice(0,300)}`));
       } catch(e) {
+        // Network error or chunk timeout — retry this same chunk, don't lose
+        // progress on already-confirmed earlier chunks.
         errorAttempts++;
-        if (errorAttempts >= maxErrorAttempts) return reject(e);
+        if (errorAttempts >= maxErrorAttempts) return reject(new Error(`The connection kept dropping partway through (last error: ${e.message}). Try again — progress up to ${Math.round((startByte/file.size)*100)}% was made before it failed.`));
         await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, errorAttempts - 1), 16000)));
       }
     }
+    resolve(); // startByte reached file.size without an explicit 200/201 (shouldn't normally happen, but treat as done)
   });
 }
 
