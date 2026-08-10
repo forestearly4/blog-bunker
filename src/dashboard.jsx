@@ -7735,10 +7735,17 @@ function MediaLibrary({ userId }) {
       }, 15000);
       console.log("[upload] step 3 done — finalized");
 
-      // Add to local state
+      // Add to local state immediately (optimistic — instant feedback)
       setItems(prev => [{ ...item, status:"ready" }, ...prev.filter(i => i.id !== objectId)]);
       setUploadProgress(prev => { const next = {...prev}; delete next[key]; return next; });
-      console.log("[upload] DONE — added to local state, should now be visible without a refresh");
+      console.log("[upload] DONE — added to local state, confirming with a real server refresh…");
+
+      // Also do a real refresh from the server — the optimistic update above was
+      // being silently lost in practice (required a tab switch/refresh to actually
+      // show up), so this guarantees the UI matches reality without relying on
+      // that alone. Small delay to avoid racing ahead of any brief write-
+      // propagation lag right after gcs-finalize.js writes the record.
+      setTimeout(() => fetchItems(), 800);
 
     } catch(e) {
       console.error("[upload] FAILED at some step:", e);
