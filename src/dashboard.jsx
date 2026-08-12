@@ -340,6 +340,70 @@ function limitHashtagsForPlatform(hashtagString, platformId, maxCounts = { twitt
   return tags.slice(0, max).join(" ");
 }
 
+function TierLockedNotice({ feature, requiredTier = "Operative" }) {
+  return (
+    <div style={{ padding:"24px 20px", borderRadius:12, border:"1px solid var(--amber)33", background:"var(--amber)0a", textAlign:"center" }}>
+      <div style={{ fontSize:28, marginBottom:10 }}>🔒</div>
+      <div style={{ fontSize:15, fontWeight:700, marginBottom:6 }}>{feature} is available on {requiredTier} and above</div>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 16px", maxWidth:420, marginLeft:"auto", marginRight:"auto", lineHeight:1.6 }}>
+        Upgrade your plan in Settings → Billing & Plan to unlock this.
+      </p>
+    </div>
+  );
+}
+
+function UsagePanel({ tierConfig, userId }) {
+  const [usage, setUsage] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/usage?userId=${encodeURIComponent(userId)}`);
+        const data = await res.json();
+        if (!cancelled) setUsage(data);
+      } catch { /* fall through to loading:false below */ }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [userId]);
+
+  const wordsUsed = usage?.wordsUsed ?? 0;
+  const wordCap   = tierConfig.wordsPerMonth;
+  const pct       = Math.min(100, Math.round((wordsUsed / wordCap) * 100));
+  const barColor  = pct >= 100 ? "var(--red)" : pct >= 80 ? "var(--amber)" : "#5cba6c";
+
+  return (
+    <div style={{ borderTop:"1px solid var(--border)", paddingTop:20 }}>
+      <h4 style={{ fontFamily:"var(--font-display)", fontSize:14, fontWeight:700, margin:"0 0 12px" }}>This Month's AI Usage</h4>
+      {loading ? (
+        <div style={{ fontSize:12, color:"var(--muted)" }}>Loading…</div>
+      ) : (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          <div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:6 }}>
+              <span style={{ color:"var(--text-secondary)" }}>AI writing (platform-managed Claude credits)</span>
+              <span style={{ fontWeight:700, color: pct >= 100 ? "var(--red)" : "var(--text)" }}>{wordsUsed.toLocaleString()} / {wordCap.toLocaleString()} words</span>
+            </div>
+            <div style={{ height:8, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
+              <div style={{ height:"100%", width:`${pct}%`, background:barColor, borderRadius:99, transition:"width 0.3s" }} />
+            </div>
+            {pct >= 100 && (
+              <div style={{ fontSize:11, color:"var(--red)", marginTop:6 }}>
+                ⚠ Monthly limit reached — add your own API key in Settings → API Keys{tierConfig.byok ? "" : " (upgrade to Operative to unlock this)"}, or wait until next month.
+              </div>
+            )}
+          </div>
+          <div style={{ fontSize:11, color:"var(--muted)", lineHeight:1.6 }}>
+            AI images aren't metered yet — image generation currently requires your own OpenAI or Gemini key regardless of plan (Settings → API Keys{tierConfig.byok ? "" : ", available on Operative and above"}).
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 async function copyPostWithLinks(title, body, headlineImageUrl = null) {
   const plainText = `${title}${headlineImageUrl ? `\n[Headline image: ${headlineImageUrl}]` : ""}\n\n${markdownToPlainWithLinks(body)}`;
   const escTitle = (title||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -404,10 +468,29 @@ const INSPIRATION = [
 ];
 
 const PLANS = [
-  { name:"Scout",     price:"Free",   features:["1 Workspace","50 Posts","Basic Analytics","Community Support"] },
-  { name:"Operative", price:"$19/mo", features:["3 Workspaces","Unlimited Posts","AI Writing Tools","Advanced Analytics","Email Support"] },
-  { name:"Command",   price:"$49/mo", features:["Unlimited Workspaces","Team Collaboration","Priority Support","Custom Integrations"] },
+  { name:"Scout",     price:"$19/mo", features:["1 Workspace","15,000 AI words/mo","20 AI images/mo","Meta (Facebook & Instagram) posting only","Community Support"] },
+  { name:"Operative", price:"$45/mo", features:["3 Workspaces included (+$5/mo each additional)","60,000 AI words/mo","100 AI images/mo","Buffer integration (TikTok, X, Pinterest, Reddit)","Bring your own AI key (BYOK)","Email Support"] },
 ];
+// "Command" is a status, not a purchasable tier — auto-unlocks at 10 workspaces
+// on one account (shared API keys across workspaces, priority support).
+
+// Feature gating by tier. Scout is deliberately limited to platform-managed
+// Claude text credits and Meta-only posting; Operative unlocks BYOK (own
+// OpenAI/Gemini/Anthropic keys), Buffer (TikTok/X/Pinterest/Reddit), and a
+// bigger text credit pool. Since OpenAI/Gemini already require the user's own
+// key with no platform-managed fallback, Scout has no AI image generation
+// until either they upgrade (BYOK) or a platform-managed image path is built.
+const TIER_CONFIG = {
+  scout:     { label:"Scout",     wordsPerMonth:15000, imagesPerMonth:20,  byok:false, buffer:false, socialPlatforms:["facebook","instagram"] },
+  operative: { label:"Operative", wordsPerMonth:60000, imagesPerMonth:100, byok:true,  buffer:true,  socialPlatforms:["facebook","instagram","tiktok","twitter","pinterest","reddit"] },
+};
+const TIER_STORAGE = "bb_user_tier";
+function loadUserTier() { try { return localStorage.getItem(TIER_STORAGE) || "scout"; } catch { return "scout"; } }
+function saveUserTier(tier) {
+  try { localStorage.setItem(TIER_STORAGE, tier); } catch {}
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("user_tier", uid, tier);
+}
 
 // ─── AI PROVIDER CONFIG ───────────────────────────────────────────────────────
 
@@ -511,10 +594,13 @@ async function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 15
       : { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
     const res = await fetch(endpoint, {
       method: "POST", headers,
-      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role:"user", content: userMsg }] }),
+      body: JSON.stringify({
+        model, max_tokens: maxTokens, system, messages: [{ role:"user", content: userMsg }],
+        ...(useProxy ? { userId: window.__bbUserId || null } : {}),
+      }),
     });
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message || "Anthropic error");
+    if (data.error) throw new Error(data.error.message || data.error || "Anthropic error");
     return data.content?.[0]?.text || "";
   }
 
@@ -1799,7 +1885,7 @@ function SEOOptimizer({ activeProvider, activeModel, apiKeys }) {
 
 // ─── SETTINGS: API KEYS TAB ───────────────────────────────────────────────────
 
-function APIKeysSettings({ apiKeys, onSave }) {
+function APIKeysSettings({ apiKeys, onSave, byokEnabled = true }) {
   const [draft,    setDraft]    = useState({ ...apiKeys });
   const [models,   setModels]   = useState(loadModels);
   const [saved,    setSaved]    = useState(false);
@@ -1869,26 +1955,33 @@ function APIKeysSettings({ apiKeys, onSave }) {
 
             {provider.id === "anthropic" ? (
               <div style={{padding:"10px 14px",borderRadius:8,background:"var(--bg-elevated)",border:"1px solid var(--border)",fontSize:12,color:"var(--text-secondary)",lineHeight:1.6}}>
-                Claude runs through your Netlify environment variable <code style={{color:"var(--amber)",background:"var(--bg)",padding:"1px 5px",borderRadius:4}}>ANTHROPIC_API_KEY</code> — no browser key needed. You can optionally add a key below to override it.
+                Claude runs through your Netlify environment variable <code style={{color:"var(--amber)",background:"var(--bg)",padding:"1px 5px",borderRadius:4}}>ANTHROPIC_API_KEY</code> — no browser key needed.{byokEnabled ? " You can optionally add a key below to override it." : ""}
               </div>
             ) : null}
 
-            <div style={{marginTop:provider.id==="anthropic"?12:0}}>
-              <label style={{display:"block",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:6}}>
-                {provider.id === "anthropic" ? "Override API Key (optional)" : "API Key"}
-              </label>
-              <input
-                type="password"
-                placeholder={provider.keyPlaceholder}
-                value={draft[provider.id] || ""}
-                onChange={e => setDraft(d => ({ ...d, [provider.id]: e.target.value }))}
-                style={iS}
-                onFocus={e => e.target.style.borderColor = provider.color}
-                onBlur={e => e.target.style.borderColor = "var(--border)"}
-              />
-            </div>
+            {(byokEnabled || provider.id === "anthropic") ? (
+              <div style={{marginTop:provider.id==="anthropic"?12:0}}>
+                <label style={{display:"block",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:6}}>
+                  {provider.id === "anthropic" ? "Override API Key (optional)" : "API Key"}
+                </label>
+                <input
+                  type="password"
+                  placeholder={provider.keyPlaceholder}
+                  value={draft[provider.id] || ""}
+                  onChange={e => setDraft(d => ({ ...d, [provider.id]: e.target.value }))}
+                  style={iS}
+                  onFocus={e => e.target.style.borderColor = provider.color}
+                  onBlur={e => e.target.style.borderColor = "var(--border)"}
+                  disabled={provider.id === "anthropic" && !byokEnabled}
+                />
+              </div>
+            ) : (
+              <div style={{marginTop:0,padding:"10px 14px",borderRadius:8,background:"var(--amber)0a",border:"1px solid var(--amber)33",fontSize:12,color:"var(--text-secondary)",lineHeight:1.6}}>
+                🔒 Bringing your own {provider.name} key is available on <strong style={{color:"var(--amber)"}}>Operative</strong> and above — upgrade in Settings → Billing & Plan. {provider.name} has no platform-managed option, so this is required to use it at all.
+              </div>
+            )}
 
-            {provider.id !== "anthropic" && (
+            {provider.id !== "anthropic" && byokEnabled && (
               <div style={{marginTop:10,fontSize:11,color:"var(--text-secondary)",lineHeight:1.5,padding:"8px 12px",borderRadius:6,background:"var(--bg-elevated)",border:"1px solid var(--border)"}}>
                 💡 You'll need your own {provider.name} API key from {provider.company}, which is billed separately as pay-as-you-go usage — not included with Blog Bunker. It's usually significantly cheaper than a monthly subscription to {provider.name} directly, since you only pay for what you actually use.
               </div>
@@ -3105,10 +3198,11 @@ Titles and descriptions MUST be under their character limits. Score each on: key
           system: `You find real, currently-live, authoritative external sources worth linking to from a blog post — official sites, studies, well-known publications. Use web search to verify each URL is real before suggesting it; never invent a URL. After searching, respond with ONLY valid JSON (no fences, no other text): {"links":[{"anchorText":"exact short phrase copied VERBATIM from the post text (3-8 words)","url":"https://real-verified-url","reason":"one short sentence on why this source is worth citing here"}]}. Suggest at most 4. Only include a link if you actually found and verified a real URL via search.`,
           messages: [{ role: "user", content: `POST TEXT:\n${draft.body.slice(0, LINK_MAX_BODY_CHARS)}` }],
           tools: [{ type: "web_search_20250305", name: "web_search" }],
+          ...(useProxy ? { userId: window.__bbUserId || null } : {}),
         }),
       });
       const data = await res.json();
-      if (data.error) throw new Error(data.error.message || "Anthropic error");
+      if (data.error) throw new Error(data.error.message || data.error || "Anthropic error");
       const textBlocks = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
       const parsed = parseAIJson(textBlocks);
       const bodyLower = draft.body.toLowerCase();
@@ -4600,7 +4694,7 @@ class MarketingErrorBoundary extends React.Component {
   }
 }
 
-function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null }) {
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null, tierConfig = TIER_CONFIG.operative }) {
   const [tab, setTab] = useState("pipeline");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const scheduledCount = socialPosts.filter(p => p.status === "scheduled").length;
@@ -4676,6 +4770,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           metaConfig={metaConfig}
           onSave={onSaveSocialPost}
           onDelete={onDeleteSocialPost}
+          tierConfig={tierConfig}
         />
       )}
 
@@ -4692,6 +4787,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           onSaveSocialPost={onSaveSocialPost}
           initialIdea={pipelineInitialIdea}
           onConsumedInitialIdea={() => setPipelineInitialIdea(null)}
+          tierConfig={tierConfig}
         />
       )}
 
@@ -5547,7 +5643,7 @@ function SocialPipelineProgress({ stage, setStage, completed }) {
   );
 }
 
-function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null }) {
+function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null, tierConfig = TIER_CONFIG.operative }) {
   let saved = loadSocialPipelineDraft();
 
   // Migrate old single-platform draft schema (idea.platform: string) to new multi-platform (idea.platforms: array)
@@ -5847,6 +5943,9 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
           results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
 
         } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
+          if (!tierConfig.buffer) {
+            throw new Error(`Buffer integration is available on Operative and above — upgrade in Settings → Billing & Plan to post to ${plat.label}.`);
+          }
           // Buffer platforms — image must be a public https:// URL
           let publicImageUrl = imageData.url;
 
@@ -5955,17 +6054,29 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
                 {PLATFORMS.map(p => {
                   const isSelected = idea.platforms.includes(p.id);
+                  const isLocked   = !tierConfig.socialPlatforms.includes(p.id);
                   return (
-                    <button key={p.id} onClick={() => togglePlatform(p.id)}
-                      style={{ padding:"7px 16px", borderRadius:99, border:isSelected?`1px solid ${p.color}`:"1px solid var(--border)", background:isSelected?p.color+"18":"transparent", color:isSelected?p.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-                      <span style={{ width:14, height:14, borderRadius:4, border:`2px solid ${isSelected?p.color:"var(--border)"}`, background:isSelected?p.color:"transparent", display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:9, color:"#fff" }}>
-                        {isSelected ? "✓" : ""}
-                      </span>
+                    <button key={p.id} onClick={() => !isLocked && togglePlatform(p.id)}
+                      disabled={isLocked}
+                      title={isLocked ? "Available on Operative and above (via Buffer)" : undefined}
+                      style={{ padding:"7px 16px", borderRadius:99, border:isSelected?`1px solid ${p.color}`:"1px solid var(--border)", background:isSelected?p.color+"18":"transparent", color:isLocked?"var(--muted)":(isSelected?p.color:"var(--text-secondary)"), fontSize:12, fontWeight:600, cursor:isLocked?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, opacity:isLocked?0.5:1 }}>
+                      {isLocked ? (
+                        <span style={{ fontSize:11 }}>🔒</span>
+                      ) : (
+                        <span style={{ width:14, height:14, borderRadius:4, border:`2px solid ${isSelected?p.color:"var(--border)"}`, background:isSelected?p.color:"transparent", display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:9, color:"#fff" }}>
+                          {isSelected ? "✓" : ""}
+                        </span>
+                      )}
                       <span>{p.icon}</span>{p.label}
                     </button>
                   );
                 })}
               </div>
+              {!tierConfig.buffer && (
+                <div style={{ fontSize:11, color:"var(--muted)", marginTop:8 }}>
+                  🔒 TikTok, X, Pinterest, and Reddit need Buffer, available on Operative and above.
+                </div>
+              )}
               {idea.platforms.length > 1 && (
                 <div style={{ fontSize:11, color:"var(--amber)", marginTop:8 }}>
                   ✦ {idea.platforms.length} platforms selected — you'll get a tailored caption for each, one shared image, and a one-click multi-publish at the end.
@@ -7174,7 +7285,7 @@ My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
 
 // ─── SOCIAL POSTS MANAGER ─────────────────────────────────────────────────────
 
-function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) {
+function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, tierConfig = TIER_CONFIG.operative }) {
   const [filter,   setFilter]   = useState("all");
   const [expanded, setExpanded] = useState(null);
   const [posting,  setPosting]  = useState({});
@@ -7217,6 +7328,9 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
           const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: publicImageUrl, platforms: ["instagram"] });
           results[plat.id] = res.instagram?.success ? "✓ Posted" : `Error: ${res.instagram?.error}`;
         } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
+          if (!tierConfig.buffer) {
+            throw new Error(`Buffer integration is available on Operative and above — upgrade in Settings → Billing & Plan to post to ${plat.label}.`);
+          }
           const channelId = bufferCfg.mapping[plat.id];
           if (plat.id === "pinterest" && !bufferCfg.boardMapping?.[channelId]) {
             throw new Error("No Pinterest board selected — set one in Settings → Buffer before posting to Pinterest.");
@@ -11402,7 +11516,10 @@ export default function Dashboard({ user, workspace }) {
   const wsTagline = wsSettings?.tagline   || "Cast at Dawn. Sip at Dusk.";
   const connected = workspace?.connected  || false;
   const plan      = "operative";
-  const planLabel = "Operative";
+  const [userTier, setUserTier] = useState(loadUserTier);
+  const tierConfig = TIER_CONFIG[userTier] || TIER_CONFIG.scout;
+  const planLabel = TIER_CONFIG[userTier]?.label || "Scout";
+  const changeTier = (tier) => { setUserTier(tier); saveUserTier(tier); };
   const isScout   = false;
   const fixedGreen= "#5cba6c";
 
@@ -11807,6 +11924,7 @@ export default function Dashboard({ user, workspace }) {
                 onDeleteSocialCompetitor={deleteSocialCompetitor}
                 externalInitialIdea={socialPipelineHandoff}
                 onConsumedExternalInitialIdea={() => setSocialPipelineHandoff(null)}
+                tierConfig={tierConfig}
               />
             </MarketingErrorBoundary>
           )}
@@ -11841,7 +11959,7 @@ export default function Dashboard({ user, workspace }) {
                 )}
 
                 {settingsSection==="apikeys"&&(
-                  <APIKeysSettings apiKeys={apiKeys} onSave={setApiKeys}/>
+                  <APIKeysSettings apiKeys={apiKeys} onSave={setApiKeys} byokEnabled={tierConfig.byok}/>
                 )}
 
                 {settingsSection==="brand"&&(
@@ -11863,13 +11981,13 @@ export default function Dashboard({ user, workspace }) {
                 )}
 
                 {settingsSection==="buffer"&&(
-                  <BufferSettings />
+                  tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="Buffer integration" />
                 )}
 
-                {settingsSection==="tiktok"&&( <BufferSettings /> )}
-                {settingsSection==="pinterest"&&( <BufferSettings /> )}
-                {settingsSection==="twitter"&&( <BufferSettings /> )}
-                {settingsSection==="reddit"&&( <BufferSettings /> )}
+                {settingsSection==="tiktok"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="TikTok posting (via Buffer)" /> )}
+                {settingsSection==="pinterest"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="Pinterest posting (via Buffer)" /> )}
+                {settingsSection==="twitter"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="X posting (via Buffer)" /> )}
+                {settingsSection==="reddit"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="Reddit posting (via Buffer)" /> )}
 
                 {settingsSection==="social"&&(
                   <SocialSettings/>
@@ -11890,17 +12008,21 @@ export default function Dashboard({ user, workspace }) {
                 {settingsSection==="billing"&&(
                   <div>
                     <h3 style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700,margin:"0 0 8px"}}>Billing & Plan</h3>
-                    <p style={{fontSize:13,color:"var(--text-secondary)",margin:"0 0 20px"}}>Current plan: <span style={{color:"var(--amber)",fontWeight:700}}>Operative</span></p>
-                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
+                    <p style={{fontSize:13,color:"var(--text-secondary)",margin:"0 0 12px"}}>Current plan: <span style={{color:"var(--amber)",fontWeight:700}}>{planLabel}</span></p>
+                    <div style={{fontSize:11,color:"var(--muted)",padding:"8px 12px",borderRadius:6,background:"var(--bg-elevated)",border:"1px solid var(--border)",marginBottom:16}}>
+                      No payment processor is wired up yet — this switches your plan directly for testing. Once billing is built, this will be driven by your actual subscription instead.
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12,marginBottom:24}}>
                       {PLANS.map(p=>(
                         <div key={p.name} style={{padding:20,borderRadius:10,border:planLabel===p.name?"2px solid var(--amber)":"1px solid var(--border)",background:planLabel===p.name?"var(--amber-glow)":"var(--bg-elevated)",textAlign:"center"}}>
                           <div style={{fontFamily:"var(--font-display)",fontSize:16,fontWeight:700,marginBottom:4}}>{p.name}</div>
                           <div style={{fontSize:22,fontWeight:700,color:"var(--amber)",fontFamily:"var(--font-display)",marginBottom:12}}>{p.price}</div>
                           {p.features.map((f,i)=><div key={i} style={{fontSize:12,color:"var(--text-secondary)",padding:"3px 0"}}>{f}</div>)}
-                          <button style={{...(planLabel===p.name?btnP:btnS),marginTop:14,width:"100%"}}>{planLabel===p.name?"Current Plan":"Upgrade"}</button>
+                          <button onClick={()=>changeTier(p.name.toLowerCase())} style={{...(planLabel===p.name?btnP:btnS),marginTop:14,width:"100%"}}>{planLabel===p.name?"Current Plan":`Switch to ${p.name}`}</button>
                         </div>
                       ))}
                     </div>
+                    <UsagePanel tierConfig={tierConfig} userId={userId} />
                   </div>
                 )}
 
