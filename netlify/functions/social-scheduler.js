@@ -155,6 +155,14 @@ export default async () => {
               console.log(`[scheduler] ✓ Instagram: ${id}`);
 
             } else if (["twitter","tiktok","pinterest","reddit","threads","bluesky","youtube","linkedin"].includes(platId)) {
+              // Buffer platforms — available on Operative and above only
+              let userTier = "scout";
+              try { userTier = (await store.get(`${userId}:user_tier`, { type:"json" })) || "scout"; } catch {}
+              if (userTier !== "operative") {
+                results[platId] = { success:false, error:"Buffer integration is available on Operative and above — upgrade in Settings → Billing & Plan" };
+                continue;
+              }
+
               // Buffer platforms — load Buffer config from Blobs
               let bufferConfig = null;
               try { bufferConfig = await store.get(`${userId}:buffer_config`, { type:"json" }); } catch {}
