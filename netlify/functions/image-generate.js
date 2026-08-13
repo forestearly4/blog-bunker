@@ -140,6 +140,82 @@ export default async (req) => {
       return new Response(JSON.stringify({ b64, mimeType: "image/png" }), { status: 200, headers: CORS });
     }
 
+    // ── STABILITY AI — shared image-to-image call (restyle) ─────────────────────
+    // Confirmed via multiple independent sources: image-to-image needs the sd3
+    // endpoint specifically (NOT core/ultra, which are text-to-image only),
+    // with mode=image-to-image, an actual image file field, and strength (0-1,
+    // 0=identical to input, 1=completely new). Binary response, same pattern as
+    // the text-to-image cases above — avoids any JSON field-name ambiguity.
+    async function stabilityImageToImage(key, promptText, imageBase64, strength) {
+      const byteChars = atob(imageBase64);
+      const byteArr   = new Uint8Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+      const imageBlob = new Blob([byteArr], { type: "image/png" });
+
+      const formData = new FormData();
+      formData.append("prompt", promptText);
+      formData.append("mode", "image-to-image");
+      formData.append("image", imageBlob, "image.png");
+      formData.append("strength", String(strength ?? 0.65));
+      formData.append("output_format", "png");
+
+      const res = await fetch("https://api.stability.ai/v2beta/stable-image/generate/sd3", {
+        method:  "POST",
+        headers: { "Authorization": `Bearer ${key}`, "Accept": "image/*" },
+        body:    formData,
+      });
+      if (!res.ok) {
+        let errText;
+        try { errText = (await res.json()).errors?.[0]; } catch { errText = await res.text(); }
+        throw new Error(errText || `Stability error ${res.status}`);
+      }
+      const arrayBuffer = await res.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const b64 = btoa(binary);
+      if (!b64) throw new Error("No image returned from Stability AI");
+      return b64;
+    }
+
+    // ── STABILITY AI — PLATFORM-MANAGED restyle (image-to-image) ────────────────
+    if (provider === "stability-restyle-platform") {
+      const platformKey = process.env.STABILITY_API_KEY;
+      if (!platformKey) throw new Error("Platform image generation isn't configured yet (STABILITY_API_KEY not set) — use your own API key in Settings → API Keys instead.");
+      const { imageBase64, strength } = body;
+      if (!imageBase64) throw new Error("imageBase64 required for restyle");
+
+      const store  = getStore("blog-bunker-data");
+      const period = new Date().toISOString().slice(0, 7);
+      if (userId) {
+        const tier  = (await store.get(`${userId}:user_tier`, { type: "json" })) || "scout";
+        const cap   = IMAGE_CAPS[tier] || IMAGE_CAPS.scout;
+        const usage = await store.get(`${userId}:usage_images_${period}`, { type: "json" }) || { images: 0 };
+        if ((usage.images || 0) >= cap) {
+          return new Response(JSON.stringify({
+            error: `Monthly AI image limit reached (${cap} images on your current plan). Upgrade your plan, add your own Stability key in Settings → API Keys, or wait until next month.`,
+          }), { status: 429, headers: CORS });
+        }
+      }
+
+      const b64 = await stabilityImageToImage(platformKey, prompt, imageBase64, strength);
+
+      if (userId) {
+        const usage = await store.get(`${userId}:usage_images_${period}`, { type: "json" }) || { images: 0 };
+        await store.setJSON(`${userId}:usage_images_${period}`, { images: (usage.images || 0) + 1 });
+      }
+
+      return new Response(JSON.stringify({ b64, mimeType: "image/png" }), { status: 200, headers: CORS });
+    }
+
+    // ── STABILITY AI — BYOK restyle (image-to-image) ─────────────────────────────
+    if (provider === "stability-restyle") {
+      const { imageBase64, strength } = body;
+      if (!imageBase64) throw new Error("imageBase64 required for restyle");
+      const b64 = await stabilityImageToImage(apiKey, prompt, imageBase64, strength);
+      return new Response(JSON.stringify({ b64, mimeType: "image/png" }), { status: 200, headers: CORS });
+    }
+
     // ── STABILITY AI — BYOK text-to-image (user's own key) ──────────────────────
     if (provider === "stability-text") {
       const formData = new FormData();
