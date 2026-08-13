@@ -7722,6 +7722,7 @@ function MediaLibrary({ userId }) {
   const [restyleResult,  setRestyleResult]  = useState(null);
   const [restyleError,   setRestyleError]   = useState("");
   const [restyleOpen,    setRestyleOpen]    = useState(false);
+  const [overlayOpen,    setOverlayOpen]    = useState(false);
   const [restyleStrength,setRestyleStrength]= useState(0.65); // 0=keep original, 1=full restyle
   const fileInput = useRef(null);
 
@@ -8165,8 +8166,26 @@ function MediaLibrary({ userId }) {
                       style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${restyleOpen?"var(--amber)":"var(--border)"}`, background:restyleOpen?"var(--amber-glow)":"transparent", color:restyleOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:restyleOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
                       ✦ AI Restyle
                     </button>
+                    <button onClick={() => setOverlayOpen(o=>!o)}
+                      style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${overlayOpen?"var(--amber)":"var(--border)"}`, background:overlayOpen?"var(--amber-glow)":"transparent", color:overlayOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:overlayOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                      🎨 Filters &amp; Text
+                    </button>
                   </div>
                 </div>
+
+                {/* Filters & Text Overlay Panel */}
+                {overlayOpen && selected && (
+                  <ImageTextOverlayEditor
+                    imageUrl={selected.url || selected.dataUrl}
+                    imageName={selected.name}
+                    userId={resolvedUserId}
+                    onSave={(newItem) => {
+                      setItems(prev => [newItem, ...prev]);
+                      setOverlayOpen(false);
+                      setSelected(newItem);
+                    }}
+                  />
+                )}
 
                 {/* AI Restyle Panel */}
                 {restyleOpen && (
@@ -10148,6 +10167,23 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
   const [sel,      setSel]      = useState(0);
   const [saving,   setSaving]   = useState(false);
   const [loadErr,  setLoadErr]  = useState("");
+  const [filterId, setFilterId] = useState("none");
+
+  // Deterministic, instant, free — no AI round-trip or quality variance. Applied
+  // via the canvas 2D context's native CSS filter support before drawing the
+  // base image, then reset before drawing text layers so text stays crisp.
+  const FILTER_PRESETS = [
+    { id:"none",     label:"None",       css:"none" },
+    { id:"warm",      label:"Warm",       css:"sepia(20%) saturate(140%) hue-rotate(-10deg) brightness(105%)" },
+    { id:"cool",      label:"Cool",       css:"saturate(120%) hue-rotate(15deg) brightness(102%) contrast(105%)" },
+    { id:"bw",        label:"B&W",        css:"grayscale(100%) contrast(112%)" },
+    { id:"vintage",   label:"Vintage",    css:"sepia(35%) contrast(90%) brightness(95%) saturate(85%)" },
+    { id:"vivid",     label:"Vivid",      css:"saturate(150%) contrast(115%) brightness(105%)" },
+    { id:"faded",     label:"Faded",      css:"saturate(70%) brightness(112%) contrast(88%)" },
+    { id:"dramatic",  label:"Dramatic",   css:"contrast(132%) brightness(90%) saturate(110%)" },
+    { id:"golden",    label:"Golden Hour",css:"sepia(25%) saturate(140%) brightness(108%) hue-rotate(-8deg)" },
+  ];
+  const activeFilterCss = FILTER_PRESETS.find(f => f.id === filterId)?.css || "none";
 
   const FONTS = [
     { label:"Georgia (Serif)",  value:"Georgia, serif"           },
@@ -10197,7 +10233,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
     })();
   }, [imageUrl]);
 
-  // Draw whenever dataUrl, layers, or canvas element changes
+  // Draw whenever dataUrl, layers, filter, or canvas element changes
   useEffect(() => {
     if (!dataUrl || !canvasEl) return;
     const img = new Image();
@@ -10205,7 +10241,9 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
       const ctx = canvasEl.getContext("2d");
       canvasEl.width  = img.width;
       canvasEl.height = img.height;
+      ctx.filter = activeFilterCss;
       ctx.drawImage(img, 0, 0);
+      ctx.filter = "none"; // never let the image filter bleed into the text layers
 
       for (const l of layers) {
         if (!l.text.trim()) continue;
@@ -10233,7 +10271,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
       }
     };
     img.src = dataUrl;
-  }, [dataUrl, layers, canvasEl]);
+  }, [dataUrl, layers, canvasEl, activeFilterCss]);
 
   const layer = layers[sel] || layers[0];
   const upd   = (patch) => setLayers(p => p.map((l,i) => i===sel ? {...l,...patch} : l));
@@ -10258,7 +10296,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
   return (
     <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✎ Text Overlay Editor</span>
+        <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>🎨 Filters &amp; Text Overlay</span>
         <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Click image to reposition selected text</span>
       </div>
 
@@ -10284,6 +10322,19 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
 
           {/* Controls */}
           <div style={{ display:"flex", flexDirection:"column", gap:10, maxHeight:520, overflow:"auto" }}>
+            {/* Filters */}
+            <div>
+              <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Filter</div>
+              <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+                {FILTER_PRESETS.map(f => (
+                  <button key={f.id} onClick={() => setFilterId(f.id)}
+                    style={{ padding:"5px 10px", borderRadius:99, border:filterId===f.id?"1px solid var(--amber)":"1px solid var(--border)", background:filterId===f.id?"var(--amber-glow)":"transparent", color:filterId===f.id?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:filterId===f.id?600:400, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Layers */}
             <div>
               <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Layers</div>
