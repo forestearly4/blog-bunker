@@ -333,6 +333,42 @@ function uploadToGCSResumable(uploadUrl, file, onProgress) {
 // selected platform, but some platforms want far fewer than others (X performs
 // best with ~1-2 hashtags, unlike Instagram's 20-30). Trims down per-platform
 // without touching the underlying hashtags.selected the user actually picked.
+const DAY_INDEX = { sun:0, mon:1, tue:2, wed:3, thu:4, fri:5, sat:6 };
+
+// Parses a bestTimes string like "Tue–Fri 11am–1pm" or "Mon–Fri 7–9pm" into the
+// next real upcoming occurrence, returned as a datetime-local input value
+// ("YYYY-MM-DDTHH:MM"). Uses the first day and the start of the time range.
+function nextBestTimeSlot(bestTimeStr) {
+  try {
+    const [dayPart, ...rest] = bestTimeStr.trim().split(" ");
+    const timePart = rest.join(" ");
+    const firstDayAbbr = dayPart.split(/[–-]/)[0].toLowerCase().slice(0, 3);
+    const dayIndex = DAY_INDEX[firstDayAbbr];
+    if (dayIndex === undefined) return null;
+
+    const [startToken, endToken = ""] = timePart.split(/[–-]/).map(s => s.trim());
+    let start = startToken;
+    if (!/am|pm/i.test(start) && /am|pm/i.test(endToken)) start += endToken.match(/am|pm/i)[0];
+    const m = start.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+    if (!m) return null;
+    let hour = parseInt(m[1], 10);
+    const minute = m[2] ? parseInt(m[2], 10) : 0;
+    const isPM = /pm/i.test(m[3]);
+    if (isPM && hour !== 12) hour += 12;
+    if (!isPM && hour === 12) hour = 0;
+
+    const now = new Date();
+    const result = new Date(now);
+    const daysAhead = (dayIndex - now.getDay() + 7) % 7;
+    result.setDate(now.getDate() + daysAhead);
+    result.setHours(hour, minute, 0, 0);
+    if (result <= now) result.setDate(result.getDate() + 7); // slot already passed this week
+
+    const pad = n => String(n).padStart(2, "0");
+    return `${result.getFullYear()}-${pad(result.getMonth()+1)}-${pad(result.getDate())}T${pad(result.getHours())}:${pad(result.getMinutes())}`;
+  } catch { return null; }
+}
+
 function limitHashtagsForPlatform(hashtagString, platformId, maxCounts = { twitter: 2 }) {
   const max = maxCounts[platformId];
   if (max == null || !hashtagString) return hashtagString;
@@ -4722,7 +4758,7 @@ class MarketingErrorBoundary extends React.Component {
   }
 }
 
-function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null, tierConfig = TIER_CONFIG.operative }) {
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null }) {
   const [tab, setTab] = useState("pipeline");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const scheduledCount = socialPosts.filter(p => p.status === "scheduled").length;
@@ -4816,6 +4852,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           initialIdea={pipelineInitialIdea}
           onConsumedInitialIdea={() => setPipelineInitialIdea(null)}
           tierConfig={tierConfig}
+          onAddCalEvent={onAddCalEvent}
         />
       )}
 
@@ -5671,7 +5708,7 @@ function SocialPipelineProgress({ stage, setStage, completed }) {
   );
 }
 
-function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null, tierConfig = TIER_CONFIG.operative }) {
+function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null }) {
   let saved = loadSocialPipelineDraft();
 
   // Migrate old single-platform draft schema (idea.platform: string) to new multi-platform (idea.platforms: array)
@@ -5940,6 +5977,17 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     const post = buildSocialPostRecord("scheduled", scheduleDate);
     post.imageUrl = finalImageUrl; // use public URL
     if (onSaveSocialPost) onSaveSocialPost(post);
+    if (onAddCalEvent && scheduleDate) {
+      const d = new Date(scheduleDate);
+      const platformIcons = selectedPlatforms.map(p => p.icon).join("");
+      onAddCalEvent({
+        title: `${platformIcons} ${(captions[selectedPlatforms[0]?.id]?.text || idea.topic || "Social post").slice(0, 60)}`,
+        type: "scheduled",
+        day: d.getDate(),
+        month: d.getMonth(),
+        year: d.getFullYear(),
+      });
+    }
     setSuccess(`✓ Scheduled for ${new Date(scheduleDate).toLocaleString([], {dateStyle:"medium",timeStyle:"short"})}`);
     markDone("publish");
     clearSocialPipelineDraft();
@@ -6536,13 +6584,20 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
                 {/* Best post times */}
                 <div style={{ background:"var(--bg-elevated)", border:"1px solid #5cba6c33", borderRadius:10, padding:14 }}>
-                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>⏰ Best Times to Post</div>
+                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>⏰ Best Times to Post — click to schedule</div>
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:8 }}>
                     {selectedPlatforms.map(p => (
                       <div key={p.id} style={{ padding:"8px 10px", borderRadius:7, background:"var(--bg-surface)", border:"1px solid var(--border)" }}>
                         <div style={{ fontSize:11, fontWeight:700, color:p.color, marginBottom:3 }}>{p.icon} {p.label}</div>
                         {(p.bestTimes||[]).map((t,i) => (
-                          <div key={i} style={{ fontSize:11, color:"var(--text-secondary)" }}>· {t}</div>
+                          <button key={i} onClick={() => {
+                            const slot = nextBestTimeSlot(t);
+                            if (slot) { setScheduleDate(slot); setScheduleMode("schedule"); }
+                          }} title="Use this time"
+                            style={{ display:"block", width:"100%", textAlign:"left", fontSize:11, color:"var(--text-secondary)", background:"transparent", border:"none", padding:"2px 0", cursor:"pointer", fontFamily:"var(--font-body)" }}
+                            onMouseEnter={e=>e.currentTarget.style.color="#5cba6c"} onMouseLeave={e=>e.currentTarget.style.color="var(--text-secondary)"}>
+                            · {t}
+                          </button>
                         ))}
                       </div>
                     ))}
@@ -7721,26 +7776,46 @@ function MediaLibrary({ userId }) {
 
       if (!base64Image) throw new Error("Could not load image data");
 
-      // Normalize to a guaranteed-valid RGBA PNG — fixes OpenAI's "Invalid image
-      // file or mode" error when the source is actually JPEG/WEBP/indexed-color
-      // and was being sent mislabeled as PNG.
+      // Normalize to a guaranteed-valid RGBA PNG — fixes providers rejecting
+      // "Invalid image file or mode" when the source isn't a true RGBA PNG,
+      // and caps size to stay well under upload limits.
       base64Image = await normalizeToPngBase64(base64Image);
 
       const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
-      const provider = apiKeys.openai ? "openai" : apiKeys.gemini ? "gemini" : null;
-      if (!provider) throw new Error("Add an OpenAI or Gemini API key in Settings → API Keys to use AI Restyle.");
+      const hasOwnKey = !!apiKeys.stability;
 
-      setRestyleStatus("Starting the edit…");
-      const { b64, mimeType } = await runBackgroundImageEdit({
-        provider:    provider === "openai" ? "openai-edit" : "gemini-edit",
-        prompt:      provider === "openai"
-          ? `${restylePrompt}. Keep the same scene, subjects, and composition. Only change the visual style, lighting, color grading, and atmosphere.`
-          : `Transform this image in the following style while keeping the same composition and subjects: ${restylePrompt}`,
-        apiKey:      apiKeys[provider],
-        imageBase64: base64Image,
-        onWaiting:   () => setRestyleStatus("Still working — this can take a minute…"),
-      });
-      setRestyleResult(`data:${mimeType || "image/png"};base64,${b64}`);
+      setRestyleStatus("Restyling…");
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 45000); // Stability is fast — this is a generous safety margin, not an expected wait
+      let res;
+      try {
+        res = await fetch("/api/image-generate", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({
+            provider:    hasOwnKey ? "stability-restyle" : "stability-restyle-platform",
+            prompt:      `${restylePrompt}. Keep the same scene, subjects, and composition. Only change the visual style, lighting, color grading, and atmosphere.`,
+            apiKey:      hasOwnKey ? apiKeys.stability : undefined,
+            imageBase64: base64Image,
+            strength:    restyleStrength,
+            userId:      window.__bbUserId || null,
+          }),
+          signal: controller.signal,
+        });
+      } catch(fetchErr) {
+        if (fetchErr.name === "AbortError") throw new Error("Restyle took too long and timed out — try again.");
+        throw fetchErr;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      const text = await res.text();
+      if (!text.trim()) throw new Error("The server didn't respond — try again.");
+      let data;
+      try { data = JSON.parse(text); }
+      catch { throw new Error("The server response was cut off — try again."); }
+      if (data.error) throw new Error(data.error);
+      if (!data.b64) throw new Error("No image data returned");
+      setRestyleResult(`data:${data.mimeType || "image/png"};base64,${data.b64}`);
     } catch(e) {
       setRestyleError(e.message);
     }
@@ -8086,10 +8161,113 @@ function MediaLibrary({ userId }) {
                     <button onClick={() => download(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                       ↓ Download
                     </button>
+                    <button onClick={() => { setRestyleOpen(o=>!o); setRestyleResult(null); setRestyleError(""); }}
+                      style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${restyleOpen?"var(--amber)":"var(--border)"}`, background:restyleOpen?"var(--amber-glow)":"transparent", color:restyleOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:restyleOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
+                      ✦ AI Restyle
+                    </button>
                   </div>
                 </div>
-              </div>
 
+                {/* AI Restyle Panel */}
+                {restyleOpen && (
+                  <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                      <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✦ AI Restyle</span>
+                      <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Transform your photo while keeping its composition — powered by Stability AI</span>
+                    </div>
+
+                    {(() => {
+                      const apiKeysNow = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
+                      const usingPlatform = !apiKeysNow.stability;
+                      return (
+                        <div style={{ fontSize:11, color:"var(--muted)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                          {usingPlatform
+                            ? "Using Blog Bunker's built-in Stability AI credits — no setup needed. Counts against your monthly image limit."
+                            : "Using your own Stability AI key from Settings → API Keys — doesn't count against your plan's image limit."}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Style presets */}
+                    <div>
+                      <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Quick Styles</label>
+                      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                        {STYLE_PRESETS.map(p => (
+                          <button key={p.label} onClick={() => setRestylePrompt(p.prompt)}
+                            style={{ padding:"5px 12px", borderRadius:99, border:restylePrompt===p.prompt?"1px solid var(--amber)":"1px solid var(--border)", background:restylePrompt===p.prompt?"var(--amber-glow)":"transparent", color:restylePrompt===p.prompt?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:restylePrompt===p.prompt?600:400 }}>
+                            {p.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Custom prompt */}
+                    <div>
+                      <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Style Prompt</label>
+                      <textarea value={restylePrompt} onChange={e=>setRestylePrompt(e.target.value)} rows={2}
+                        placeholder="e.g. cinematic golden hour, oil painting style, professional magazine photo, misty morning fog…"
+                        style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
+                    </div>
+
+                    {/* Restyle strength */}
+                    <div>
+                      <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+                        Restyle Strength — {Math.round(restyleStrength * 100)}%
+                        <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0, color:"var(--muted)", marginLeft:8 }}>
+                          (lower = closer to original)
+                        </span>
+                      </label>
+                      <input type="range" min={0.2} max={0.9} step={0.05} value={restyleStrength}
+                        onChange={e => setRestyleStrength(Number(e.target.value))}
+                        style={{ width:"100%", accentColor:"var(--amber)" }} />
+                      <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"var(--muted)", marginTop:3 }}>
+                        <span>Subtle (keep original)</span>
+                        <span>Strong (full restyle)</span>
+                      </div>
+                    </div>
+
+                    {restyleError && (
+                      <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{restyleError}</div>
+                    )}
+
+                    {/* Result */}
+                    {restyleResult ? (
+                      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                          <div>
+                            <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Original</div>
+                            <img src={selected.url || selected.dataUrl} alt="Original" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
+                          </div>
+                          <div>
+                            <div style={{ fontSize:10, fontWeight:700, color:"var(--amber)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>✦ Restyled</div>
+                            <img src={restyleResult} alt="Restyled" style={{ width:"100%", borderRadius:8, border:"1px solid var(--amber)44" }} />
+                          </div>
+                        </div>
+                        <div style={{ display:"flex", gap:8 }}>
+                          <button onClick={saveRestyleResult}
+                            style={{ padding:"8px 20px", borderRadius:8, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            ✓ Save to Library
+                          </button>
+                          <button onClick={() => { const a=document.createElement("a"); a.href=restyleResult; a.download=`${selected?.name||"image"}-restyled.png`; a.click(); }}
+                            style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            ↓ Download
+                          </button>
+                          <button onClick={() => { setRestyleResult(null); runRestyle(); }}
+                            style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            ↻ Try again
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button onClick={runRestyle} disabled={restyleLoading || !restylePrompt.trim()}
+                        style={{ padding:"10px 24px", borderRadius:8, border:"none", background:restyleLoading||!restylePrompt.trim()?"var(--bg-elevated)":"var(--amber)", color:restyleLoading||!restylePrompt.trim()?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:restyleLoading||!restylePrompt.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
+                        {restyleLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{restyleStatus || "Restyling…"}</> : "✦ Generate Restyle"}
+                      </button>
+                    )}
+                  </div>
+                )}
+
+              </div>
             </div>
           )}
         </>
@@ -9029,20 +9207,21 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                     )}
                   </div>
 
-                  {/* Engagement rate */}
-                  {socialInsights.facebook && (
+                  {/* Cross-platform engagement snapshot */}
+                  {(socialInsights.facebook || socialInsights.instagram) && (
                     <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
-                      <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📈 Engagement Breakdown</div>
+                      <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📈 Engagement Breakdown — this week, both platforms</div>
                       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))", gap:10 }}>
                         {[
-                          { key:"page_actions_post_reactions_like_total", label:"Likes",    color:"#1877f2" },
-                          { key:"page_actions_post_reactions_love_total", label:"Love",     color:"#e05555" },
-                          { key:"page_posts_impressions",                 label:"Post Reach",color:"#5cba6c" },
-                          { key:"page_fans_online_per_day",               label:"Online Now",color:"var(--amber)" },
-                        ].filter(m => socialInsights.facebook[m.key] != null).map(m => (
-                          <div key={m.key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", textAlign:"center" }}>
+                          { key:"page_post_engagements", label:"FB Engagements", color:"#1877f2", src:"facebook" },
+                          { key:"page_views_total",       label:"FB Page Views",  color:"#1877f2", src:"facebook" },
+                          { key:"views",                  label:"IG Views",       color:"#e1306c", src:"instagram" },
+                          { key:"reach",                  label:"IG Reach",       color:"#e1306c", src:"instagram" },
+                          { key:"profile_views",          label:"IG Profile Views",color:"#e1306c", src:"instagram" },
+                        ].filter(m => socialInsights[m.src]?.[m.key] != null).map(m => (
+                          <div key={`${m.src}-${m.key}`} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", textAlign:"center" }}>
                             <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>{m.label}</div>
-                            <div style={{ fontSize:18, fontWeight:700, color:m.color }}>{socialInsights.facebook[m.key]?.toLocaleString?.() ?? socialInsights.facebook[m.key]}</div>
+                            <div style={{ fontSize:18, fontWeight:700, color:m.color }}>{socialInsights[m.src][m.key]?.toLocaleString?.() ?? socialInsights[m.src][m.key]}</div>
                           </div>
                         ))}
                       </div>
@@ -11953,6 +12132,7 @@ export default function Dashboard({ user, workspace }) {
                 externalInitialIdea={socialPipelineHandoff}
                 onConsumedExternalInitialIdea={() => setSocialPipelineHandoff(null)}
                 tierConfig={tierConfig}
+                onAddCalEvent={saveCalEvent}
               />
             </MarketingErrorBoundary>
           )}
