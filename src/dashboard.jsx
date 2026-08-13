@@ -369,10 +369,15 @@ function UsagePanel({ tierConfig, userId }) {
     return () => { cancelled = true; };
   }, [userId]);
 
-  const wordsUsed = usage?.wordsUsed ?? 0;
-  const wordCap   = tierConfig.wordsPerMonth;
-  const pct       = Math.min(100, Math.round((wordsUsed / wordCap) * 100));
-  const barColor  = pct >= 100 ? "var(--red)" : pct >= 80 ? "var(--amber)" : "#5cba6c";
+  const wordsUsed  = usage?.wordsUsed ?? 0;
+  const wordCap    = tierConfig.wordsPerMonth;
+  const wordPct    = Math.min(100, Math.round((wordsUsed / wordCap) * 100));
+  const wordColor  = wordPct >= 100 ? "var(--red)" : wordPct >= 80 ? "var(--amber)" : "#5cba6c";
+
+  const imagesUsed = usage?.imagesUsed ?? 0;
+  const imageCap   = tierConfig.imagesPerMonth;
+  const imagePct   = Math.min(100, Math.round((imagesUsed / imageCap) * 100));
+  const imageColor = imagePct >= 100 ? "var(--red)" : imagePct >= 80 ? "var(--amber)" : "#5cba6c";
 
   return (
     <div style={{ borderTop:"1px solid var(--border)", paddingTop:20 }}>
@@ -384,19 +389,33 @@ function UsagePanel({ tierConfig, userId }) {
           <div>
             <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:6 }}>
               <span style={{ color:"var(--text-secondary)" }}>AI writing (platform-managed Claude credits)</span>
-              <span style={{ fontWeight:700, color: pct >= 100 ? "var(--red)" : "var(--text)" }}>{wordsUsed.toLocaleString()} / {wordCap.toLocaleString()} words</span>
+              <span style={{ fontWeight:700, color: wordPct >= 100 ? "var(--red)" : "var(--text)" }}>{wordsUsed.toLocaleString()} / {wordCap.toLocaleString()} words</span>
             </div>
             <div style={{ height:8, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
-              <div style={{ height:"100%", width:`${pct}%`, background:barColor, borderRadius:99, transition:"width 0.3s" }} />
+              <div style={{ height:"100%", width:`${wordPct}%`, background:wordColor, borderRadius:99, transition:"width 0.3s" }} />
             </div>
-            {pct >= 100 && (
+            {wordPct >= 100 && (
               <div style={{ fontSize:11, color:"var(--red)", marginTop:6 }}>
                 ⚠ Monthly limit reached — add your own API key in Settings → API Keys{tierConfig.byok ? "" : " (upgrade to Operative to unlock this)"}, or wait until next month.
               </div>
             )}
           </div>
+          <div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:6 }}>
+              <span style={{ color:"var(--text-secondary)" }}>AI images (platform-managed Stability credits)</span>
+              <span style={{ fontWeight:700, color: imagePct >= 100 ? "var(--red)" : "var(--text)" }}>{imagesUsed.toLocaleString()} / {imageCap.toLocaleString()} images</span>
+            </div>
+            <div style={{ height:8, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
+              <div style={{ height:"100%", width:`${imagePct}%`, background:imageColor, borderRadius:99, transition:"width 0.3s" }} />
+            </div>
+            {imagePct >= 100 && (
+              <div style={{ fontSize:11, color:"var(--red)", marginTop:6 }}>
+                ⚠ Monthly limit reached — add your own OpenAI/Gemini/Stability key in Settings → API Keys{tierConfig.byok ? "" : " (upgrade to Operative to unlock this)"}, or wait until next month.
+              </div>
+            )}
+          </div>
           <div style={{ fontSize:11, color:"var(--muted)", lineHeight:1.6 }}>
-            AI images aren't metered yet — image generation currently requires your own OpenAI or Gemini key regardless of plan (Settings → API Keys{tierConfig.byok ? "" : ", available on Operative and above"}).
+            Platform-managed images use Blog Bunker's built-in Stability AI credits — no setup needed. Prefer OpenAI or Gemini instead? Add your own key in Settings → API Keys{tierConfig.byok ? "" : " (Operative and above)"}.
           </div>
         </div>
       )}
@@ -740,15 +759,18 @@ const PLATFORM_IMAGE_SPECS = {
   twitter:   { ratio:"16:9", label:"Widescreen (16:9)",style:"editorial photography, wide cinematic"            },
 };
 
-// Determine which image provider to use based on available keys
+// Determine which image provider to use based on available keys — falls back
+// to Blog Bunker's own platform-managed Stability credits if the user hasn't
+// added their own key for anything, so image generation always works.
 function getImageProvider(apiKeys) {
   if (apiKeys["stability"]) return "stability";
   if (apiKeys["openai"])    return "dalle";
   if (apiKeys["gemini"])    return "gemini-image";
-  return null;
+  return "stability"; // platform-managed fallback (no key) — see generateImage()
 }
 
-function getImageProviderLabel(provider) {
+function getImageProviderLabel(provider, apiKeys = null) {
+  if (provider === "stability" && apiKeys && !apiKeys["stability"]) return "Blog Bunker (built-in Stability AI credits)";
   return { stability:"Stability AI", dalle:"GPT Image (OpenAI)", "gemini-image":"Gemini Image" }[provider] || "No image provider";
 }
 
@@ -765,10 +787,11 @@ function getAvailableImageProviders(apiKeys) {
 async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
   const provider = forceProvider || getImageProvider(apiKeys);
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
-  if (!provider) throw new Error("No image provider connected. Add an OpenAI or Gemini key in Settings → API Keys.");
   const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
   const apiKey = apiKeys[keyMap[provider]];
-  if (!apiKey) throw new Error(`${getImageProviderLabel(provider)} key not set. Add it in Settings → API Keys.`);
+  // Stability alone has a platform-managed fallback (no key needed) — every
+  // other provider still requires the user's own key with no exception.
+  if (!apiKey && provider !== "stability") throw new Error(`${getImageProviderLabel(provider)} key not set. Add it in Settings → API Keys.`);
   const sizeMap = { "1:1":"1024x1024", "3:2":"1536x1024", "2:3":"1024x1536", "16:9":"1536x1024" };
   const size = sizeMap[spec.ratio] || "1024x1024";
 
@@ -815,11 +838,17 @@ async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
     throw new Error(`Gemini image failed: ${lastErr}`);
   }
 
-  // Stability AI — still needs proxy (no CORS support)
+  // Stability AI — routes through the proxy (no CORS support). "stability" here
+  // means straightforward text-to-image, NOT the img2img/restyle case in
+  // image-generate.js — this was previously calling that endpoint by mistake,
+  // which always failed since img2img requires an existing image to transform.
+  const isPlatformManaged = provider === "stability" && !apiKey;
   const res = await fetch("/api/image-generate", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider:"stability", prompt, apiKey, size }),
+    body: JSON.stringify(isPlatformManaged
+      ? { provider:"stability-platform", prompt, size, userId: window.__bbUserId || null }
+      : { provider:"stability-text", prompt, apiKey, size }),
   });
   const text = await res.text();
   if (text.trimStart().startsWith("<")) throw new Error("Image generation timed out — try again");
@@ -1092,7 +1121,7 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
 
   const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
   const provider    = imgProvider;
-  const providerLabel = getImageProviderLabel(provider);
+  const providerLabel = getImageProviderLabel(provider, apiKeys);
   const spec        = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
   const isLoading   = genLoading || promptLoad;
 
@@ -1304,10 +1333,9 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig 
               </button>
             ))}
           </div>
-          {/* Image provider status badge */}
-          <div style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 12px", borderRadius:99, border:`1px solid ${getImageProvider(apiKeys)?"#7c3aed44":"var(--border)"}`, background:getImageProvider(apiKeys)?"#7c3aed0a":"transparent", fontSize:11, color:getImageProvider(apiKeys)?"#a78bfa":"var(--muted)" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 12px", borderRadius:99, border:"1px solid #7c3aed44", background:"#7c3aed0a", fontSize:11, color:"#a78bfa" }}>
             <span>▣</span>
-            {getImageProvider(apiKeys) ? `${getImageProviderLabel(getImageProvider(apiKeys))} — images ready` : "Add Stability AI, OpenAI or Gemini key for images"}
+            {getImageProviderLabel(getImageProvider(apiKeys), apiKeys)} — images ready
           </div>
         </div>
 
@@ -1627,7 +1655,7 @@ function AIQuickSwitcher({ activeProvider, activeModel, onProviderChange, onMode
   const [open,        setOpen]       = useState(false);
   const [imageProvider, setImageProvider] = useState(() => getImageProvider(apiKeys) || "stability");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
-  const imgProviderLabel = getImageProviderLabel(getImageProvider(apiKeys));
+  const imgProviderLabel = getImageProviderLabel(getImageProvider(apiKeys), apiKeys);
 
   return (
     <div className="bb-ai-switcher" style={{ position:"fixed", bottom:24, right:24, zIndex:999, display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
@@ -10227,7 +10255,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
 
   const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
   const provider = imgProvider;
-  const providerLabel = getImageProviderLabel(provider);
+  const providerLabel = getImageProviderLabel(provider, apiKeys);
   const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
 
   useEffect(() => {
