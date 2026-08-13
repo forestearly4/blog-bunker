@@ -19,8 +19,9 @@ const CORS = {
   "Content-Type":                 "application/json",
 };
 
-// Same word caps as TIER_CONFIG in dashboard.jsx — keep in sync if changed there.
-const WORD_CAPS = { scout: 15000, operative: 60000 };
+// Same caps as TIER_CONFIG in dashboard.jsx — keep in sync if changed there.
+const WORD_CAPS  = { scout: 15000, operative: 60000 };
+const IMAGE_CAPS = { scout: 20, operative: 100 };
 const TOKENS_PER_WORD = 1.333; // rough inverse of the usual ~0.75 words/token
 
 export default async (req) => {
@@ -32,12 +33,18 @@ export default async (req) => {
   const period = new Date().toISOString().slice(0, 7); // YYYY-MM
 
   try {
-    const usage = await store.get(`${userId}:usage_text_${period}`, { type: "json" }) || { tokens: 0 };
-    const tier  = (await store.get(`${userId}:user_tier`, { type: "json" })) || "scout";
-    const wordCap = WORD_CAPS[tier] || WORD_CAPS.scout;
-    const wordsUsed = Math.round((usage.tokens || 0) / TOKENS_PER_WORD);
+    const textUsage  = await store.get(`${userId}:usage_text_${period}`, { type: "json" }) || { tokens: 0 };
+    const imageUsage = await store.get(`${userId}:usage_images_${period}`, { type: "json" }) || { images: 0 };
+    const tier       = (await store.get(`${userId}:user_tier`, { type: "json" })) || "scout";
+    const wordCap    = WORD_CAPS[tier] || WORD_CAPS.scout;
+    const imageCap   = IMAGE_CAPS[tier] || IMAGE_CAPS.scout;
+    const wordsUsed  = Math.round((textUsage.tokens || 0) / TOKENS_PER_WORD);
 
-    return new Response(JSON.stringify({ period, tokensUsed: usage.tokens || 0, wordsUsed, tier, wordCap }), { status: 200, headers: CORS });
+    return new Response(JSON.stringify({
+      period, tier,
+      tokensUsed: textUsage.tokens || 0, wordsUsed, wordCap,
+      imagesUsed: imageUsage.images || 0, imageCap,
+    }), { status: 200, headers: CORS });
   } catch(e) {
     return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: CORS });
   }

@@ -4,8 +4,14 @@
  * Avoids CORS issues with direct browser-to-provider calls.
  *
  * POST /api/image-generate
- * { provider, prompt, size, quality, apiKey, ... }
+ * { provider, prompt, size, quality, apiKey, ... }             — BYOK (user's own key)
+ * { provider: "stability-platform", prompt, size, userId }     — platform-managed (Blog Bunker's own key, tier-metered)
  */
+
+import { getStore } from "@netlify/blobs";
+
+// Same image caps as TIER_CONFIG in dashboard.jsx — keep in sync if changed there.
+const IMAGE_CAPS = { scout: 20, operative: 100 };
 
 const CORS = {
   "Access-Control-Allow-Origin":  "*",
@@ -22,9 +28,12 @@ export default async (req) => {
   try { body = await req.json(); }
   catch { return new Response(JSON.stringify({ error: "Invalid JSON" }), { status: 400, headers: CORS }); }
 
-  const { provider, prompt, size = "1024x1024", quality = "medium", apiKey } = body;
-  if (!provider || !prompt || !apiKey) {
-    return new Response(JSON.stringify({ error: "provider, prompt, and apiKey are required" }), { status: 400, headers: CORS });
+  const { provider, prompt, size = "1024x1024", quality = "medium", apiKey, userId } = body;
+  if (!provider || !prompt) {
+    return new Response(JSON.stringify({ error: "provider and prompt are required" }), { status: 400, headers: CORS });
+  }
+  if (provider !== "stability-platform" && !apiKey) {
+    return new Response(JSON.stringify({ error: "apiKey is required for this provider" }), { status: 400, headers: CORS });
   }
 
   try {
@@ -72,6 +81,89 @@ export default async (req) => {
         } catch(e) { lastErr = e.message; }
       }
       throw new Error(lastErr || "All Gemini models failed");
+    }
+
+    // ── STABILITY AI — PLATFORM-MANAGED text-to-image (Blog Bunker's own key) ──
+    // Uses Blog Bunker's own STABILITY_API_KEY, not the user's — metered against
+    // their tier's monthly image quota. This is the only image path in the app
+    // that doesn't require the user to bring their own key/account.
+    if (provider === "stability-platform") {
+      const platformKey = process.env.STABILITY_API_KEY;
+      if (!platformKey) throw new Error("Platform image generation isn't configured yet (STABILITY_API_KEY not set) — use your own API key in Settings → API Keys instead.");
+
+      const store  = getStore("blog-bunker-data");
+      const period = new Date().toISOString().slice(0, 7); // YYYY-MM
+
+      if (userId) {
+        const tier  = (await store.get(`${userId}:user_tier`, { type: "json" })) || "scout";
+        const cap   = IMAGE_CAPS[tier] || IMAGE_CAPS.scout;
+        const usage = await store.get(`${userId}:usage_images_${period}`, { type: "json" }) || { images: 0 };
+        if ((usage.images || 0) >= cap) {
+          return new Response(JSON.stringify({
+            error: `Monthly AI image limit reached (${cap} images on your current plan). Upgrade your plan, add your own Stability/OpenAI/Gemini key in Settings → API Keys, or wait until next month.`,
+          }), { status: 429, headers: CORS });
+        }
+      }
+
+      // Current Stable Image API (v2beta) — the BYOK case above still targets
+      // the older SDXL 1.0 img2img endpoint for restyle; this uses Stability's
+      // present-day Core model for straightforward text-to-image. Requesting
+      // Accept: image/* and encoding the binary ourselves avoids any ambiguity
+      // about Stability's JSON response field naming.
+      const formData = new FormData();
+      formData.append("prompt", prompt);
+      formData.append("output_format", "png");
+      formData.append("aspect_ratio", "1:1");
+
+      const res = await fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
+        method:  "POST",
+        headers: { "Authorization": `Bearer ${platformKey}`, "Accept": "image/*" },
+        body:    formData,
+      });
+      if (!res.ok) {
+        let errText;
+        try { errText = (await res.json()).errors?.[0]; } catch { errText = await res.text(); }
+        throw new Error(errText || `Stability error ${res.status}`);
+      }
+      const arrayBuffer = await res.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const b64 = btoa(binary);
+      if (!b64) throw new Error("No image returned from Stability AI");
+
+      if (userId) {
+        const usage = await store.get(`${userId}:usage_images_${period}`, { type: "json" }) || { images: 0 };
+        await store.setJSON(`${userId}:usage_images_${period}`, { images: (usage.images || 0) + 1 });
+      }
+
+      return new Response(JSON.stringify({ b64, mimeType: "image/png" }), { status: 200, headers: CORS });
+    }
+
+    // ── STABILITY AI — BYOK text-to-image (user's own key) ──────────────────────
+    if (provider === "stability-text") {
+      const formData = new FormData();
+      formData.append("prompt", prompt);
+      formData.append("output_format", "png");
+      formData.append("aspect_ratio", "1:1");
+
+      const res = await fetch("https://api.stability.ai/v2beta/stable-image/generate/core", {
+        method:  "POST",
+        headers: { "Authorization": `Bearer ${apiKey}`, "Accept": "image/*" },
+        body:    formData,
+      });
+      if (!res.ok) {
+        let errText;
+        try { errText = (await res.json()).errors?.[0]; } catch { errText = await res.text(); }
+        throw new Error(errText || `Stability error ${res.status}`);
+      }
+      const arrayBuffer = await res.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const b64 = btoa(binary);
+      if (!b64) throw new Error("No image returned from Stability AI");
+      return new Response(JSON.stringify({ b64, mimeType: "image/png" }), { status: 200, headers: CORS });
     }
 
     // ── STABILITY AI img2img ──────────────────────────────────────────────────
