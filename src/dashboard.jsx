@@ -10197,53 +10197,62 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
   useEffect(() => {
     setLoadErr("");
     setDataUrl(null);
+    console.log("[overlay] loading image:", imageUrl);
     (async () => {
       try {
-        if (imageUrl.startsWith("data:")) { setDataUrl(imageUrl); return; }
+        if (imageUrl.startsWith("data:")) { console.log("[overlay] already a data: URL, using directly"); setDataUrl(imageUrl); return; }
 
         // Try fetch with no-cors handling
         try {
           const res  = await fetch(imageUrl, { mode: "cors", credentials: "omit" });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const blob = await res.blob();
+          console.log("[overlay] fetched via CORS fetch, blob size:", blob.size, "type:", blob.type);
           const reader = new FileReader();
-          reader.onload = e => setDataUrl(e.target.result);
+          reader.onload = e => { console.log("[overlay] converted to data: URL, length:", e.target.result?.length); setDataUrl(e.target.result); };
+          reader.onerror = () => setLoadErr("Could not read the fetched image data.");
           reader.readAsDataURL(blob);
-        } catch {
+        } catch(fetchErr) {
+          console.log("[overlay] CORS fetch failed, falling back to <img> element:", fetchErr.message);
           // Fetch failed (CORS) — load via Image element instead
           // Canvas will be tainted but we can still display it
           const img = new Image();
           img.crossOrigin = "anonymous";
           img.onload = () => {
+            console.log("[overlay] fallback <img> loaded, natural size:", img.naturalWidth, "x", img.naturalHeight);
             const canvas = document.createElement("canvas");
             canvas.width  = img.naturalWidth;
             canvas.height = img.naturalHeight;
             try {
               canvas.getContext("2d").drawImage(img, 0, 0);
               setDataUrl(canvas.toDataURL("image/png"));
-            } catch {
+            } catch(taintErr) {
+              console.log("[overlay] canvas tainted, using raw URL directly:", taintErr.message);
               // Canvas tainted — just use the URL directly for display
               setDataUrl(imageUrl);
             }
           };
-          img.onerror = () => setLoadErr("Could not load image — try downloading it first and re-uploading.");
+          img.onerror = () => { console.log("[overlay] fallback <img> also failed to load"); setLoadErr("Could not load image — try downloading it first and re-uploading."); };
           img.src = imageUrl + "?_=" + Date.now(); // cache bust
         }
-      } catch(e) { setLoadErr("Could not load image: " + e.message); }
+      } catch(e) { console.log("[overlay] load step threw:", e.message); setLoadErr("Could not load image: " + e.message); }
     })();
   }, [imageUrl]);
 
   // Draw whenever dataUrl, layers, filter, or canvas element changes
   useEffect(() => {
     if (!dataUrl || !canvasEl) return;
+    console.log("[overlay] drawing to canvas, dataUrl length:", dataUrl.length, "filter:", activeFilterCss);
     const img = new Image();
     img.onload = () => {
+      console.log("[overlay] draw-image loaded, size:", img.width, "x", img.height);
       const ctx = canvasEl.getContext("2d");
       canvasEl.width  = img.width;
       canvasEl.height = img.height;
       ctx.filter = activeFilterCss;
       ctx.drawImage(img, 0, 0);
       ctx.filter = "none"; // never let the image filter bleed into the text layers
+      console.log("[overlay] base image drawn, now drawing", layers.length, "text layer(s)");
 
       for (const l of layers) {
         if (!l.text.trim()) continue;
@@ -10270,6 +10279,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
         ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
       }
     };
+    img.onerror = () => { console.log("[overlay] draw-image FAILED to load — this is why the canvas is blank"); setLoadErr("The image data couldn't be drawn — try re-selecting the image or downloading and re-uploading it."); };
     img.src = dataUrl;
   }, [dataUrl, layers, canvasEl, activeFilterCss]);
 
