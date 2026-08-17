@@ -4846,8 +4846,8 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           apiKeys={apiKeys}
           dark={dark}
           metaConfig={metaConfig}
-          inspiration={inspiration}
-          onAddInspiration={onAddInspiration}
+          inspiration={socialInspiration}
+          onAddInspiration={onAddSocialInspiration}
           onSaveSocialPost={onSaveSocialPost}
           initialIdea={pipelineInitialIdea}
           onConsumedInitialIdea={() => setPipelineInitialIdea(null)}
@@ -4874,8 +4874,8 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           activeModel={activeModel}
           apiKeys={apiKeys}
           posts={posts}
-          inspiration={inspiration}
-          onAddInspiration={onAddInspiration}
+          inspiration={socialInspiration}
+          onAddInspiration={onAddSocialInspiration}
         />
       )}
 
@@ -4936,8 +4936,8 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
               activeModel={activeModel}
               apiKeys={apiKeys}
               posts={posts}
-              inspiration={inspiration}
-              onAddInspiration={onAddInspiration}
+              inspiration={socialInspiration}
+              onAddInspiration={onAddSocialInspiration}
             />
           )}
 
@@ -4960,8 +4960,8 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
               activeModel={activeModel}
               apiKeys={apiKeys}
               posts={posts}
-              inspiration={inspiration}
-              onAddInspiration={onAddInspiration}
+              inspiration={socialInspiration}
+              onAddInspiration={onAddSocialInspiration}
             />
           )}
 
@@ -4980,8 +4980,8 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
               apiKeys={apiKeys}
               competitors={competitors}
               posts={posts}
-              inspiration={inspiration}
-              onAddInspiration={onAddInspiration}
+              inspiration={socialInspiration}
+              onAddInspiration={onAddSocialInspiration}
             />
           )}
         </div>
@@ -10278,6 +10278,17 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
         ctx.shadowColor = "transparent"; ctx.shadowBlur = 0;
         ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
       }
+
+      // Log the ACTUAL on-screen box the browser is rendering this canvas at —
+      // tells us definitively whether this is a sizing issue (0 width/height),
+      // a positioning issue (off-screen coordinates), or something else.
+      setTimeout(() => {
+        const rect = canvasEl.getBoundingClientRect();
+        const cs = window.getComputedStyle(canvasEl);
+        console.log("[overlay] canvas on-screen rect:", JSON.stringify(rect));
+        console.log("[overlay] canvas computed style — display:", cs.display, "visibility:", cs.visibility, "opacity:", cs.opacity, "width:", cs.width, "height:", cs.height);
+        console.log("[overlay] canvas intrinsic size (pixels):", canvasEl.width, "x", canvasEl.height);
+      }, 0);
     };
     img.onerror = () => { console.log("[overlay] draw-image FAILED to load — this is why the canvas is blank"); setLoadErr("The image data couldn't be drawn — try re-selecting the image or downloading and re-uploading it."); };
     img.src = dataUrl;
@@ -10327,7 +10338,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
                 const r = e.currentTarget.getBoundingClientRect();
                 upd({ x: Math.round((e.clientX-r.left)/r.width*100), y: Math.round((e.clientY-r.top)/r.height*100) });
               }}
-              style={{ width:"100%", height:"auto", maxHeight:"70vh", objectFit:"contain", borderRadius:8, border:"1px solid var(--border)", cursor:"crosshair", display:"block" }} />
+              style={{ width:"100%", height:"auto", maxHeight:"70vh", objectFit:"contain", borderRadius:8, border:"1px solid var(--border)", background:"#3a3a3a", cursor:"crosshair", display:"block" }} />
           </div>
 
           {/* Controls */}
