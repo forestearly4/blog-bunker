@@ -10248,10 +10248,24 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
     img.onload = () => {
       console.log("[overlay] draw-image loaded, size:", img.width, "x", img.height);
       const ctx = canvasEl.getContext("2d");
-      canvasEl.width  = img.width;
-      canvasEl.height = img.height;
+
+      // Cap the canvas's actual rendering resolution — there's no reason to
+      // keep a multi-megapixel bitmap in memory to display at ~500px, and
+      // very large canvases (this one was 3729x3217, ~12MP) are a known class
+      // of silent rendering failure on some browsers/GPUs even when the CSS
+      // box itself is small and correctly styled.
+      const MAX_DIM = 1600;
+      let targetW = img.width, targetH = img.height;
+      if (targetW > MAX_DIM || targetH > MAX_DIM) {
+        const scale = MAX_DIM / Math.max(targetW, targetH);
+        targetW = Math.round(targetW * scale);
+        targetH = Math.round(targetH * scale);
+      }
+      console.log("[overlay] capping canvas resolution to:", targetW, "x", targetH, "(was", img.width, "x", img.height, ")");
+      canvasEl.width  = targetW;
+      canvasEl.height = targetH;
       ctx.filter = activeFilterCss;
-      ctx.drawImage(img, 0, 0);
+      ctx.drawImage(img, 0, 0, targetW, targetH);
       ctx.filter = "none"; // never let the image filter bleed into the text layers
       console.log("[overlay] base image drawn, now drawing", layers.length, "text layer(s)");
 
@@ -10294,6 +10308,13 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
       canvasEl.style.width  = `${displayW}px`;
       canvasEl.style.height = `${displayH}px`;
       console.log("[overlay] explicitly sized canvas display box to:", displayW, "x", displayH, "(wrapper measured width:", wrapperWidth, ")");
+
+      // Unmistakable visual marker — if this red square isn't visible either,
+      // that conclusively rules out anything about the photo/drawImage content
+      // and points at something more fundamental (stacking/covering/rendering).
+      const markerCtx = canvasEl.getContext("2d");
+      markerCtx.fillStyle = "#ff0000";
+      markerCtx.fillRect(0, 0, 40, 40);
 
       // Log the ACTUAL on-screen box the browser is rendering this canvas at —
       // tells us definitively whether this is a sizing issue (0 width/height),
