@@ -10369,7 +10369,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
       {dataUrl && (
         <div style={{ display:"grid", gridTemplateColumns:"1fr 280px", gap:14, minWidth:0 }}>
           {/* Canvas preview */}
-          <div ref={wrapperRef} style={{ minWidth:0, overflow:"hidden" }}>
+          <div ref={wrapperRef} style={{ width:"100%", minWidth:0, overflow:"hidden" }}>
             <canvas ref={canvasRef}
               onClick={e => {
                 const r = e.currentTarget.getBoundingClientRect();
