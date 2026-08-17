@@ -10157,6 +10157,7 @@ function SocialPlatformSettings() {
 
 function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
   const [canvasEl, setCanvasEl] = useState(null); // callback ref — know when canvas is mounted
+  const wrapperRef = useRef(null); // measure this to size the canvas explicitly in JS
   const canvasRef = useCallback(node => { if (node) setCanvasEl(node); }, []);
   const [dataUrl,  setDataUrl]  = useState(null);
   const [layers,   setLayers]   = useState([{
@@ -10279,6 +10280,21 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
         ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
       }
 
+      // Explicitly size the canvas's DISPLAY box in pixels, measured from the
+      // wrapper's actual rendered width — sidesteps whatever CSS percentage/
+      // auto-sizing ambiguity in the ancestor chain was collapsing width:100%
+      // down to a 2x2px box (confirmed via diagnostics: intrinsic bitmap was a
+      // correct 1231x1231, but the CSS-computed display size was only 2x2px).
+      const wrapperWidth = wrapperRef.current?.getBoundingClientRect().width || 600;
+      const aspect = img.height / img.width;
+      const maxH = window.innerHeight * 0.7;
+      let displayW = wrapperWidth;
+      let displayH = displayW * aspect;
+      if (displayH > maxH) { displayH = maxH; displayW = displayH / aspect; }
+      canvasEl.style.width  = `${displayW}px`;
+      canvasEl.style.height = `${displayH}px`;
+      console.log("[overlay] explicitly sized canvas display box to:", displayW, "x", displayH, "(wrapper measured width:", wrapperWidth, ")");
+
       // Log the ACTUAL on-screen box the browser is rendering this canvas at —
       // tells us definitively whether this is a sizing issue (0 width/height),
       // a positioning issue (off-screen coordinates), or something else.
@@ -10332,13 +10348,13 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
       {dataUrl && (
         <div style={{ display:"grid", gridTemplateColumns:"1fr 280px", gap:14, minWidth:0 }}>
           {/* Canvas preview */}
-          <div style={{ minWidth:0, overflow:"hidden" }}>
+          <div ref={wrapperRef} style={{ minWidth:0, overflow:"hidden" }}>
             <canvas ref={canvasRef}
               onClick={e => {
                 const r = e.currentTarget.getBoundingClientRect();
                 upd({ x: Math.round((e.clientX-r.left)/r.width*100), y: Math.round((e.clientY-r.top)/r.height*100) });
               }}
-              style={{ width:"100%", height:"auto", maxHeight:"70vh", objectFit:"contain", borderRadius:8, border:"1px solid var(--border)", background:"#3a3a3a", cursor:"crosshair", display:"block" }} />
+              style={{ borderRadius:8, border:"1px solid var(--border)", background:"#3a3a3a", cursor:"crosshair", display:"block" }} />
           </div>
 
           {/* Controls */}
