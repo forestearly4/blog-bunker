@@ -12034,7 +12034,7 @@ export default function Dashboard({ user, workspace }) {
           ))}
         </nav>
 
-        <div className="bb-main-content" style={{flex:1,overflow:"auto",padding:28}}>
+        <div className="bb-main-content" style={{flex:1,overflow:"auto",padding:28,minHeight:0}}>
 
           {/* ══ BLOG ══ */}
           {activeTab==="blog"&&(
