@@ -10319,15 +10319,15 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
       )}
 
       {dataUrl && (
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 280px", gap:14 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 280px", gap:14, minWidth:0 }}>
           {/* Canvas preview */}
-          <div>
+          <div style={{ minWidth:0, overflow:"hidden" }}>
             <canvas ref={canvasRef}
               onClick={e => {
                 const r = e.currentTarget.getBoundingClientRect();
                 upd({ x: Math.round((e.clientX-r.left)/r.width*100), y: Math.round((e.clientY-r.top)/r.height*100) });
               }}
-              style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", cursor:"crosshair", display:"block" }} />
+              style={{ width:"100%", height:"auto", maxHeight:"70vh", objectFit:"contain", borderRadius:8, border:"1px solid var(--border)", cursor:"crosshair", display:"block" }} />
           </div>
 
           {/* Controls */}
