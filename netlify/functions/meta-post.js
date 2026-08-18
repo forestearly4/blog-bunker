@@ -50,7 +50,7 @@ export default async (req) => {
     try {
       if (imageUrl) {
         const publicUrl = await ensurePublicUrl(imageUrl);
-        const res = await fetch(`https://graph.facebook.com/v19.0/${pageId}/photos`, {
+        const res = await fetch(`https://graph.facebook.com/v25.0/${pageId}/photos`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url: publicUrl, caption: message, access_token: pageToken }),
@@ -59,7 +59,7 @@ export default async (req) => {
         if (data.error) throw new Error(`Facebook: ${data.error.message} (code ${data.error.code})`);
         results.facebook = { success: true, id: data.id };
       } else {
-        const res = await fetch(`https://graph.facebook.com/v19.0/${pageId}/feed`, {
+        const res = await fetch(`https://graph.facebook.com/v25.0/${pageId}/feed`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message, ...(link ? { link } : {}), access_token: pageToken }),
@@ -83,7 +83,7 @@ export default async (req) => {
       console.log("Instagram posting with URL:", publicUrl?.slice(0, 80));
 
       // Step 1: Create media container
-      const containerRes = await fetch(`https://graph.facebook.com/v19.0/${instagramId}/media`, {
+      const containerRes = await fetch(`https://graph.facebook.com/v25.0/${instagramId}/media`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image_url: publicUrl, caption: message, access_token: pageToken }),
@@ -103,7 +103,7 @@ export default async (req) => {
       let publishData;
       const maxAttempts = 4;
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const publishRes = await fetch(`https://graph.facebook.com/v19.0/${instagramId}/media_publish`, {
+        const publishRes = await fetch(`https://graph.facebook.com/v25.0/${instagramId}/media_publish`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ creation_id: containerData.id, access_token: pageToken }),

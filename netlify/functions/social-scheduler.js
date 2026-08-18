@@ -28,8 +28,8 @@ async function ensurePublicImageUrl(imageUrl) {
 
 async function postToFacebook(page, fullMessage, imageUrl) {
   const endpoint = imageUrl
-    ? `https://graph.facebook.com/v19.0/${page.id}/photos`
-    : `https://graph.facebook.com/v19.0/${page.id}/feed`;
+    ? `https://graph.facebook.com/v25.0/${page.id}/photos`
+    : `https://graph.facebook.com/v25.0/${page.id}/feed`;
   const body = imageUrl
     ? { url: imageUrl, caption: fullMessage, access_token: page.access_token }
     : { message: fullMessage, access_token: page.access_token };
@@ -41,7 +41,7 @@ async function postToFacebook(page, fullMessage, imageUrl) {
 
 async function postToInstagram(page, fullMessage, imageUrl) {
   if (!imageUrl) throw new Error("Instagram requires a public image URL");
-  const cRes  = await fetch(`https://graph.facebook.com/v19.0/${page.instagram_id}/media`, {
+  const cRes  = await fetch(`https://graph.facebook.com/v25.0/${page.instagram_id}/media`, {
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({ image_url: imageUrl, caption: fullMessage, access_token: page.access_token }),
   });
@@ -55,7 +55,7 @@ async function postToInstagram(page, fullMessage, imageUrl) {
   let pData;
   const maxAttempts = 4;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const pRes = await fetch(`https://graph.facebook.com/v19.0/${page.instagram_id}/media_publish`, {
+    const pRes = await fetch(`https://graph.facebook.com/v25.0/${page.instagram_id}/media_publish`, {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({ creation_id: cData.id, access_token: page.access_token }),
     });
