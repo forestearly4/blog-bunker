@@ -8173,22 +8173,24 @@ function MediaLibrary({ userId }) {
                   </div>
                 </div>
 
-                {/* Filters & Text Overlay Panel */}
-                {overlayOpen && selected && (
-                  <ImageTextOverlayEditor
-                    imageUrl={selected.url || selected.dataUrl}
-                    imageName={selected.name}
-                    userId={resolvedUserId}
-                    onSave={(newItem) => {
-                      setItems(prev => [newItem, ...prev]);
-                      setOverlayOpen(false);
-                      setSelected(newItem);
-                    }}
-                  />
-                )}
+              </div>
 
-                {/* AI Restyle Panel */}
-                {restyleOpen && (
+              {/* Filters & Text Overlay Panel — full width, sibling of the thumbnail+metadata grid rather than nested inside its narrow 220px column */}
+              {overlayOpen && selected && (
+                <ImageTextOverlayEditor
+                  imageUrl={selected.url || selected.dataUrl}
+                  imageName={selected.name}
+                  userId={resolvedUserId}
+                  onSave={(newItem) => {
+                    setItems(prev => [newItem, ...prev]);
+                    setOverlayOpen(false);
+                    setSelected(newItem);
+                  }}
+                />
+              )}
+
+              {/* AI Restyle Panel — also full width for the same reason */}
+              {restyleOpen && (
                   <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
                     <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                       <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✦ AI Restyle</span>
@@ -8287,7 +8289,6 @@ function MediaLibrary({ userId }) {
                 )}
 
               </div>
-            </div>
           )}
         </>
       )}
