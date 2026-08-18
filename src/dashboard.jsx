@@ -5746,7 +5746,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   // captions is keyed by platform id: { instagram: {text}, facebook: {text}, ... }
   const [captions, setCaptions] = useState(saved?.captions || {});
   const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"" });
-  const [imageData, setImageData] = useState(saved?.imageData || { prompt:"", url:null, imgProvider: resolveImageProvider(apiKeys) });
+  const [imageData, setImageData] = useState(saved?.imageData || { prompt:"", url:null, mediaType:"image", imgProvider: resolveImageProvider(apiKeys) });
   const [schedule, setSchedule] = useState(saved?.schedule || { date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
   const [publishResults, setPublishResults] = useState({});
 
@@ -5893,7 +5893,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     try {
       setImageData(d => ({ ...d, prompt: finalPrompt }));
       const url = await generateImage(finalPrompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
-      setImageData(d => ({ ...d, prompt: finalPrompt, url }));
+      setImageData(d => ({ ...d, prompt: finalPrompt, url, mediaType:"image" }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
@@ -5902,7 +5902,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setLoading(true); setLoadMsg("Generating image…"); setError("");
     try {
       const url = await generateImage(imageData.prompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
-      setImageData(d => ({ ...d, url }));
+      setImageData(d => ({ ...d, url, mediaType:"image" }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
@@ -5921,6 +5921,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     hashtags: hashtags.selected,
     imageUrl: imageData.url,
     imagePrompt: imageData.prompt,
+    mediaType: imageData.mediaType || "image",
     scheduledAt,
     status,
   });
@@ -6085,7 +6086,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setIdea({ topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
     setCaptions({});
     setHashtags({ sets:null, selected:"" });
-    setImageData({ prompt:"", url:null, imgProvider: resolveImageProvider(apiKeys) });
+    setImageData({ prompt:"", url:null, mediaType:"image", imgProvider: resolveImageProvider(apiKeys) });
   };
 
   const allCaptionsReady = selectedPlatforms.length > 0 && selectedPlatforms.every(p => captions[p.id]?.text?.trim());
@@ -6426,14 +6427,18 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 </div>
 
                 {/* Library picker */}
-                <LibraryImagePicker onSelect={(url) => setImageData(d=>({...d, url, prompt:"from library"}))} />
+                <LibraryImagePicker onSelect={(url, mediaType) => setImageData(d=>({...d, url, mediaType: mediaType || "image", prompt:"from library"}))} />
               </div>
             )}
 
             {imageData.url && (
               <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
                 <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)" }}>
-                  <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
+                  {imageData.mediaType === "video" ? (
+                    <video src={imageData.url} controls style={{ width:"100%", display:"block" }} />
+                  ) : (
+                    <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
+                  )}
                   <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
                     <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-post-${Date.now()}.jpg`; a.click(); }}
                       style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -6451,7 +6456,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   </div>
                 </div>
                 {/* Allow swapping even with image selected */}
-                <LibraryImagePicker onSelect={(url) => setImageData(d=>({...d, url, prompt:"from library"}))} compact />
+                <LibraryImagePicker onSelect={(url, mediaType) => setImageData(d=>({...d, url, mediaType: mediaType || "image", prompt:"from library"}))} compact />
               </div>
             )}
 
@@ -6541,7 +6546,11 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                             </div>
                           )}
                         </div>
-                        {imageData.url && <img src={imageData.url} alt="" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />}
+                        {imageData.url && (imageData.mediaType === "video" ? (
+                          <video src={imageData.url} muted style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
+                        ) : (
+                          <img src={imageData.url} alt="" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
+                        ))}
                       </div>
                     );
                   })}
@@ -7542,7 +7551,11 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
 
                   {/* Image */}
                   {post.imageUrl && (
-                    <img src={post.imageUrl} alt="" style={{ maxWidth:300, borderRadius:8, border:"1px solid var(--border)" }} />
+                    post.mediaType === "video" ? (
+                      <video src={post.imageUrl} controls style={{ maxWidth:300, borderRadius:8, border:"1px solid var(--border)" }} />
+                    ) : (
+                      <img src={post.imageUrl} alt="" style={{ maxWidth:300, borderRadius:8, border:"1px solid var(--border)" }} />
+                    )
                   )}
 
                   {/* Publish results */}
@@ -8356,7 +8369,7 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
   return (
     <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:16 }}>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
-        <div style={{ fontSize:12, fontWeight:700, color:"var(--amber)" }}>🖼 Media Library — {items.length} images</div>
+        <div style={{ fontSize:12, fontWeight:700, color:"var(--amber)" }}>🖼 Media Library — {items.length} items</div>
         <button onClick={() => setOpen(false)} style={{ background:"transparent", border:"none", color:"var(--muted)", fontSize:16, cursor:"pointer", padding:2, lineHeight:1 }}>✕</button>
       </div>
 
@@ -8380,11 +8393,18 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
       ) : (
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(90px,1fr))", gap:8, maxHeight:260, overflow:"auto" }}>
           {filtered.map(item => (
-            <div key={item.id} onClick={() => { onSelect(item.url || item.dataUrl); setOpen(false); }}
+            <div key={item.id} onClick={() => { onSelect(item.url || item.dataUrl, item.mediaType || "image"); setOpen(false); }}
               style={{ position:"relative", borderRadius:8, overflow:"hidden", border:"1px solid var(--border)", cursor:"pointer", aspectRatio:"1" }}
               onMouseEnter={e=>{ e.currentTarget.style.borderColor="var(--amber)"; e.currentTarget.querySelector(".overlay").style.opacity="1"; }}
               onMouseLeave={e=>{ e.currentTarget.style.borderColor="var(--border)"; e.currentTarget.querySelector(".overlay").style.opacity="0"; }}>
-              <img src={item.url || item.dataUrl} alt={item.name} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+              {item.mediaType === "video" ? (
+                <video src={item.url || item.dataUrl} muted style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+              ) : (
+                <img src={item.url || item.dataUrl} alt={item.name} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+              )}
+              {item.mediaType === "video" && (
+                <div style={{ position:"absolute", top:4, right:4, fontSize:9, fontWeight:700, color:"#fff", background:"rgba(0,0,0,0.6)", padding:"2px 5px", borderRadius:4 }}>▶ VIDEO</div>
+              )}
               <div className="overlay" style={{ position:"absolute", inset:0, background:"rgba(196,124,43,0.8)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"#0e0f11", opacity:0, transition:"opacity 0.15s" }}>
                 Use This
               </div>
@@ -8394,7 +8414,7 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
       )}
 
       <div style={{ fontSize:10, color:"var(--muted)", marginTop:10, lineHeight:1.5 }}>
-        Click any image to use it. Add more in Marketing → Media Library.
+        Click any item to use it. Add more in Marketing → Media Library.
       </div>
     </div>
   );
