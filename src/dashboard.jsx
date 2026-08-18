@@ -10199,29 +10199,25 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
   useEffect(() => {
     setLoadErr("");
     setDataUrl(null);
-    console.log("[overlay] loading image:", imageUrl);
     (async () => {
       try {
-        if (imageUrl.startsWith("data:")) { console.log("[overlay] already a data: URL, using directly"); setDataUrl(imageUrl); return; }
+        if (imageUrl.startsWith("data:")) { setDataUrl(imageUrl); return; }
 
         // Try fetch with no-cors handling
         try {
           const res  = await fetch(imageUrl, { mode: "cors", credentials: "omit" });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const blob = await res.blob();
-          console.log("[overlay] fetched via CORS fetch, blob size:", blob.size, "type:", blob.type);
           const reader = new FileReader();
-          reader.onload = e => { console.log("[overlay] converted to data: URL, length:", e.target.result?.length); setDataUrl(e.target.result); };
+          reader.onload = e => setDataUrl(e.target.result);
           reader.onerror = () => setLoadErr("Could not read the fetched image data.");
           reader.readAsDataURL(blob);
         } catch(fetchErr) {
-          console.log("[overlay] CORS fetch failed, falling back to <img> element:", fetchErr.message);
           // Fetch failed (CORS) — load via Image element instead
           // Canvas will be tainted but we can still display it
           const img = new Image();
           img.crossOrigin = "anonymous";
           img.onload = () => {
-            console.log("[overlay] fallback <img> loaded, natural size:", img.naturalWidth, "x", img.naturalHeight);
             const canvas = document.createElement("canvas");
             canvas.width  = img.naturalWidth;
             canvas.height = img.naturalHeight;
@@ -10229,32 +10225,28 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
               canvas.getContext("2d").drawImage(img, 0, 0);
               setDataUrl(canvas.toDataURL("image/png"));
             } catch(taintErr) {
-              console.log("[overlay] canvas tainted, using raw URL directly:", taintErr.message);
               // Canvas tainted — just use the URL directly for display
               setDataUrl(imageUrl);
             }
           };
-          img.onerror = () => { console.log("[overlay] fallback <img> also failed to load"); setLoadErr("Could not load image — try downloading it first and re-uploading."); };
+          img.onerror = () => setLoadErr("Could not load image — try downloading it first and re-uploading.");
           img.src = imageUrl + "?_=" + Date.now(); // cache bust
         }
-      } catch(e) { console.log("[overlay] load step threw:", e.message); setLoadErr("Could not load image: " + e.message); }
+      } catch(e) { setLoadErr("Could not load image: " + e.message); }
     })();
   }, [imageUrl]);
 
   // Draw whenever dataUrl, layers, filter, or canvas element changes
   useEffect(() => {
     if (!dataUrl || !canvasEl) return;
-    console.log("[overlay] drawing to canvas, dataUrl length:", dataUrl.length, "filter:", activeFilterCss);
     const img = new Image();
     img.onload = () => {
-      console.log("[overlay] draw-image loaded, size:", img.width, "x", img.height);
       const ctx = canvasEl.getContext("2d");
 
-      // Cap the canvas's actual rendering resolution — there's no reason to
-      // keep a multi-megapixel bitmap in memory to display at ~500px, and
-      // very large canvases (this one was 3729x3217, ~12MP) are a known class
-      // of silent rendering failure on some browsers/GPUs even when the CSS
-      // box itself is small and correctly styled.
+      // Cap the canvas's actual rendering resolution — no reason to keep a
+      // multi-megapixel bitmap in memory for on-screen display, and very
+      // large canvases are a known class of silent rendering failure on some
+      // browsers/GPUs.
       const MAX_DIM = 1600;
       let targetW = img.width, targetH = img.height;
       if (targetW > MAX_DIM || targetH > MAX_DIM) {
@@ -10262,13 +10254,11 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
         targetW = Math.round(targetW * scale);
         targetH = Math.round(targetH * scale);
       }
-      console.log("[overlay] capping canvas resolution to:", targetW, "x", targetH, "(was", img.width, "x", img.height, ")");
       canvasEl.width  = targetW;
       canvasEl.height = targetH;
       ctx.filter = activeFilterCss;
       ctx.drawImage(img, 0, 0, targetW, targetH);
       ctx.filter = "none"; // never let the image filter bleed into the text layers
-      console.log("[overlay] base image drawn, now drawing", layers.length, "text layer(s)");
 
       for (const l of layers) {
         if (!l.text.trim()) continue;
@@ -10296,39 +10286,18 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
       }
 
       // Explicitly size the canvas's DISPLAY box in pixels, measured from the
-      // wrapper's actual rendered width — sidesteps whatever CSS percentage/
-      // auto-sizing ambiguity in the ancestor chain was collapsing width:100%
-      // down to a 2x2px box (confirmed via diagnostics: intrinsic bitmap was a
-      // correct 1231x1231, but the CSS-computed display size was only 2x2px).
-      const wrapperWidth = wrapperRef.current?.getBoundingClientRect().width || 600;
+      // wrapper's actual rendered width (now the full panel width, since the
+      // panel was restructured to no longer be squeezed into a narrow column).
+      const wrapperWidth = wrapperRef.current?.getBoundingClientRect().width || 700;
       const aspect = img.height / img.width;
-      const maxH = window.innerHeight * 0.7;
+      const maxH = window.innerHeight * 0.8;
       let displayW = wrapperWidth;
       let displayH = displayW * aspect;
       if (displayH > maxH) { displayH = maxH; displayW = displayH / aspect; }
       canvasEl.style.width  = `${displayW}px`;
       canvasEl.style.height = `${displayH}px`;
-      console.log("[overlay] explicitly sized canvas display box to:", displayW, "x", displayH, "(wrapper measured width:", wrapperWidth, ")");
-
-      // Unmistakable visual marker — if this red square isn't visible either,
-      // that conclusively rules out anything about the photo/drawImage content
-      // and points at something more fundamental (stacking/covering/rendering).
-      const markerCtx = canvasEl.getContext("2d");
-      markerCtx.fillStyle = "#ff0000";
-      markerCtx.fillRect(0, 0, 40, 40);
-
-      // Log the ACTUAL on-screen box the browser is rendering this canvas at —
-      // tells us definitively whether this is a sizing issue (0 width/height),
-      // a positioning issue (off-screen coordinates), or something else.
-      setTimeout(() => {
-        const rect = canvasEl.getBoundingClientRect();
-        const cs = window.getComputedStyle(canvasEl);
-        console.log("[overlay] canvas on-screen rect:", JSON.stringify(rect));
-        console.log("[overlay] canvas computed style — display:", cs.display, "visibility:", cs.visibility, "opacity:", cs.opacity, "width:", cs.width, "height:", cs.height);
-        console.log("[overlay] canvas intrinsic size (pixels):", canvasEl.width, "x", canvasEl.height);
-      }, 0);
     };
-    img.onerror = () => { console.log("[overlay] draw-image FAILED to load — this is why the canvas is blank"); setLoadErr("The image data couldn't be drawn — try re-selecting the image or downloading and re-uploading it."); };
+    img.onerror = () => setLoadErr("The image data couldn't be drawn — try re-selecting the image or downloading and re-uploading it.");
     img.src = dataUrl;
   }, [dataUrl, layers, canvasEl, activeFilterCss]);
 
