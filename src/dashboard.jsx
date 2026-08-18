@@ -8813,25 +8813,29 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
       await Promise.all(fbMetrics.map(async ({ metric, period }) => {
         try {
           const res  = await fetch(
-            `https://graph.facebook.com/v19.0/${pageId}/insights?metric=${metric}&period=${period}&access_token=${token}`
+            `https://graph.facebook.com/v25.0/${pageId}/insights?metric=${metric}&period=${period}&access_token=${token}`
           );
           const data = await res.json();
-          if (!data.error && data.data?.length) {
+          if (data.error) {
+            console.error(`[fetchSocialInsights] Facebook metric "${metric}" failed:`, data.error.message || data.error);
+          } else if (data.data?.length) {
             const vals = data.data[0]?.values;
             results.facebook[metric] = vals?.[vals.length - 1]?.value ?? null;
           }
-        } catch {}
+        } catch(e) { console.error(`[fetchSocialInsights] Facebook metric "${metric}" fetch threw:`, e.message); }
       }));
 
       // Also get page fan count directly (more reliable)
       try {
-        const fanRes  = await fetch(`https://graph.facebook.com/v19.0/${pageId}?fields=fan_count,followers_count&access_token=${token}`);
+        const fanRes  = await fetch(`https://graph.facebook.com/v25.0/${pageId}?fields=fan_count,followers_count&access_token=${token}`);
         const fanData = await fanRes.json();
-        if (!fanData.error) {
+        if (fanData.error) {
+          console.error("[fetchSocialInsights] Facebook fan_count fetch failed:", fanData.error.message || fanData.error);
+        } else {
           if (fanData.fan_count       != null) results.facebook.page_fans      = fanData.fan_count;
           if (fanData.followers_count != null) results.facebook.followers_count = fanData.followers_count;
         }
-      } catch {}
+      } catch(e) { console.error("[fetchSocialInsights] Facebook fan_count fetch threw:", e.message); }
 
       // Instagram — get follower count from account endpoint, insights from insights
       if (igId) {
@@ -8839,28 +8843,32 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
 
         // Follower count from IG account directly
         try {
-          const igAccRes  = await fetch(`https://graph.facebook.com/v19.0/${igId}?fields=followers_count,media_count,name,username&access_token=${token}`);
+          const igAccRes  = await fetch(`https://graph.facebook.com/v25.0/${igId}?fields=followers_count,media_count,name,username&access_token=${token}`);
           const igAccData = await igAccRes.json();
-          if (!igAccData.error) {
+          if (igAccData.error) {
+            console.error("[fetchSocialInsights] Instagram account fetch failed:", igAccData.error.message || igAccData.error);
+          } else {
             if (igAccData.followers_count != null) results.instagram.follower_count = igAccData.followers_count;
             if (igAccData.media_count     != null) results.instagram.media_count    = igAccData.media_count;
           }
-        } catch {}
+        } catch(e) { console.error("[fetchSocialInsights] Instagram account fetch threw:", e.message); }
 
         // IG insights
         try {
           // NOTE: "impressions" was deprecated by Meta in favor of "views"
           const igRes  = await fetch(
-            `https://graph.facebook.com/v19.0/${igId}/insights?metric=views,reach,profile_views&period=week&access_token=${token}`
+            `https://graph.facebook.com/v25.0/${igId}/insights?metric=views,reach,profile_views&period=week&access_token=${token}`
           );
           const igData = await igRes.json();
-          if (!igData.error) {
+          if (igData.error) {
+            console.error("[fetchSocialInsights] Instagram insights fetch failed:", igData.error.message || igData.error);
+          } else {
             (igData.data || []).forEach(m => {
               const vals = m.values;
               results.instagram[m.name] = vals?.[vals.length - 1]?.value ?? null;
             });
           }
-        } catch {}
+        } catch(e) { console.error("[fetchSocialInsights] Instagram insights fetch threw:", e.message); }
       }
 
       // Only set insights if we got some data
@@ -8868,7 +8876,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
       const hasIGData = Object.values(results.instagram || {}).some(v => v != null);
 
       if (!hasFBData && !hasIGData) {
-        setInsightError("No data returned — your Facebook Page may need 'Insights' permission or have insufficient activity. Make sure you're connected as a Page Admin.");
+        setInsightError("No data returned from Meta — check the browser console for the specific API error (could be a permissions issue, an expired token, or a Graph API metric/version change). Try reconnecting in Settings → Meta if reconnecting doesn't help.");
       } else {
         setSocialInsights(results);
       }
