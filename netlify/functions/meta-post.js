@@ -21,7 +21,7 @@ export default async (req) => {
     return new Response(JSON.stringify({ error: "Invalid JSON" }), { status: 400, headers: CORS });
   }
 
-  const { pageId, pageToken, instagramId, message, imageUrl, link, platforms = ["facebook"] } = body;
+  const { pageId, pageToken, instagramId, message, imageUrl, mediaType = "image", link, platforms = ["facebook"] } = body;
   const results = {};
 
   // Convert data: or blob: URLs to a real hosted https:// URL via Netlify Blobs
@@ -31,7 +31,7 @@ export default async (req) => {
     
     // Extract base64 data from data: URL
     let dataUrl = url;
-    const match = dataUrl.match(/^data:(image\/\w+);base64,(.+)$/);
+    const match = dataUrl.match(/^data:(image\/\w+|video\/\w+);base64,(.+)$/);
     if (!match) throw new Error(`Cannot convert URL to public format: ${url.slice(0, 60)}`);
     
     const mimeType = match[1];
@@ -48,7 +48,21 @@ export default async (req) => {
   // ── POST TO FACEBOOK PAGE ──────────────────────────────────────────────────
   if (platforms.includes("facebook") && pageId && pageToken) {
     try {
-      if (imageUrl) {
+      if (imageUrl && mediaType === "video") {
+        // Video posts use the /videos endpoint with file_url (Facebook fetches
+        // and processes the video server-side after accepting the post — this
+        // doesn't block the API response the way Instagram's container model
+        // does, so no polling needed here).
+        const publicUrl = await ensurePublicUrl(imageUrl);
+        const res = await fetch(`https://graph.facebook.com/v25.0/${pageId}/videos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file_url: publicUrl, description: message, access_token: pageToken }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(`Facebook: ${data.error.message} (code ${data.error.code})`);
+        results.facebook = { success: true, id: data.id };
+      } else if (imageUrl) {
         const publicUrl = await ensurePublicUrl(imageUrl);
         const res = await fetch(`https://graph.facebook.com/v25.0/${pageId}/photos`, {
           method: "POST",
@@ -76,8 +90,9 @@ export default async (req) => {
   // ── POST TO INSTAGRAM ──────────────────────────────────────────────────────
   if (platforms.includes("instagram") && instagramId && pageToken) {
     try {
-      if (!imageUrl) throw new Error("Instagram requires an image — generate one first.");
+      if (!imageUrl) throw new Error("Instagram requires an image or video — generate/select one first.");
       if (instagramId === pageId) throw new Error("instagramId appears to be the same as pageId — check Settings → Facebook & Instagram.");
+      if (mediaType === "video") throw new Error("Video posts to Instagram should use /api/meta-video-post (video processing takes too long for this endpoint) — this is a client-side routing bug if you're seeing this.");
 
       const publicUrl = await ensurePublicUrl(imageUrl);
       console.log("Instagram posting with URL:", publicUrl?.slice(0, 80));

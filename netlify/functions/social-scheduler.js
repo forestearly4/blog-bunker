@@ -26,12 +26,14 @@ async function ensurePublicImageUrl(imageUrl) {
   return `https://blogbunker.netlify.app/api/get-image?id=${id}`;
 }
 
-async function postToFacebook(page, fullMessage, imageUrl) {
+async function postToFacebook(page, fullMessage, imageUrl, mediaType = "image") {
   const endpoint = imageUrl
-    ? `https://graph.facebook.com/v25.0/${page.id}/photos`
+    ? `https://graph.facebook.com/v25.0/${page.id}/${mediaType === "video" ? "videos" : "photos"}`
     : `https://graph.facebook.com/v25.0/${page.id}/feed`;
   const body = imageUrl
-    ? { url: imageUrl, caption: fullMessage, access_token: page.access_token }
+    ? (mediaType === "video"
+        ? { file_url: imageUrl, description: fullMessage, access_token: page.access_token }
+        : { url: imageUrl, caption: fullMessage, access_token: page.access_token })
     : { message: fullMessage, access_token: page.access_token };
   const res  = await fetch(endpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
   const data = await res.json();
@@ -39,8 +41,22 @@ async function postToFacebook(page, fullMessage, imageUrl) {
   return data.id;
 }
 
-async function postToInstagram(page, fullMessage, imageUrl) {
-  if (!imageUrl) throw new Error("Instagram requires a public image URL");
+async function postToInstagram(page, fullMessage, imageUrl, mediaType = "image") {
+  if (!imageUrl) throw new Error("Instagram requires a public image or video URL");
+
+  if (mediaType === "video") {
+    // Video needs the background-job flow (processing can take minutes) —
+    // this cron function shouldn't block waiting on it. Fire it off and let
+    // it run; the post is marked as "processing" and will need a follow-up
+    // check (not yet automated — see meta-video-post-status.js for manual checks).
+    const jobId = `vidpost_sched_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+    await fetch("https://blogbunker.netlify.app/api/meta-video-post", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ jobId, instagramId: page.instagram_id, pageToken: page.access_token, message: fullMessage, videoUrl: imageUrl }),
+    });
+    throw new Error(`Video posting started (job ${jobId}) — Instagram video processing takes a few minutes and isn't fully automated for scheduled posts yet. Check back or post manually if it doesn't appear.`);
+  }
+
   const cRes  = await fetch(`https://graph.facebook.com/v25.0/${page.instagram_id}/media`, {
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({ image_url: imageUrl, caption: fullMessage, access_token: page.access_token }),
@@ -142,14 +158,14 @@ export default async () => {
             const fullMessage = [caption, hashtagsForPlat].filter(Boolean).join("\n\n").trim();
 
             if (platId === "facebook" && metaConfig?.pages?.length > 0) {
-              const id = await postToFacebook(metaConfig.pages[0], fullMessage, imageUrl);
+              const id = await postToFacebook(metaConfig.pages[0], fullMessage, imageUrl, post.mediaType);
               results[platId] = { success: true, id };
               published++;
               console.log(`[scheduler] ✓ Facebook: ${id}`);
 
             } else if (platId === "instagram" && metaConfig?.pages?.some(p => p.instagram_id)) {
               const page = metaConfig.pages.find(p => p.instagram_id);
-              const id   = await postToInstagram(page, fullMessage, imageUrl);
+              const id   = await postToInstagram(page, fullMessage, imageUrl, post.mediaType);
               results[platId] = { success: true, id };
               published++;
               console.log(`[scheduler] ✓ Instagram: ${id}`);
@@ -191,6 +207,7 @@ export default async () => {
                   channelId,
                   text:     fullMessage,
                   imageUrl: imageUrl || "",
+                  mediaType: post.mediaType || "image",
                   scheduledAt: post.scheduledAt,
                   pinterestBoardId: platId === "pinterest" ? bufferConfig?.boardMapping?.[channelId] : undefined,
                 }),

@@ -86,7 +86,7 @@ export default async (req) => {
   try { body = await req.json(); }
   catch { return new Response(JSON.stringify({ error:"Invalid JSON" }), { status: 400, headers: CORS }); }
 
-  const { apiKey, action, channelId, text, imageUrl, scheduledAt, organizationId, pinterestBoardId } = body;
+  const { apiKey, action, channelId, text, imageUrl, mediaType = "image", scheduledAt, organizationId, pinterestBoardId } = body;
 
   if (!apiKey) return new Response(JSON.stringify({ error:"apiKey required" }), { status: 400, headers: CORS });
 
@@ -119,7 +119,7 @@ export default async (req) => {
 
       // Per Buffer schema (May 2026): assets is required, even if empty
       const assets = imageUrl?.startsWith("https://")
-        ? [{ image: { url: imageUrl } }]
+        ? [mediaType === "video" ? { video: { url: imageUrl } } : { image: { url: imageUrl } }]
         : [];
       const input = {
         channelId,
