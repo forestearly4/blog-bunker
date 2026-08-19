@@ -4626,17 +4626,41 @@ async function ensurePublicImageUrl(imageUrl) {
   return data.url;
 }
 
-async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, link, platforms }) {
+async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, mediaType = "image", link, platforms }) {
   let finalImageUrl = imageUrl;
   // Any blob: or data: URL must be uploaded to get a public https:// URL
   // before sending to meta-post.js (server can't fetch browser-local URLs)
   if (imageUrl && (imageUrl.startsWith("blob:") || imageUrl.startsWith("data:"))) {
     finalImageUrl = await ensurePublicImageUrl(imageUrl);
   }
+
+  // Instagram video needs the background-job flow — video processing can take
+  // several minutes, too long for a normal request/response cycle. Facebook
+  // video is handled synchronously server-side (Facebook doesn't block on
+  // processing the way Instagram's container model does).
+  if (mediaType === "video" && platforms.includes("instagram") && platforms.length === 1) {
+    const jobId = `vidpost_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+    await fetch("/api/meta-video-post", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ jobId, instagramId, pageToken, message, videoUrl: finalImageUrl }),
+    });
+    // Poll for completion — up to ~13 minutes, matching the background function's own budget
+    for (let i = 0; i < 100; i++) {
+      await new Promise(r => setTimeout(r, 8000));
+      const statusRes  = await fetch(`/api/meta-video-post-status?jobId=${jobId}`);
+      const statusData = await statusRes.json();
+      if (statusData.status === "success") return { instagram: { success:true, id: statusData.id } };
+      if (statusData.status === "error")   return { instagram: { success:false, error: statusData.error } };
+      // still processing — keep polling
+    }
+    return { instagram: { success:false, error: "Instagram video processing took too long — try again, or check the video isn't unusually large." } };
+  }
+
   const res = await fetch("/api/meta-post", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pageId, pageToken, instagramId, message, imageUrl: finalImageUrl, link, platforms }),
+    body: JSON.stringify({ pageId, pageToken, instagramId, message, imageUrl: finalImageUrl, mediaType, link, platforms }),
   });
   return await res.json();
 }
@@ -4667,7 +4691,7 @@ function MetaConnectPanel({ onConnected }) {
     if (!appId) { setLog("Paste your Meta App ID first."); return; }
     const redirectUri = "https://blogbunker.netlify.app/api/meta-callback";
     // Use only scopes valid for Pages + Instagram content management use cases
-    const scope = "pages_show_list,pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish,business_management";
+    const scope = "pages_show_list,pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish,instagram_manage_insights,business_management";
     const authUrl = `https://www.facebook.com/dialog/oauth?client_id=${appId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&response_type=code`;
     setLog("Opening Facebook authorization…");
     const popup = window.open(authUrl, "meta_auth", "width=650,height=700,scrollbars=yes");
@@ -6008,14 +6032,15 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
           const page = metaConfig.pages[0];
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: imageData.url, platforms: ["facebook"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: imageData.url, mediaType: imageData.mediaType, platforms: ["facebook"] });
           if (!res.facebook?.success) throw new Error(res.facebook?.error || "Facebook post failed");
           results[plat.id] = { success: true, message: "✓ Posted to Facebook" };
 
         } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
-          if (!imageData.url) throw new Error("Instagram requires an image");
+          if (!imageData.url) throw new Error("Instagram requires an image or video");
           const page = metaConfig.pages.find(p => p.instagram_id);
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: imageData.url, platforms: ["instagram"] });
+          if (imageData.mediaType === "video") setLoadMsg(`Uploading video to Instagram — this can take a few minutes while Instagram processes it…`);
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: imageData.url, mediaType: imageData.mediaType, platforms: ["instagram"] });
           if (!res.instagram?.success) throw new Error(res.instagram?.error || "Instagram post failed");
           results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
 
@@ -6045,6 +6070,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               channelId,
               text:      fullMessage,
               imageUrl:  publicImageUrl || "",
+              mediaType: imageData.mediaType || "image",
               scheduledAt: null,
               pinterestBoardId: plat.id === "pinterest" ? bufferCfg.boardMapping?.[channelId] : undefined,
             }),
@@ -7413,11 +7439,11 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
           const page = metaConfig.pages[0];
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: publicImageUrl, platforms: ["facebook"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: publicImageUrl, mediaType: post.mediaType, platforms: ["facebook"] });
           results[plat.id] = res.facebook?.success ? "✓ Posted" : `Error: ${res.facebook?.error}`;
         } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
           const page = metaConfig.pages.find(p => p.instagram_id);
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: publicImageUrl, platforms: ["instagram"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: publicImageUrl, mediaType: post.mediaType, platforms: ["instagram"] });
           results[plat.id] = res.instagram?.success ? "✓ Posted" : `Error: ${res.instagram?.error}`;
         } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
           if (!tierConfig.buffer) {
@@ -7436,6 +7462,7 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
               channelId,
               text:        fullMessage,
               imageUrl:    publicImageUrl || "",
+              mediaType:   post.mediaType || "image",
               scheduledAt: null,
               pinterestBoardId: plat.id === "pinterest" ? bufferCfg.boardMapping?.[channelId] : undefined,
             }),
