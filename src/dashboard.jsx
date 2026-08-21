@@ -3019,7 +3019,7 @@ function clearPipelineDraft() {
   try { localStorage.removeItem(PIPELINE_STORAGE); } catch {}
 }
 
-function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null, initialPost = null, onConsumedInitialPost = null, onSendToSocialPipeline = null }) {
+function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null, initialPost = null, onConsumedInitialPost = null, onSendToSocialPipeline = null, onNavigateToTab = null, onNavigateToPosts = null }) {
   const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
   const saved = loadPipelineDraft();
   const [stage,     setStage]    = useState(saved?.stage     || "brief");
@@ -3435,6 +3435,20 @@ Titles and descriptions MUST be under their character limits. Score each on: key
       {/* ── STAGE 1: BRIEF ── */}
       {stage === "brief" && (
         <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+          {/* Content Multiplier intro — sets the value prop up front */}
+          <div style={{ background:"linear-gradient(135deg, var(--amber-glow), transparent)", border:"1px solid var(--amber)44", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)", marginBottom:8 }}>✦ Write once. Publish everywhere.</div>
+            <div style={{ display:"flex", gap:20, flexWrap:"wrap", fontSize:12, color:"var(--text-secondary)" }}>
+              <span>📝 <strong style={{color:"var(--text)"}}>1</strong> blog post</span>
+              <span>→</span>
+              <span>🔗 smart internal &amp; external links</span>
+              <span>→</span>
+              <span>📣 captions for every platform you post to</span>
+              <span>→</span>
+              <span>🌐 published straight to WordPress</span>
+            </div>
+          </div>
+
           <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
             <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 16px" }}>What are you writing about?</h3>
             <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -3881,7 +3895,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:24 }}>{success}</p>
               <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
                 <button onClick={resetPipeline} style={btnA}>Start New Post</button>
-                <button onClick={()=>{ resetPipeline(); /* navigate to posts — handled by parent */; document.querySelector('[data-tab="posts"]')?.click(); }} style={btnS}>View in Posts →</button>
+                <button onClick={()=>{ resetPipeline(); onNavigateToPosts?.(); }} style={btnS}>View in Posts →</button>
                 <button onClick={()=>setStage("draft")} style={btnS}>Back to Draft</button>
               </div>
             </div>
@@ -3890,18 +3904,36 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
                 <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 20px" }}>Schedule & Publish</h3>
 
-                {/* Summary */}
-                <div style={{ padding:16, borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", marginBottom:20 }}>
-                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Post Summary</div>
-                  <div style={{ fontFamily:"var(--font-display)", fontSize:16, fontWeight:700, marginBottom:4 }}>{enhance.metaTitle || draft.title}</div>
-                  <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:8 }}>{enhance.metaDescription}</div>
-                  <div style={{ display:"flex", gap:12, fontSize:11, color:"var(--muted)" }}>
-                    <span>◈ {draft.category}</span>
-                    <span>▤ {draft.body.split(" ").filter(Boolean).length} words</span>
-                    {enhance.primaryKeyword && <span>🔑 {enhance.primaryKeyword}</span>}
-                    {Object.keys(social.posts).length > 0 && <span>◈ {Object.keys(social.posts).length} social posts ready</span>}
-                  </div>
-                </div>
+                {/* Content Multiplier summary — everything built from this one article */}
+                {(() => {
+                  const linkCount = (draft.body.match(/\[([^\]]+)\]\(([^)]+)\)/g) || []).length;
+                  const socialCount = Object.keys(social.posts).length;
+                  const wpConnected = loadWordPressConfig().connected;
+                  return (
+                    <div style={{ padding:16, borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", marginBottom:20 }}>
+                      <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>✦ From This One Article</div>
+                      <div style={{ fontFamily:"var(--font-display)", fontSize:16, fontWeight:700, marginBottom:4 }}>{enhance.metaTitle || draft.title}</div>
+                      <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:14 }}>{enhance.metaDescription}</div>
+                      <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                        <div style={{ fontSize:12, color:"var(--text)" }}>
+                          ✓ <strong>{draft.body.split(" ").filter(Boolean).length} words</strong> in {draft.category}{enhance.primaryKeyword ? ` · targeting "${enhance.primaryKeyword}"` : ""}
+                        </div>
+                        <div style={{ fontSize:12, color: linkCount > 0 ? "var(--text)" : "var(--muted)" }}>
+                          {linkCount > 0 ? "✓" : "○"} <strong>{linkCount}</strong> internal/external link{linkCount === 1 ? "" : "s"} found &amp; inserted
+                          {linkCount === 0 && <button onClick={()=>setStage("draft")} style={{ marginLeft:8, fontSize:11, background:"none", border:"none", color:"var(--amber)", cursor:"pointer", textDecoration:"underline" }}>find some →</button>}
+                        </div>
+                        <div style={{ fontSize:12, color: socialCount > 0 ? "var(--text)" : "var(--muted)" }}>
+                          {socialCount > 0 ? "✓" : "○"} <strong>{socialCount}</strong> platform caption{socialCount === 1 ? "" : "s"} ready to post
+                          {socialCount === 0 && <button onClick={()=>setStage("social")} style={{ marginLeft:8, fontSize:11, background:"none", border:"none", color:"var(--amber)", cursor:"pointer", textDecoration:"underline" }}>generate some →</button>}
+                        </div>
+                        <div style={{ fontSize:12, color: wpConnected ? "var(--text)" : "var(--muted)" }}>
+                          {wpConnected ? "✓" : "○"} WordPress {wpConnected ? "connected — publish below" : "not connected"}
+                          {!wpConnected && <button onClick={()=>onNavigateToTab?.("settings")} style={{ marginLeft:8, fontSize:11, background:"none", border:"none", color:"var(--amber)", cursor:"pointer", textDecoration:"underline" }}>connect it →</button>}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:20 }}>
                   <div>
@@ -3981,6 +4013,99 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                       </button>
                     </div>
                   </div>
+
+                  {(() => {
+                    const wpConfig = loadWordPressConfig();
+                    return (
+                      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+                          🌐 Publish to WordPress
+                        </div>
+                        {wpConfig.connected ? (
+                          <>
+                            <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 10px", lineHeight:1.6 }}>
+                              Publishes directly to {wpConfig.siteUrl} — with your headline image, formatting, and links, no copy-paste needed. Publishing again after edits updates the same post instead of duplicating it.
+                            </p>
+                            <button onClick={async () => {
+                              setLoading(true); setError(""); setSuccess(""); setLoadMsg("Publishing to WordPress…");
+                              try {
+                                let featuredMediaId = null;
+                                if (draft.headlineImageUrl) {
+                                  setLoadMsg("Uploading featured image…");
+                                  const mediaRes = await fetch("/api/wordpress-post", {
+                                    method:"POST", headers:{"Content-Type":"application/json"},
+                                    body: JSON.stringify({ action:"uploadMedia", ...wpConfig, imageUrl: draft.headlineImageUrl, filename: `${(draft.title||"headline").slice(0,40).replace(/[^a-z0-9]+/gi,"-")}.jpg` }),
+                                  });
+                                  const mediaData = await mediaRes.json();
+                                  if (mediaData.error) throw new Error(`Featured image: ${mediaData.error}`);
+                                  featuredMediaId = mediaData.mediaId;
+                                }
+
+                                const existingWpPostId = posts.find(p => p.id === pipelinePostId)?.wpPostId;
+                                const statusMap = { published:"publish", draft:"draft", scheduled:"future" };
+                                const wpStatus = statusMap[schedule.status] || "draft";
+                                const dateIso = schedule.status === "scheduled" && schedule.publishDate
+                                  ? new Date(`${schedule.publishDate}T${schedule.publishTime || "09:00"}`).toISOString()
+                                  : undefined;
+
+                                setLoadMsg(existingWpPostId ? "Updating post…" : "Publishing post…");
+                                const res = await fetch("/api/wordpress-post", {
+                                  method:"POST", headers:{"Content-Type":"application/json"},
+                                  body: JSON.stringify({
+                                    action: existingWpPostId ? "updatePost" : "createPost",
+                                    ...wpConfig,
+                                    postId: existingWpPostId,
+                                    title: enhance.metaTitle || draft.title,
+                                    contentHtml: markdownToHtml(draft.body),
+                                    status: wpStatus,
+                                    featuredMediaId,
+                                    date: dateIso,
+                                  }),
+                                });
+                                const data = await res.json();
+                                if (data.error) throw new Error(data.error);
+
+                                const finalPost = {
+                                  id: pipelinePostId || Date.now(),
+                                  title: enhance.metaTitle || draft.title,
+                                  body: draft.body,
+                                  category: draft.category,
+                                  status: schedule.status || "draft",
+                                  date: schedule.publishDate || new Date().toISOString().split("T")[0],
+                                  views: 0,
+                                  metaTitle: enhance.metaTitle,
+                                  metaDescription: enhance.metaDescription,
+                                  primaryKeyword: enhance.primaryKeyword,
+                                  url: data.url || posts.find(p => p.id === pipelinePostId)?.url || "",
+                                  headlineImageUrl: draft.headlineImageUrl || posts.find(p => p.id === pipelinePostId)?.headlineImageUrl || "",
+                                  wpPostId: data.postId,
+                                  wpUrl: data.url,
+                                };
+                                onSavePost(finalPost);
+                                if (schedule.addToCalendar) {
+                                  const day = new Date(finalPost.date).getDate();
+                                  onAddCalEvent({ title: finalPost.title, type: finalPost.status, day });
+                                }
+                                markDone("publish");
+                                setSuccess(`✓ ${existingWpPostId ? "Updated" : "Published"} on WordPress — ${data.url}`);
+                              } catch(e) {
+                                setError(`WordPress: ${e.message}`);
+                              }
+                              setLoading(false); setLoadMsg("");
+                            }}
+                              disabled={loading || !draft.title.trim()}
+                              style={{ padding:"8px 16px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":"#21759b", color:loading?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+                              {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg || "Publishing…"}</> : "🌐 Publish to WordPress"}
+                            </button>
+                          </>
+                        ) : (
+                          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+                            Connect your WordPress site in <strong>Settings → WordPress</strong> to publish directly instead of copy-pasting.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -4691,7 +4816,7 @@ function MetaConnectPanel({ onConnected }) {
     if (!appId) { setLog("Paste your Meta App ID first."); return; }
     const redirectUri = "https://blogbunker.netlify.app/api/meta-callback";
     // Use only scopes valid for Pages + Instagram content management use cases
-    const scope = "pages_show_list,pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish,instagram_manage_insights,business_management";
+    const scope = "pages_show_list,pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish,business_management";
     const authUrl = `https://www.facebook.com/dialog/oauth?client_id=${appId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&response_type=code`;
     setLog("Opening Facebook authorization…");
     const popup = window.open(authUrl, "meta_auth", "width=650,height=700,scrollbars=yes");
@@ -8847,32 +8972,15 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
       const igId   = page.instagram_id;
       const results = {};
 
-      // Facebook Page insights — use separate calls per metric with correct periods
-      // NOTE: page_fans and page_impressions were deprecated by Meta on Nov 15, 2025
-      // and now return an "invalid metric" 400 error on every API version. page_fans
-      // is covered below via the direct fan_count/followers_count field fetch instead.
-      const fbMetrics = [
-        { metric: "page_post_engagements", period: "week" },
-        { metric: "page_views_total",      period: "week" },
-      ];
-
+      // Deliberately NOT calling the Insights API (page_post_engagements,
+      // page_views_total, IG views/reach/profile_views) — that endpoint needs
+      // special Insights permissions that have been unreliable (deprecated
+      // metrics, missing OAuth scopes, expired API versions across several
+      // rounds of fixes). Simple field fetches below (fan_count,
+      // followers_count) use basic Page/account read access instead, which is
+      // much more reliable, at the cost of not showing deeper engagement
+      // metrics — a deliberate simplification.
       results.facebook = {};
-      await Promise.all(fbMetrics.map(async ({ metric, period }) => {
-        try {
-          const res  = await fetch(
-            `https://graph.facebook.com/v25.0/${pageId}/insights?metric=${metric}&period=${period}&access_token=${token}`
-          );
-          const data = await res.json();
-          if (data.error) {
-            console.error(`[fetchSocialInsights] Facebook metric "${metric}" failed:`, data.error.message || data.error);
-          } else if (data.data?.length) {
-            const vals = data.data[0]?.values;
-            results.facebook[metric] = vals?.[vals.length - 1]?.value ?? null;
-          }
-        } catch(e) { console.error(`[fetchSocialInsights] Facebook metric "${metric}" fetch threw:`, e.message); }
-      }));
-
-      // Also get page fan count directly (more reliable)
       try {
         const fanRes  = await fetch(`https://graph.facebook.com/v25.0/${pageId}?fields=fan_count,followers_count&access_token=${token}`);
         const fanData = await fanRes.json();
@@ -8884,11 +8992,9 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
         }
       } catch(e) { console.error("[fetchSocialInsights] Facebook fan_count fetch threw:", e.message); }
 
-      // Instagram — get follower count from account endpoint, insights from insights
+      // Instagram — follower count only, same reasoning as above
       if (igId) {
         results.instagram = {};
-
-        // Follower count from IG account directly
         try {
           const igAccRes  = await fetch(`https://graph.facebook.com/v25.0/${igId}?fields=followers_count,media_count,name,username&access_token=${token}`);
           const igAccData = await igAccRes.json();
@@ -8899,23 +9005,6 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
             if (igAccData.media_count     != null) results.instagram.media_count    = igAccData.media_count;
           }
         } catch(e) { console.error("[fetchSocialInsights] Instagram account fetch threw:", e.message); }
-
-        // IG insights
-        try {
-          // NOTE: "impressions" was deprecated by Meta in favor of "views"
-          const igRes  = await fetch(
-            `https://graph.facebook.com/v25.0/${igId}/insights?metric=views,reach,profile_views&period=week&access_token=${token}`
-          );
-          const igData = await igRes.json();
-          if (igData.error) {
-            console.error("[fetchSocialInsights] Instagram insights fetch failed:", igData.error.message || igData.error);
-          } else {
-            (igData.data || []).forEach(m => {
-              const vals = m.values;
-              results.instagram[m.name] = vals?.[vals.length - 1]?.value ?? null;
-            });
-          }
-        } catch(e) { console.error("[fetchSocialInsights] Instagram insights fetch threw:", e.message); }
       }
 
       // Only set insights if we got some data
@@ -9246,10 +9335,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                         </div>
                         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
                           {[
-                            { key:"page_fans",             label:"Fans",         icon:"❤" },
-                            { key:"page_impressions",      label:"Impressions",   icon:"👁" },
-                            { key:"page_post_engagements", label:"Engagements",   icon:"💬" },
-                            { key:"page_views_total",      label:"Page Views",    icon:"🔗" },
+                            { key:"page_fans", label:"Fans", icon:"❤" },
                           ].map(({ key, label, icon }) => socialInsights.facebook[key] != null && (
                             <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                               <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:3 }}>{icon} {label}</div>
@@ -9267,10 +9353,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                         </div>
                         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
                           {[
-                            { key:"follower_count", label:"Followers",     icon:"👤" },
-                            { key:"views",          label:"Views",         icon:"👁" },
-                            { key:"reach",          label:"Reach",         icon:"📡" },
-                            { key:"profile_views",  label:"Profile Views", icon:"🔗" },
+                            { key:"follower_count", label:"Followers", icon:"👤" },
                           ].map(({ key, label, icon }) => socialInsights.instagram[key] != null && (
                             <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                               <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:3 }}>{icon} {label}</div>
@@ -9281,27 +9364,6 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                       </div>
                     )}
                   </div>
-
-                  {/* Cross-platform engagement snapshot */}
-                  {(socialInsights.facebook || socialInsights.instagram) && (
-                    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
-                      <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📈 Engagement Breakdown — this week, both platforms</div>
-                      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))", gap:10 }}>
-                        {[
-                          { key:"page_post_engagements", label:"FB Engagements", color:"#1877f2", src:"facebook" },
-                          { key:"page_views_total",       label:"FB Page Views",  color:"#1877f2", src:"facebook" },
-                          { key:"views",                  label:"IG Views",       color:"#e1306c", src:"instagram" },
-                          { key:"reach",                  label:"IG Reach",       color:"#e1306c", src:"instagram" },
-                          { key:"profile_views",          label:"IG Profile Views",color:"#e1306c", src:"instagram" },
-                        ].filter(m => socialInsights[m.src]?.[m.key] != null).map(m => (
-                          <div key={`${m.src}-${m.key}`} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", textAlign:"center" }}>
-                            <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>{m.label}</div>
-                            <div style={{ fontSize:18, fontWeight:700, color:m.color }}>{socialInsights[m.src][m.key]?.toLocaleString?.() ?? socialInsights[m.src][m.key]}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </>
               )}
 
@@ -9927,6 +9989,106 @@ const MOBILE_CSS = `
     .bb-ai-switcher { bottom: 72px !important; right: 12px !important; } /* clear the 56px mobile nav — was overlapping the Settings tab */
   }
 `;
+
+// ─── WORDPRESS SETTINGS ──────────────────────────────────────────────────────
+
+const WORDPRESS_STORAGE = "bb_wordpress_config";
+function loadWordPressConfig() { try { return JSON.parse(localStorage.getItem(WORDPRESS_STORAGE) || "{}"); } catch { return {}; } }
+function saveWordPressConfig(d) {
+  try { localStorage.setItem(WORDPRESS_STORAGE, JSON.stringify(d)); } catch {}
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("wordpress_config", uid, d);
+}
+
+function WordPressSettings() {
+  const [config,      setConfig]      = useState(loadWordPressConfig);
+  const [siteUrl,     setSiteUrl]     = useState(() => loadWordPressConfig().siteUrl || "");
+  const [username,    setUsername]    = useState(() => loadWordPressConfig().username || "");
+  const [appPassword, setAppPassword] = useState(() => loadWordPressConfig().appPassword || "");
+  const [testing,     setTesting]     = useState(false);
+  const [testResult,  setTestResult]  = useState(null); // { success, message }
+  const [saved,       setSaved]       = useState(false);
+
+  const testConnection = async () => {
+    if (!siteUrl.trim() || !username.trim() || !appPassword.trim()) {
+      setTestResult({ success:false, message:"Fill in your site URL, username, and application password first." });
+      return;
+    }
+    setTesting(true); setTestResult(null);
+    try {
+      const res  = await fetch("/api/wordpress-post", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ action:"testConnection", siteUrl: siteUrl.trim(), username: username.trim(), appPassword: appPassword.trim() }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setTestResult({ success:true, message:`✓ Connected as ${data.name}` });
+    } catch(e) {
+      setTestResult({ success:false, message: e.message });
+    }
+    setTesting(false);
+  };
+
+  const save = () => {
+    const cfg = { siteUrl: siteUrl.trim(), username: username.trim(), appPassword: appPassword.trim(), connected: testResult?.success || config.connected };
+    saveWordPressConfig(cfg);
+    setConfig(cfg);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
+
+  return (
+    <div>
+      <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 8px" }}>WordPress</h3>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 20px", lineHeight:1.6 }}>
+        Publish directly to your own WordPress site (self-hosted or WordPress.com Business) right from the Article Pipeline — no copy-paste needed.
+      </p>
+
+      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16, marginBottom:20, fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
+        <strong style={{ color:"var(--text)" }}>You'll need an Application Password</strong> — a feature built into WordPress itself since version 5.6, no plugin required. In your WordPress admin, go to <strong>Users → Profile</strong>, scroll to <strong>Application Passwords</strong>, give it a name like "Blog Bunker", and click Add. Use the generated password below — <em>not</em> your regular login password.
+      </div>
+
+      <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Site URL</label>
+          <input style={iS} placeholder="yourblog.com" value={siteUrl} onChange={e=>setSiteUrl(e.target.value)} />
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>WordPress Username</label>
+          <input style={iS} placeholder="your-username" value={username} onChange={e=>setUsername(e.target.value)} />
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Application Password</label>
+          <input style={iS} type="password" placeholder="xxxx xxxx xxxx xxxx xxxx xxxx" value={appPassword} onChange={e=>setAppPassword(e.target.value)} />
+        </div>
+
+        {testResult && (
+          <div style={{ padding:"10px 14px", borderRadius:8, fontSize:12, background: testResult.success ? "#5cba6c11" : "var(--red)11", border: `1px solid ${testResult.success ? "#5cba6c33" : "var(--red)33"}`, color: testResult.success ? "#5cba6c" : "var(--red)" }}>
+            {testResult.message}
+          </div>
+        )}
+
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={testConnection} disabled={testing}
+            style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor: testing ? "not-allowed" : "pointer", fontFamily:"'DM Sans',sans-serif" }}>
+            {testing ? "Testing…" : "Test Connection"}
+          </button>
+          <button onClick={save}
+            style={{ padding:"9px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+            {saved ? "✓ Saved" : "Save"}
+          </button>
+        </div>
+
+        {config.connected && (
+          <div style={{ fontSize:12, color:"#5cba6c" }}>✓ WordPress is connected — a "🌐 Publish to WordPress" option is now available in the Article Pipeline's Publish stage.</div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // ─── BUFFER SETTINGS ─────────────────────────────────────────────────────────
 
@@ -11776,6 +11938,7 @@ export default function Dashboard({ user, workspace }) {
   };
 
   const saveCalEvent = (ev) => setCalEvents(all => [...all, ev]);
+  const navigateToPosts = () => { setActiveTab("blog"); setBlogTab("posts"); };
   const deleteCalEvent = (idx) => setCalEvents(all => all.filter((_, i) => i !== idx));
 
   const [gscData,     setGscData]     = useState(loadGSCData);
@@ -11904,6 +12067,7 @@ export default function Dashboard({ user, workspace }) {
     { id:"apikeys",    label:"API Keys"             },
     { id:"gsc",        label:"Search Console"       },
     { id:"meta",       label:"Facebook & Instagram" },
+    { id:"wordpress",  label:"WordPress"            },
     { id:"buffer",     label:"Buffer (Social)"      },
     { id:"social",     label:"Social Media"         },
     { id:"publish",    label:"Publishing"           },
@@ -12093,6 +12257,8 @@ export default function Dashboard({ user, workspace }) {
               initialPost={pipelineInitialPost}
               onConsumedInitialPost={() => setPipelineInitialPost(null)}
               onSendToSocialPipeline={sendArticleToSocialPipeline}
+              onNavigateToTab={setActiveTab}
+              onNavigateToPosts={navigateToPosts}
             />
               )}
 
@@ -12320,6 +12486,10 @@ export default function Dashboard({ user, workspace }) {
                     </p>
                     <MetaConnectPanel onConnected={(cfg) => setMetaConfig(cfg)} />
                   </div>
+                )}
+
+                {settingsSection==="wordpress"&&(
+                  <WordPressSettings />
                 )}
 
                 {settingsSection==="buffer"&&(
