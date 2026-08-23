@@ -2518,7 +2518,11 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
 
 const LOGO_STORAGE = "bb_workspace_logo";
 function loadLogo() { try { return localStorage.getItem(LOGO_STORAGE) || null; } catch { return null; } }
-function saveLogo(data) { try { localStorage.setItem(LOGO_STORAGE, data); } catch {} }
+function saveLogo(data) {
+  try { localStorage.setItem(LOGO_STORAGE, data); } catch {}
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("workspace_logo", uid, data);
+}
 
 function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
   const [form,       setForm]       = useState({ name:wsName, url:wsUrl, tagline:wsTagline });
@@ -10166,6 +10170,18 @@ const MOBILE_CSS = `
     [style*="grid-template-columns: 1fr 1fr"] {
       grid-template-columns: 1fr !important;
     }
+    /* Card grids using auto-fit/minmax (used extensively for plan cards,
+       competitor cards, etc.) — the 160-280px floors used throughout the app
+       are comfortable on tablets but can force a card wider than a narrow
+       phone screen, causing the whole grid (and page) to overflow
+       horizontally. Force single-column below 767px instead. */
+    [style*="auto-fit,minmax(160px"], [style*="auto-fit, minmax(160px"],
+    [style*="auto-fit,minmax(120px"], [style*="auto-fit, minmax(120px"],
+    [style*="auto-fit,minmax(220px"], [style*="auto-fit, minmax(220px"],
+    [style*="auto-fit,minmax(240px"], [style*="auto-fit, minmax(240px"],
+    [style*="auto-fit,minmax(280px"], [style*="auto-fit, minmax(280px"] {
+      grid-template-columns: 1fr !important;
+    }
     /* Horizontal tab bars — allow wrap */
     [style*="display:\"flex\""][style*="gap:4"] {
       flex-wrap: wrap;
@@ -10174,6 +10190,12 @@ const MOBILE_CSS = `
     .ProseMirror { min-height: 200px !important; }
     /* Stage progress text smaller */
     .stage-label { font-size: 9px !important; }
+    /* Data tables (competitor tracking, etc.) — scroll the table itself
+       rather than letting it force the whole page wider. This is the
+       standard, correct pattern for wide tables on narrow screens. */
+    table { display: block; overflow-x: auto; white-space: nowrap; max-width: 100%; -webkit-overflow-scrolling: touch; }
+    /* Safety net — nothing should be able to force horizontal page scroll */
+    img, video, canvas { max-width: 100%; height: auto; }
   }
 
   /* ── MOBILE NAV BAR (bottom) ── */
@@ -10216,7 +10238,7 @@ const MOBILE_CSS = `
   @media (max-width: 767px) {
     .bb-mobile-nav { display: flex; }
     .bb-sidebar { display: none !important; }
-    .bb-main-content { padding: 16px 14px 72px !important; }
+    .bb-main-content { padding: 16px 14px 72px !important; overflow-x: hidden !important; max-width: 100vw !important; }
     .bb-root { flex-direction: column !important; }
     .bb-ai-switcher { bottom: 72px !important; right: 12px !important; } /* clear the 56px mobile nav — was overlapping the Settings tab */
   }
@@ -12004,6 +12026,12 @@ export default function Dashboard({ user, workspace }) {
   const isMobile = useIsMobile();
   const [dark,            setDark]           = useState(true);
   const [activeTab,       setActiveTab]      = useState("posts");
+  // Scroll to top on every top-level tab switch — without this, if the user
+  // was scrolled down on one tab, switching to a shorter/differently-laid-out
+  // tab (e.g. Marketing) could leave them stranded mid-page, below the nav.
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, [activeTab]);
   const [postFilter,      setPostFilter]     = useState("all");
   const [researchTab,     setResearchTab]    = useState("competitors");
   const [blogTab,         setBlogTab]        = useState("pipeline");
@@ -12077,6 +12105,17 @@ export default function Dashboard({ user, workspace }) {
       const cloudBuffer = await cloudGet("buffer_config", userId);
       if (cloudBuffer && typeof cloudBuffer === "object" && cloudBuffer.apiKey) {
         saveBufferConfig(cloudBuffer);
+      }
+      // Pull WordPress config
+      const cloudWordPress = await cloudGet("wordpress_config", userId);
+      if (cloudWordPress && typeof cloudWordPress === "object" && cloudWordPress.connected) {
+        saveWordPressConfig(cloudWordPress);
+      }
+      // Pull workspace logo
+      const cloudLogo = await cloudGet("workspace_logo", userId);
+      if (cloudLogo && typeof cloudLogo === "string") {
+        try { localStorage.setItem(LOGO_STORAGE, cloudLogo); } catch {}
+        window.dispatchEvent(new CustomEvent("bb-logo-updated", { detail: cloudLogo }));
       }
       setCloudSynced(true);
     })();
