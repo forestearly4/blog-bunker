@@ -533,20 +533,26 @@ const INSPIRATION = [
 ];
 
 const PLANS = [
-  { name:"Scout",     price:"$19/mo", features:["1 Workspace","15,000 AI words/mo","20 AI images/mo","Meta (Facebook & Instagram) posting only","Community Support"] },
-  { name:"Operative", price:"$45/mo", features:["3 Workspaces included (+$5/mo each additional)","60,000 AI words/mo","100 AI images/mo","Buffer integration (TikTok, X, Pinterest, Reddit)","Bring your own AI key (BYOK)","Email Support"] },
+  { name:"Scout",     price:"$19/mo", byokPrice:"$16/mo", features:["1 Workspace","15,000 AI words/mo","20 AI images/mo","Meta (Facebook & Instagram) posting only","Bring your own AI key (BYOK)","Community Support"] },
+  { name:"Operative", price:"$45/mo", byokPrice:"$40/mo", features:["3 Workspaces included (+$5/mo each additional)","60,000 AI words/mo","100 AI images/mo","Buffer integration (TikTok, X, Pinterest, Reddit)","Bring your own AI key (BYOK)","Email Support"] },
 ];
 // "Command" is a status, not a purchasable tier — auto-unlocks at 10 workspaces
 // on one account (shared API keys across workspaces, priority support).
+// byokPrice reflects bringing your own Anthropic/Stability key instead of
+// using Blog Bunker's platform-managed AI — genuinely cheaper for us to serve
+// (near-zero AI cost vs the real cost of the platform-managed path), so it's
+// passed on as a discount. Available on both tiers.
 
-// Feature gating by tier. Scout is deliberately limited to platform-managed
-// Claude text credits and Meta-only posting; Operative unlocks BYOK (own
-// OpenAI/Gemini/Anthropic keys), Buffer (TikTok/X/Pinterest/Reddit), and a
-// bigger text credit pool. Since OpenAI/Gemini already require the user's own
-// key with no platform-managed fallback, Scout has no AI image generation
-// until either they upgrade (BYOK) or a platform-managed image path is built.
+// Feature gating by tier. Both tiers can bring their own AI key (BYOK) — at a
+// discounted price, since that costs Blog Bunker ~$0 in AI spend to serve.
+// Operative additionally unlocks Buffer (TikTok/X/Pinterest/Reddit) and a
+// bigger platform-managed credit pool; Scout stays Meta-only for posting.
+// Since OpenAI/Gemini already require the user's own key with no
+// platform-managed fallback, a Scout user without their own key still has no
+// AI image generation from those providers — only Stability's
+// platform-managed path (see image-generate.js) covers that for them.
 const TIER_CONFIG = {
-  scout:     { label:"Scout",     wordsPerMonth:15000, imagesPerMonth:20,  byok:false, buffer:false, socialPlatforms:["facebook","instagram"] },
+  scout:     { label:"Scout",     wordsPerMonth:15000, imagesPerMonth:20,  byok:true,  buffer:false, socialPlatforms:["facebook","instagram"] },
   operative: { label:"Operative", wordsPerMonth:60000, imagesPerMonth:100, byok:true,  buffer:true,  socialPlatforms:["facebook","instagram","tiktok","twitter","pinterest","reddit"] },
 };
 const TIER_STORAGE = "bb_user_tier";
@@ -853,7 +859,10 @@ function getAvailableImageProviders(apiKeys) {
     { id:"dalle",         label:"GPT Image (OpenAI)",  keyName:"openai",    logo:"●" },
     { id:"gemini-image",  label:"Gemini Image",        keyName:"gemini",    logo:"✦" },
   ];
-  return all.map(p => ({ ...p, available: !!apiKeys[p.keyName] }));
+  // Stability alone has a platform-managed fallback (Blog Bunker's own key,
+  // used when the user hasn't set their own) — it's always available, unlike
+  // OpenAI/Gemini which have no such fallback and genuinely require a key.
+  return all.map(p => ({ ...p, available: p.id === "stability" ? true : !!apiKeys[p.keyName] }));
 }
 
 async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
@@ -12790,10 +12799,20 @@ export default function Dashboard({ user, workspace }) {
                     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12,marginBottom:24}}>
                       {PLANS.map(p=>{
                         const isCurrentSelection = (TIER_CONFIG[userTier]?.label || "Scout") === p.name;
+                        const tierKey = p.name.toLowerCase();
+                        const byokUnlocked = TIER_CONFIG[tierKey]?.byok;
                         return (
                         <div key={p.name} style={{padding:20,borderRadius:10,border:isCurrentSelection?"2px solid var(--amber)":"1px solid var(--border)",background:isCurrentSelection?"var(--amber-glow)":"var(--bg-elevated)",textAlign:"center"}}>
                           <div style={{fontFamily:"var(--font-display)",fontSize:16,fontWeight:700,marginBottom:4}}>{p.name}</div>
-                          <div style={{fontSize:22,fontWeight:700,color:"var(--amber)",fontFamily:"var(--font-display)",marginBottom:12}}>{p.price}</div>
+                          <div style={{fontSize:22,fontWeight:700,color:"var(--amber)",fontFamily:"var(--font-display)"}}>{p.price}</div>
+                          {p.byokPrice && (
+                            byokUnlocked ? (
+                              <div style={{fontSize:11,color:"#5cba6c",marginBottom:12}}>or {p.byokPrice} with your own AI key</div>
+                            ) : (
+                              <div style={{fontSize:11,color:"var(--muted)",marginBottom:12}}>{p.byokPrice} with your own key — Operative and above</div>
+                            )
+                          )}
+                          {!p.byokPrice && <div style={{marginBottom:12}} />}
                           {p.features.map((f,i)=><div key={i} style={{fontSize:12,color:"var(--text-secondary)",padding:"3px 0"}}>{f}</div>)}
                           <button onClick={()=>changeTier(p.name.toLowerCase())} style={{...(isCurrentSelection?btnP:btnS),marginTop:14,width:"100%"}}>{isCurrentSelection?"Current Plan":`Switch to ${p.name}`}</button>
                         </div>

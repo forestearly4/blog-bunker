@@ -1,8 +1,8 @@
 import { useState, useRef } from "react";
 
 const PLANS = [
-  { id:"scout",     name:"Scout",     price:"$19/mo", color:"#8a8880", features:["1 workspace","15,000 AI words/mo","20 AI images/mo","Meta (Facebook & Instagram) posting","Community support"] },
-  { id:"operative", name:"Operative", price:"$45/mo", color:"#d4a054", popular:true, features:["3 workspaces (+$5/mo each extra)","60,000 AI words/mo","100 AI images/mo","Buffer (TikTok, X, Pinterest, Reddit)","Bring your own AI key","Email support"] },
+  { id:"scout",     name:"Scout",     price:"$19/mo", byokPrice:"$16/mo", color:"#8a8880", features:["1 workspace","15,000 AI words/mo","20 AI images/mo","Meta (Facebook & Instagram) posting","Bring your own AI key","Community support"] },
+  { id:"operative", name:"Operative", price:"$45/mo", byokPrice:"$40/mo", color:"#d4a054", popular:true, features:["3 workspaces included, then +$5/mo per additional workspace","60,000 AI words/mo","100 AI images/mo","Buffer (TikTok, X, Pinterest, Reddit)","Bring your own AI key","Email support"] },
 ];
 
 const BLOG_TYPES = [
@@ -180,6 +180,11 @@ function StepPlan({ data, onChange, onNext, onBack }) {
                 {plan.popular && <span style={{ fontSize:9, fontWeight:700, letterSpacing:"0.1em", padding:"2px 7px", borderRadius:99, background:"var(--amber)22", color:"var(--amber)", textTransform:"uppercase" }}>Most Popular</span>}
                 <span style={{ marginLeft:"auto", fontSize:15, fontWeight:700, color:data.plan===plan.id?plan.color:"var(--text-secondary)", fontFamily:"'Fraunces',serif" }}>{plan.price}</span>
               </div>
+              {plan.byokPrice && (
+                <div style={{ fontSize:10, color:"#5cba6c", marginBottom:4 }}>
+                  or {plan.byokPrice} with your own AI key
+                </div>
+              )}
               <div style={{ display:"flex", flexWrap:"wrap", gap:"4px 16px" }}>{plan.features.map(f=><span key={f} style={{ fontSize:11, color:"var(--text-secondary)" }}>· {f}</span>)}</div>
             </div>
           </button>
