@@ -6797,18 +6797,49 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                     const connectionLabel = isMetaConnected ? "● Direct" : isBufferConnected ? "● Buffer" : "Manual";
                     const connectionColor = isMetaConnected ? "#5cba6c" : isBufferConnected ? "#1da1f2" : "var(--muted)";
                     const prevResult = publishResults[plat.id];
+                    const captionText = captions[plat.id]?.text || "";
+                    const hashtagText = getHashtagsForPlatform(hashtags, plat.id);
+                    const hashtagCount = hashtagText.split(/\s+/).filter(Boolean).length;
+                    const charCount = captionText.length + (hashtagText ? hashtagText.length + 2 : 0); // +2 for the blank-line join
+                    const overChar = plat.charLimit > 0 && charCount > plat.charLimit;
+                    const overHashtags = plat.hashtagLimit > 0 && hashtagCount > plat.hashtagLimit;
                     return (
-                      <div key={plat.id} style={{ display:"grid", gridTemplateColumns: imageData.url ? "auto 1fr 120px" : "auto 1fr", gap:14, alignItems:"flex-start", padding:14, borderRadius:10, background:"var(--bg-elevated)", border:`1px solid ${isConnected?"#5cba6c33":"var(--border)"}` }}>
+                      <div key={plat.id} style={{ display:"grid", gridTemplateColumns: imageData.url ? "auto 1fr 120px" : "auto 1fr", gap:14, alignItems:"flex-start", padding:14, borderRadius:10, background:"var(--bg-elevated)", border:`1px solid ${overChar||overHashtags?"var(--red)66":isConnected?"#5cba6c33":"var(--border)"}` }}>
                         <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4, width:70 }}>
                           <span style={{ fontSize:20 }}>{plat.icon}</span>
                           <span style={{ fontSize:10, fontWeight:700, color:plat.color }}>{plat.label}</span>
                           <span style={{ fontSize:9, color:connectionColor, fontWeight:600 }}>{connectionLabel}</span>
                         </div>
-                        <div style={{ fontSize:12, lineHeight:1.6, whiteSpace:"pre-wrap", color:"var(--text-secondary)" }}>
-                          {captions[plat.id]?.text}
-                          {getHashtagsForPlatform(hashtags, plat.id) && <div style={{ marginTop:6, color:"var(--amber)" }}>{getHashtagsForPlatform(hashtags, plat.id)}</div>}
+                        <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                          <textarea
+                            value={captionText}
+                            onChange={e => setCaptions(c => ({ ...c, [plat.id]: { ...c[plat.id], text: e.target.value } }))}
+                            rows={3}
+                            style={{ width:"100%", padding:"8px 10px", borderRadius:7, border:`1px solid ${overChar?"var(--red)":"var(--border)"}`, background:"var(--bg-surface)", color:"var(--text)", fontSize:12, lineHeight:1.6, fontFamily:"var(--font-body)", resize:"vertical", boxSizing:"border-box" }}
+                          />
+                          <textarea
+                            value={hashtagText}
+                            onChange={e => setHashtags(h => ({ ...h, perPlatform: { ...h.perPlatform, [plat.id]: e.target.value } }))}
+                            rows={1}
+                            placeholder="Hashtags for this platform…"
+                            style={{ width:"100%", padding:"6px 10px", borderRadius:7, border:`1px solid ${overHashtags?"var(--red)":"var(--border)"}`, background:"var(--bg-surface)", color:"var(--amber)", fontSize:12, lineHeight:1.4, fontFamily:"var(--font-body)", resize:"vertical", boxSizing:"border-box" }}
+                          />
+                          <div style={{ display:"flex", gap:14, fontSize:10 }}>
+                            {plat.charLimit > 0 && (
+                              <span style={{ color: overChar ? "var(--red)" : "var(--muted)", fontWeight: overChar ? 700 : 400 }}>
+                                {overChar && "⚠ "}{charCount}/{plat.charLimit} characters
+                              </span>
+                            )}
+                            {plat.hashtagLimit > 0 ? (
+                              <span style={{ color: overHashtags ? "var(--red)" : "var(--muted)", fontWeight: overHashtags ? 700 : 400 }}>
+                                {overHashtags && "⚠ "}{hashtagCount}/{plat.hashtagLimit} hashtags
+                              </span>
+                            ) : plat.hashtagLimit === 0 && hashtagCount > 0 && (
+                              <span style={{ color:"var(--red)", fontWeight:700 }}>⚠ {plat.label} doesn't use hashtags — remove them</span>
+                            )}
+                          </div>
                           {prevResult && (
-                            <div style={{ marginTop:8, fontSize:11, color:prevResult.success===true?"#5cba6c":prevResult.success==="manual"?"var(--amber)":"var(--red)" }}>
+                            <div style={{ fontSize:11, color:prevResult.success===true?"#5cba6c":prevResult.success==="manual"?"var(--amber)":"var(--red)" }}>
                               {prevResult.message}
                             </div>
                           )}
