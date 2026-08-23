@@ -1,9 +1,8 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 
 const PLANS = [
-  { id:"scout",     name:"Scout",     price:"Free",   color:"#8a8880", features:["1 workspace","50 posts","Basic analytics","Community support"] },
-  { id:"operative", name:"Operative", price:"$19/mo", color:"#d4a054", popular:true, features:["3 workspaces","Unlimited posts","AI writing tools","Advanced analytics","Email support"] },
-  { id:"command",   name:"Command",   price:"$49/mo", color:"#5cba6c", features:["Unlimited workspaces","Team collaboration","Priority support","Custom integrations","Wix API"] },
+  { id:"scout",     name:"Scout",     price:"$19/mo", color:"#8a8880", features:["1 workspace","15,000 AI words/mo","20 AI images/mo","Meta (Facebook & Instagram) posting","Community support"] },
+  { id:"operative", name:"Operative", price:"$45/mo", color:"#d4a054", popular:true, features:["3 workspaces (+$5/mo each extra)","60,000 AI words/mo","100 AI images/mo","Buffer (TikTok, X, Pinterest, Reddit)","Bring your own AI key","Email support"] },
 ];
 
 const BLOG_TYPES = [
@@ -57,7 +56,7 @@ function StepWelcome({ userEmail, onNext }) {
       {userEmail && <p style={{ fontSize:12, color:"var(--muted)", marginBottom:8 }}>Signed in as <span style={{ color:"var(--text-secondary)" }}>{userEmail}</span></p>}
       <p style={{ fontSize:14, color:"var(--text-secondary)", maxWidth:420, margin:"0 auto 32px", lineHeight:1.7 }}>Your command center for blogging. Let's get your workspace set up in under 2 minutes.</p>
       <div style={{ display:"flex", flexDirection:"column", gap:10, maxWidth:360, margin:"0 auto 36px" }}>
-        {[["✦","Manage all your blogs from one dashboard"],["◈","AI writing tools built right in"],["◉","Connect to Wix, publish with one click"]].map(([icon,text]) => (
+        {[["✦","Manage all your blogs from one dashboard"],["◈","AI writing tools built right in"],["◉","Connect to WordPress, publish with one click"]].map(([icon,text]) => (
           <div key={text} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", textAlign:"left" }}>
             <span style={{ color:"var(--amber)", fontSize:16 }}>{icon}</span>
             <span style={{ fontSize:13 }}>{text}</span>
@@ -106,32 +105,56 @@ function StepWorkspace({ data, onChange, onNext, onBack }) {
 
 function StepPlatform({ data, onChange, onNext, onBack }) {
   const [connecting, setConnecting] = useState(false);
-  const handleConnect = () => {
-    if (!data.apiKey.trim()) return;
-    setConnecting(true);
-    setTimeout(() => { setConnecting(false); onChange({...data,connected:true}); }, 1800);
+  const [error, setError] = useState("");
+  const handleConnect = async () => {
+    if (!data.siteUrl.trim() || !data.username.trim() || !data.appPassword.trim()) return;
+    setConnecting(true); setError("");
+    try {
+      const res = await fetch("/api/wordpress-post", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ action:"testConnection", siteUrl: data.siteUrl.trim(), username: data.username.trim(), appPassword: data.appPassword.trim() }),
+      });
+      const result = await res.json();
+      if (result.error) throw new Error(result.error);
+      onChange({ ...data, connected:true });
+    } catch(e) {
+      setError(e.message);
+    }
+    setConnecting(false);
   };
   return (
     <div style={{ padding:"32px 40px" }}>
       <h2 style={{ fontFamily:"'Fraunces',serif", fontSize:22, fontWeight:700, marginBottom:6 }}>Connect your platform</h2>
-      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:28 }}>Link your Wix Blog to publish and sync posts directly.</p>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:28 }}>Link your WordPress site to publish directly, no copy-paste needed.</p>
       <div style={{ display:"flex", gap:10, marginBottom:24 }}>
-        {[{id:"wix",label:"Wix Blog",icon:"W"},{id:"other",label:"Other / Later",icon:"◎"}].map(p => (
-          <button key={p.id} onClick={()=>onChange({...data,platform:p.id,connected:false,apiKey:""})} style={{ flex:1, padding:14, borderRadius:10, border:data.platform===p.id?"1px solid var(--amber)":"1px solid var(--border)", background:data.platform===p.id?"var(--amber-glow)":"var(--bg-elevated)", color:data.platform===p.id?"var(--amber)":"var(--text-secondary)", fontFamily:"'DM Sans',sans-serif", fontSize:13, fontWeight:600, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
+        {[{id:"wordpress",label:"WordPress",icon:"W"},{id:"other",label:"Other / Later",icon:"◎"}].map(p => (
+          <button key={p.id} onClick={()=>onChange({...data,platform:p.id,connected:false,siteUrl:"",username:"",appPassword:""})} style={{ flex:1, padding:14, borderRadius:10, border:data.platform===p.id?"1px solid var(--amber)":"1px solid var(--border)", background:data.platform===p.id?"var(--amber-glow)":"var(--bg-elevated)", color:data.platform===p.id?"var(--amber)":"var(--text-secondary)", fontFamily:"'DM Sans',sans-serif", fontSize:13, fontWeight:600, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
             <span style={{ fontSize:15, fontWeight:700 }}>{p.icon}</span>{p.label}
           </button>
         ))}
       </div>
-      {data.platform==="wix" && (data.connected
-        ? <div style={{ padding:16, borderRadius:10, border:"1px solid rgba(92,186,108,0.4)", background:"rgba(92,186,108,0.08)", display:"flex", alignItems:"center", gap:12 }}><span style={{ width:10, height:10, borderRadius:99, background:"#5cba6c", display:"inline-block", boxShadow:"0 0 8px rgba(92,186,108,0.5)" }}/><span style={{ fontWeight:600, fontSize:13 }}>Wix Blog Connected!</span></div>
+      {data.platform==="wordpress" && (data.connected
+        ? <div style={{ padding:16, borderRadius:10, border:"1px solid rgba(92,186,108,0.4)", background:"rgba(92,186,108,0.08)", display:"flex", alignItems:"center", gap:12 }}><span style={{ width:10, height:10, borderRadius:99, background:"#5cba6c", display:"inline-block", boxShadow:"0 0 8px rgba(92,186,108,0.5)" }}/><span style={{ fontWeight:600, fontSize:13 }}>WordPress Connected!</span></div>
         : <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-            <div>
-              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Wix API Key</label>
-              <input type="password" style={iS} placeholder="Paste your Wix Blog API key…" value={data.apiKey} onChange={e=>onChange({...data,apiKey:e.target.value})} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            <div style={{ fontSize:11, color:"var(--text-secondary)", padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", lineHeight:1.6 }}>
+              In your WordPress admin: <strong style={{ color:"var(--amber)" }}>Users → Profile → Application Passwords</strong> — name it "Blog Bunker" and generate one. No plugin needed, it's built into WordPress.
             </div>
-            <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", lineHeight:1.6 }}>Wix Dashboard → Settings → Advanced → API Keys → grant <strong style={{ color:"var(--amber)" }}>Wix Blog</strong> permissions.</div>
-            <button onClick={handleConnect} disabled={!data.apiKey.trim()||connecting} style={{ padding:10, borderRadius:8, border:"none", background:data.apiKey.trim()?"var(--amber)":"var(--bg-elevated)", color:data.apiKey.trim()?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:data.apiKey.trim()?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
-              {connecting?<><span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>Connecting…</>:"Connect Wix Blog"}
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Site URL</label>
+              <input style={iS} placeholder="yourblog.com" value={data.siteUrl} onChange={e=>onChange({...data,siteUrl:e.target.value})} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            </div>
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>WordPress Username</label>
+              <input style={iS} placeholder="your-username" value={data.username} onChange={e=>onChange({...data,username:e.target.value})} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            </div>
+            <div>
+              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Application Password</label>
+              <input type="password" style={iS} placeholder="xxxx xxxx xxxx xxxx xxxx xxxx" value={data.appPassword} onChange={e=>onChange({...data,appPassword:e.target.value})} onFocus={e=>e.target.style.borderColor="var(--amber)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            </div>
+            {error && <div style={{ fontSize:12, color:"var(--red)", padding:"8px 12px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33" }}>{error}</div>}
+            <button onClick={handleConnect} disabled={!data.siteUrl.trim()||!data.username.trim()||!data.appPassword.trim()||connecting} style={{ padding:10, borderRadius:8, border:"none", background:data.siteUrl.trim()?"var(--amber)":"var(--bg-elevated)", color:data.siteUrl.trim()?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:data.siteUrl.trim()?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+              {connecting?<><span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>Connecting…</>:"Connect WordPress"}
             </button>
           </div>
       )}
@@ -146,7 +169,7 @@ function StepPlan({ data, onChange, onNext, onBack }) {
   return (
     <div style={{ padding:"32px 40px" }}>
       <h2 style={{ fontFamily:"'Fraunces',serif", fontSize:22, fontWeight:700, marginBottom:6 }}>Choose your plan</h2>
-      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24 }}>Start free. Upgrade anytime. No credit card for Scout.</p>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24 }}>Your first month is free on us, no credit card required. Switch anytime.</p>
       <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
         {PLANS.map(plan => (
           <button key={plan.id} onClick={()=>onChange({...data,plan:plan.id})} style={{ padding:"16px 20px", borderRadius:12, cursor:"pointer", border:data.plan===plan.id?`1px solid ${plan.color}`:"1px solid var(--border)", background:data.plan===plan.id?plan.color+"12":"var(--bg-elevated)", textAlign:"left", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:16 }}>
@@ -167,20 +190,42 @@ function StepPlan({ data, onChange, onNext, onBack }) {
   );
 }
 
-function StepDone({ wsData, platformData, planData, onComplete }) {
+// Generates one genuinely personalized first-post idea from what the user
+// just told us about their blog — this is the actual "payoff" moment, kicked
+// off in the background during Platform/Plan so it's ready by the time they
+// reach the final screen rather than making them wait on a loading spinner.
+async function generateFirstIdea(blogName, blogTypeLabel, desc, userEmail) {
+  const res = await fetch("/api/claude", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-5",
+      max_tokens: 400,
+      system: `You are a blog content strategist. Given a blog's name, niche, and description, suggest ONE compelling first post idea tailored specifically to it. Respond with ONLY valid JSON, no fences, no other text: {"title":"a specific, compelling post title","hook":"one sentence on why this angle works for this particular blog","keyword":"a realistic SEO keyword phrase this post could target"}`,
+      messages: [{ role: "user", content: `Blog name: ${blogName}\nNiche: ${blogTypeLabel}\nDescription: ${desc || "(not provided — infer from the name and niche)"}` }],
+      userId: userEmail || null,
+    }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || data.error);
+  const text = (data.content?.[0]?.text || "{}").replace(/```json|```/g, "").trim();
+  return JSON.parse(text);
+}
+
+function StepDone({ wsData, platformData, planData, ideaData, onComplete }) {
   const plan = PLANS.find(p=>p.id===planData.plan)||PLANS[0];
   const blogType = BLOG_TYPES.find(b=>b.id===wsData.type);
-  const handleGo = () => onComplete({ ...wsData, ...platformData, plan:planData.plan });
+  const handleGo = () => onComplete({ ...wsData, ...platformData, plan:planData.plan, firstIdea: ideaData?.title ? ideaData : null });
   return (
     <div style={{ padding:40, textAlign:"center" }}>
       <div style={{ width:64, height:64, borderRadius:99, background:"rgba(92,186,108,0.15)", border:"2px solid #5cba6c", display:"flex", alignItems:"center", justifyContent:"center", fontSize:26, margin:"0 auto 20px" }}>✓</div>
       <h2 style={{ fontFamily:"'Fraunces',serif", fontSize:24, fontWeight:700, marginBottom:8 }}>You're in the Bunker.</h2>
-      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:28 }}>Your workspace is ready. Here's what we set up:</p>
-      <div style={{ display:"flex", flexDirection:"column", gap:10, maxWidth:400, margin:"0 auto 32px", textAlign:"left" }}>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24 }}>Your workspace is ready. Here's what we set up:</p>
+      <div style={{ display:"flex", flexDirection:"column", gap:10, maxWidth:400, margin:"0 auto 24px", textAlign:"left" }}>
         {[
           { icon:"▤", label:"Workspace", value:wsData.name||"My Blog", sub:blogType?`${blogType.icon} ${blogType.label}`:null, color:null },
-          { icon:"◉", label:"Platform", value:platformData.platform==="wix"&&platformData.connected?"Wix Blog — Connected":platformData.platform==="wix"?"Wix Blog — Not connected":"No platform yet", color:platformData.connected?"#5cba6c":null },
-          { icon:"✦", label:"Plan", value:`${plan.name} — ${plan.price}`, color:plan.color },
+          { icon:"◉", label:"Platform", value:platformData.platform==="wordpress"&&platformData.connected?"WordPress — Connected":platformData.platform==="wordpress"?"WordPress — Not connected":"No platform yet", color:platformData.connected?"#5cba6c":null },
+          { icon:"✦", label:"Plan", value:`${plan.name} — first month free`, color:plan.color },
         ].map(row=>(
           <div key={row.label} style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
             <span style={{ color:"var(--amber)", fontSize:16 }}>{row.icon}</span>
@@ -189,7 +234,27 @@ function StepDone({ wsData, platformData, planData, onComplete }) {
           </div>
         ))}
       </div>
-      <button onClick={handleGo} style={{ padding:"13px 40px", borderRadius:10, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:14, fontWeight:700, fontFamily:"'DM Sans',sans-serif", cursor:"pointer", boxShadow:"0 0 24px rgba(212,160,84,0.25)" }}>Go to Dashboard →</button>
+
+      {/* The real payoff — a genuinely personalized first post idea, ready to write */}
+      <div style={{ maxWidth:400, margin:"0 auto 32px", padding:18, borderRadius:12, background:"linear-gradient(135deg, var(--amber-glow), transparent)", border:"1px solid var(--amber)44", textAlign:"left" }}>
+        <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)", marginBottom:8 }}>✦ We already wrote you an idea</div>
+        {ideaData?.loading ? (
+          <div style={{ fontSize:13, color:"var(--text-secondary)", display:"flex", alignItems:"center", gap:8 }}>
+            <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span> Still thinking of the perfect angle for {wsData.name || "your blog"}…
+          </div>
+        ) : ideaData?.title ? (
+          <>
+            <div style={{ fontFamily:"'Fraunces',serif", fontSize:16, fontWeight:700, marginBottom:6, lineHeight:1.3 }}>{ideaData.title}</div>
+            <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>{ideaData.hook}</div>
+          </>
+        ) : (
+          <div style={{ fontSize:12, color:"var(--text-secondary)" }}>Head to the Article Pipeline whenever you're ready — Claude will help you brainstorm your first post.</div>
+        )}
+      </div>
+
+      <button onClick={handleGo} style={{ padding:"13px 40px", borderRadius:10, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:14, fontWeight:700, fontFamily:"'DM Sans',sans-serif", cursor:"pointer", boxShadow:"0 0 24px rgba(212,160,84,0.25)" }}>
+        {ideaData?.title ? "Start Writing This Post →" : "Go to Dashboard →"}
+      </button>
     </div>
   );
 }
@@ -197,9 +262,24 @@ function StepDone({ wsData, platformData, planData, onComplete }) {
 export default function OnboardingFlow({ userEmail="", onComplete }) {
   const [step, setStep] = useState(0);
   const [wsData, setWsData] = useState({ name:"", url:"", type:"outdoors", desc:"" });
-  const [platformData, setPlatformData] = useState({ platform:"wix", apiKey:"", connected:false });
+  const [platformData, setPlatformData] = useState({ platform:"wordpress", siteUrl:"", username:"", appPassword:"", connected:false });
   const [planData, setPlanData] = useState({ plan:"scout" });
-  const next = () => setStep(s=>Math.min(s+1,4));
+  const [ideaData, setIdeaData] = useState(null);
+  const ideaRequestedRef = useRef(false);
+  const next = () => {
+    // Kick off idea generation in the background the moment they leave the
+    // workspace-details step (name/type/desc) — by the time they finish
+    // Platform + Plan, the result is usually ready instead of a dead wait.
+    if (step === 1 && wsData.name.trim() && !ideaRequestedRef.current) {
+      ideaRequestedRef.current = true;
+      setIdeaData({ loading:true });
+      const typeLabel = BLOG_TYPES.find(b=>b.id===wsData.type)?.label || wsData.type;
+      generateFirstIdea(wsData.name, typeLabel, wsData.desc, userEmail)
+        .then(idea => setIdeaData({ loading:false, ...idea }))
+        .catch(() => setIdeaData({ loading:false })); // fall back to the generic CTA — never block onboarding on this
+    }
+    setStep(s=>Math.min(s+1,4));
+  };
   const back = () => setStep(s=>Math.max(s-1,0));
   return (
     <div style={{ ...DARK, minHeight:"100vh", background:"var(--bg)", fontFamily:"'DM Sans',sans-serif", color:"var(--text)", display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
@@ -211,7 +291,7 @@ export default function OnboardingFlow({ userEmail="", onComplete }) {
         {step===1&&<StepWorkspace data={wsData} onChange={setWsData} onNext={next} onBack={back} />}
         {step===2&&<StepPlatform data={platformData} onChange={setPlatformData} onNext={next} onBack={back} />}
         {step===3&&<StepPlan data={planData} onChange={setPlanData} onNext={next} onBack={back} />}
-        {step===4&&<StepDone wsData={wsData} platformData={platformData} planData={planData} onComplete={onComplete} />}
+        {step===4&&<StepDone wsData={wsData} platformData={platformData} planData={planData} ideaData={ideaData} onComplete={onComplete} />}
       </div>
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
     </div>

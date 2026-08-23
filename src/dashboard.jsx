@@ -547,6 +547,32 @@ function saveUserTier(tier) {
   if (uid) cloudSet("user_tier", uid, tier);
 }
 
+// ─── FREE TRIAL (first 30 days) ───────────────────────────────────────────────
+// New users get full Operative-tier access for their first month, regardless
+// of whatever userTier is set to underneath — this is the "hook" period, and
+// reverts to their real tier automatically once it ends. No payment processor
+// exists yet (userTier itself is a manual toggle), so this is proportionally
+// scoped the same way — a real, working mechanic today that a future Stripe
+// integration can plug into rather than something to rebuild from scratch.
+const TRIAL_STORAGE = "bb_trial_start";
+const TRIAL_DAYS = 30;
+function getOrStartTrial() {
+  try {
+    let start = localStorage.getItem(TRIAL_STORAGE);
+    if (!start) {
+      start = String(Date.now());
+      localStorage.setItem(TRIAL_STORAGE, start);
+      const uid = window.__bbUserId;
+      if (uid) cloudSet("trial_start", uid, start);
+    }
+    return parseInt(start, 10);
+  } catch { return Date.now(); }
+}
+function trialDaysLeft(trialStart) {
+  const elapsed = (Date.now() - trialStart) / (24*60*60*1000);
+  return Math.max(0, Math.ceil(TRIAL_DAYS - elapsed));
+}
+
 // ─── AI PROVIDER CONFIG ───────────────────────────────────────────────────────
 
 const AI_PROVIDERS = [
@@ -8946,6 +8972,110 @@ function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, bt
 
 // ─── ANALYTICS DASHBOARD ─────────────────────────────────────────────────────
 
+// ─── BLOG HEALTH SCORE ───────────────────────────────────────────────────────
+// Deliberately built entirely on data Blog Bunker already reliably has —
+// posts, social posts, and which channels are connected. No dependency on
+// GSC or Meta Insights, both of which have proven repeatedly unreliable
+// (deprecated metrics, expired API versions, missing OAuth scopes, silent
+// permission errors). A composite score is only useful if it's always there.
+function computeBlogHealthScore(posts, socialPosts, metaConfig) {
+  const now = Date.now();
+  const publishedPosts = posts.filter(p => p.status === "published");
+  const recentPosts = publishedPosts.filter(p => now - new Date(p.date).getTime() < 90*24*60*60*1000);
+
+  // ── Posting Consistency ──────────────────────────────────────────────────
+  let consistencyScore = 0;
+  if (recentPosts.length >= 2) {
+    const dates = recentPosts.map(p => new Date(p.date).getTime()).sort((a,b)=>a-b);
+    const gaps  = dates.slice(1).map((d,i) => (d - dates[i]) / (24*60*60*1000));
+    const avgGapDays = gaps.reduce((a,b)=>a+b,0) / gaps.length;
+    consistencyScore = avgGapDays <= 7 ? 100 : avgGapDays <= 14 ? 75 : avgGapDays <= 30 ? 45 : 15;
+  } else if (recentPosts.length === 1) {
+    consistencyScore = 30; // one post is a start, but not yet a pattern
+  }
+
+  // ── Content Optimization ─────────────────────────────────────────────────
+  const checkPosts = publishedPosts.slice(0, 10);
+  let optimizationScore = 0;
+  if (checkPosts.length > 0) {
+    const totalChecks = checkPosts.length * 5;
+    let passed = 0;
+    checkPosts.forEach(p => {
+      if (p.metaTitle)       passed++;
+      if (p.metaDescription) passed++;
+      if (p.primaryKeyword)  passed++;
+      if ((p.body || "").split(" ").filter(Boolean).length >= 300) passed++;
+      if (/\[([^\]]+)\]\(([^)]+)\)/.test(p.body || "")) passed++;
+    });
+    optimizationScore = Math.round((passed / totalChecks) * 100);
+  }
+
+  // ── Social Amplification ─────────────────────────────────────────────────
+  const wpConnected = loadWordPressConfig().connected;
+  const bufferConnected = loadBufferConfig().connected;
+  const metaConnected = !!metaConfig?.connected;
+  const connectionScore = (metaConnected?30:0) + (bufferConnected?20:0) + (wpConnected?20:0);
+  const recentSocial = (socialPosts || []).filter(p => p.status === "published" && now - new Date(p.date || p.scheduledAt || 0).getTime() < 30*24*60*60*1000);
+  const activityScore = Math.min(30, recentSocial.length * 8);
+  const amplificationScore = connectionScore + activityScore;
+
+  const overall = Math.round(consistencyScore*0.4 + optimizationScore*0.3 + amplificationScore*0.3);
+
+  return {
+    overall,
+    consistency: Math.round(consistencyScore),
+    optimization: Math.round(optimizationScore),
+    amplification: Math.round(amplificationScore),
+    wpConnected, bufferConnected, metaConnected,
+    recentPostCount: recentPosts.length,
+  };
+}
+
+function BlogHealthScore({ posts, socialPosts, metaConfig, dark }) {
+  const score = computeBlogHealthScore(posts, socialPosts, metaConfig);
+
+  const label = score.overall >= 80 ? "Thriving" : score.overall >= 60 ? "Healthy" : score.overall >= 40 ? "Needs Attention" : "Just Getting Started";
+  const color = score.overall >= 80 ? "#5cba6c" : score.overall >= 60 ? "var(--amber)" : score.overall >= 40 ? "#e08a3c" : "var(--muted)";
+
+  // The single most impactful thing to work on — whichever component is weakest
+  const components = [
+    { key:"consistency",   label:"Posting Consistency",   value:score.consistency,   tip:"Try to publish at least once a week — steady posting is the single biggest factor here." },
+    { key:"optimization",  label:"Content Optimization",  value:score.optimization,  tip:"Add a meta title, description, primary keyword, and a few links to your recent posts." },
+    { key:"amplification", label:"Social Amplification",  value:score.amplification, tip: !score.metaConnected && !score.bufferConnected ? "Connect Facebook/Instagram or Buffer in Settings to start sharing your posts." : "Send more of your recent articles to the Social Pipeline to multiply their reach." },
+  ];
+  const weakest = [...components].sort((a,b)=>a.value-b.value)[0];
+
+  return (
+    <div style={{ background:"var(--bg-surface)", border:`1px solid ${color}44`, borderRadius:14, padding:24 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:24, flexWrap:"wrap" }}>
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", minWidth:120 }}>
+          <div style={{ fontFamily:"var(--font-display)", fontSize:48, fontWeight:700, color, lineHeight:1 }}>{score.overall}</div>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color, marginTop:4 }}>{label}</div>
+          <div style={{ fontSize:10, color:"var(--muted)", marginTop:2 }}>Blog Health Score</div>
+        </div>
+
+        <div style={{ flex:1, minWidth:240, display:"flex", flexDirection:"column", gap:10 }}>
+          {components.map(c => (
+            <div key={c.key}>
+              <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>
+                <span>{c.label}</span>
+                <span style={{ fontWeight:700, color:"var(--text)" }}>{c.value}</span>
+              </div>
+              <div style={{ height:6, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
+                <div style={{ height:"100%", width:`${c.value}%`, background:color, borderRadius:99 }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginTop:18, paddingTop:16, borderTop:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
+        💡 <strong style={{ color:"var(--text)" }}>Biggest opportunity:</strong> {weakest.tip}
+      </div>
+    </div>
+  );
+}
+
 function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onGSCDataLoaded, onConnectMeta, activeProvider, activeModel, apiKeys }) {
   const [tab, setTab] = useState("overview");
   const [socialInsights, setSocialInsights] = useState(null);
@@ -9113,6 +9243,8 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
       {/* ── OVERVIEW ── */}
       {tab === "overview" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <BlogHealthScore posts={posts} socialPosts={socialPosts} metaConfig={metaConfig} dark={dark} />
+
           {/* Key numbers */}
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12 }}>
             <StatCard label="Blog Posts Published" value={publishedPosts} sub={`${draftPosts} drafts`} icon="📄" />
@@ -11900,6 +12032,21 @@ export default function Dashboard({ user, workspace }) {
   const [editingPost,       setEditingPost]       = useState(null);
   const [pipelineInitialPost, setPipelineInitialPost] = useState(null);
   const sendPostToPipeline = (post) => { setPipelineInitialPost(post); setActiveTab("blog"); setBlogTab("pipeline"); };
+
+  // One-time hand-off: if onboarding generated a personalized first post idea,
+  // load it straight into the Article Pipeline the moment they land here —
+  // this is the actual payoff moment, not just a static "you're all set" screen.
+  useEffect(() => {
+    if (workspace?.firstIdea?.title) {
+      sendPostToPipeline({
+        id: Date.now(),
+        title: workspace.firstIdea.title,
+        body: "",
+        category: "Culture",
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [socialPipelineHandoff, setSocialPipelineHandoff] = useState(null);
   const sendArticleToSocialPipeline = (article) => {
     setSocialPipelineHandoff({ title: article.title, source: "Blog article", headlineImageUrl: article.headlineImageUrl || null });
@@ -12021,6 +12168,14 @@ export default function Dashboard({ user, workspace }) {
   const connected = workspace?.connected  || false;
   const plan      = "operative";
   const [userTier, setUserTier] = useState(loadUserTier);
+  const [trialStart] = useState(getOrStartTrial);
+  const trialDaysRemaining = trialDaysLeft(trialStart);
+  const inTrial = trialDaysRemaining > 0;
+  // The free trial IS Scout access (scout is already the default tier for a
+  // new signup) — no functional tier elevation, this is purely a messaging +
+  // post-trial-gate concern, not a tier override. If someone has manually
+  // switched to Operative via the dev toggle, that stays respected regardless
+  // of trial status.
   const tierConfig = TIER_CONFIG[userTier] || TIER_CONFIG.scout;
   const planLabel = TIER_CONFIG[userTier]?.label || "Scout";
   const changeTier = (tier) => { setUserTier(tier); saveUserTier(tier); };
@@ -12520,19 +12675,39 @@ export default function Dashboard({ user, workspace }) {
                 {settingsSection==="billing"&&(
                   <div>
                     <h3 style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700,margin:"0 0 8px"}}>Billing & Plan</h3>
-                    <p style={{fontSize:13,color:"var(--text-secondary)",margin:"0 0 12px"}}>Current plan: <span style={{color:"var(--amber)",fontWeight:700}}>{planLabel}</span></p>
+                    <p style={{fontSize:13,color:"var(--text-secondary)",margin:"0 0 12px"}}>Your plan: <span style={{color:"var(--amber)",fontWeight:700}}>{TIER_CONFIG[userTier]?.label || "Scout"}</span></p>
+
+                    {inTrial ? (
+                      <div style={{ padding:"14px 16px", borderRadius:10, background:"linear-gradient(135deg, var(--amber-glow), transparent)", border:"1px solid var(--amber)44", marginBottom:16 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:"var(--amber)", marginBottom:4 }}>🎉 Your first month is free</div>
+                        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
+                          Full Scout access, no credit card required — <strong style={{color:"var(--text)"}}>{trialDaysRemaining} day{trialDaysRemaining===1?"":"s"} left</strong>. You'll be asked to add payment before your trial ends to keep going.
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--red)11", border:"1px solid var(--red)33", marginBottom:16 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:"var(--red)", marginBottom:4 }}>Your free month has ended</div>
+                        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
+                          Choose a plan below to keep going. (Real payment collection isn't live yet — for now, picking a plan just confirms your choice; we'll follow up before anything is ever charged.)
+                        </div>
+                      </div>
+                    )}
+
                     <div style={{fontSize:11,color:"var(--muted)",padding:"8px 12px",borderRadius:6,background:"var(--bg-elevated)",border:"1px solid var(--border)",marginBottom:16}}>
                       No payment processor is wired up yet — this switches your plan directly for testing. Once billing is built, this will be driven by your actual subscription instead.
                     </div>
                     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12,marginBottom:24}}>
-                      {PLANS.map(p=>(
-                        <div key={p.name} style={{padding:20,borderRadius:10,border:planLabel===p.name?"2px solid var(--amber)":"1px solid var(--border)",background:planLabel===p.name?"var(--amber-glow)":"var(--bg-elevated)",textAlign:"center"}}>
+                      {PLANS.map(p=>{
+                        const isCurrentSelection = (TIER_CONFIG[userTier]?.label || "Scout") === p.name;
+                        return (
+                        <div key={p.name} style={{padding:20,borderRadius:10,border:isCurrentSelection?"2px solid var(--amber)":"1px solid var(--border)",background:isCurrentSelection?"var(--amber-glow)":"var(--bg-elevated)",textAlign:"center"}}>
                           <div style={{fontFamily:"var(--font-display)",fontSize:16,fontWeight:700,marginBottom:4}}>{p.name}</div>
                           <div style={{fontSize:22,fontWeight:700,color:"var(--amber)",fontFamily:"var(--font-display)",marginBottom:12}}>{p.price}</div>
                           {p.features.map((f,i)=><div key={i} style={{fontSize:12,color:"var(--text-secondary)",padding:"3px 0"}}>{f}</div>)}
-                          <button onClick={()=>changeTier(p.name.toLowerCase())} style={{...(planLabel===p.name?btnP:btnS),marginTop:14,width:"100%"}}>{planLabel===p.name?"Current Plan":`Switch to ${p.name}`}</button>
+                          <button onClick={()=>changeTier(p.name.toLowerCase())} style={{...(isCurrentSelection?btnP:btnS),marginTop:14,width:"100%"}}>{isCurrentSelection?"Current Plan":`Switch to ${p.name}`}</button>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                     <UsagePanel tierConfig={tierConfig} userId={userId} />
                   </div>
