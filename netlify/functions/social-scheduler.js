@@ -150,11 +150,20 @@ export default async () => {
           try {
             const captionRaw  = post.captions?.[platId];
             const caption     = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
+            // Resolve this platform's hashtags — a manual per-platform override
+            // if the user set one, otherwise the shared set. Handles legacy
+            // posts saved before per-platform overrides existed (plain string).
+            const baseHashtags = typeof post.hashtags === "string"
+              ? post.hashtags
+              : (post.hashtags?.perPlatform?.[platId] ?? post.hashtags?.selected ?? "");
             // X performs best with far fewer hashtags than other platforms — cap
-            // to 2, matching the same limit enforced client-side.
-            const hashtagsForPlat = platId === "twitter"
-              ? (post.hashtags || "").split(/\s+/).filter(Boolean).slice(0, 2).join(" ")
-              : post.hashtags;
+            // to 2, matching the same limit enforced client-side, UNLESS the
+            // user already customized this platform's hashtags specifically
+            // (in which case respect their explicit choice).
+            const hasCustomOverride = typeof post.hashtags === "object" && post.hashtags?.perPlatform?.[platId] != null;
+            const hashtagsForPlat = (platId === "twitter" && !hasCustomOverride)
+              ? baseHashtags.split(/\s+/).filter(Boolean).slice(0, 2).join(" ")
+              : baseHashtags;
             const fullMessage = [caption, hashtagsForPlat].filter(Boolean).join("\n\n").trim();
 
             if (platId === "facebook" && metaConfig?.pages?.length > 0) {
