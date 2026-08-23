@@ -369,6 +369,16 @@ function nextBestTimeSlot(bestTimeStr) {
   } catch { return null; }
 }
 
+// Resolves the effective hashtag string for a given platform — a manual
+// per-platform override if the user has set one, otherwise the shared set.
+// Handles both the current {selected, perPlatform} object format and the
+// legacy plain-string format used by posts saved before per-platform
+// overrides existed.
+function getHashtagsForPlatform(hashtags, platformId) {
+  if (typeof hashtags === "string") return hashtags; // legacy saved posts
+  return hashtags?.perPlatform?.[platformId] ?? hashtags?.selected ?? "";
+}
+
 function limitHashtagsForPlatform(hashtagString, platformId, maxCounts = { twitter: 2 }) {
   const max = maxCounts[platformId];
   if (max == null || !hashtagString) return hashtagString;
@@ -4935,6 +4945,7 @@ class MarketingErrorBoundary extends React.Component {
 
 function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null }) {
   const [tab, setTab] = useState("pipeline");
+  const [editPostForPipeline, setEditPostForPipeline] = useState(null);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const scheduledCount = socialPosts.filter(p => p.status === "scheduled").length;
   const [addSocialInspirationOpen, setAddSocialInspirationOpen] = useState(false);
@@ -5010,6 +5021,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           onSave={onSaveSocialPost}
           onDelete={onDeleteSocialPost}
           tierConfig={tierConfig}
+          onEditInPipeline={(post) => { setEditPostForPipeline(post); setTab("pipeline"); }}
         />
       )}
 
@@ -5028,6 +5040,8 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           onConsumedInitialIdea={() => setPipelineInitialIdea(null)}
           tierConfig={tierConfig}
           onAddCalEvent={onAddCalEvent}
+          editPost={editPostForPipeline}
+          onConsumedEditPost={() => setEditPostForPipeline(null)}
         />
       )}
 
@@ -5830,12 +5844,13 @@ function saveSocialPostsToStorage(posts) {
   try { localStorage.setItem(SOCIAL_POSTS_STORAGE, JSON.stringify(posts)); } catch {}
 }
 
-function createSocialPost({ platforms, captions, hashtags, imageUrl, imagePrompt, scheduledAt, status = "draft" }) {
+function createSocialPost({ id = null, platforms, captions, hashtags, mediaType, imageUrl, imagePrompt, scheduledAt, status = "draft" }) {
   return {
-    id:          Date.now(),
+    id:          id || Date.now(),
     platforms,
     captions,       // { instagram: "...", facebook: "..." }
     hashtags,
+    mediaType,
     imageUrl,
     imagePrompt,
     status,         // "draft" | "scheduled" | "published"
@@ -5883,7 +5898,7 @@ function SocialPipelineProgress({ stage, setStage, completed }) {
   );
 }
 
-function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null }) {
+function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null, editPost = null, onConsumedEditPost = null }) {
   let saved = loadSocialPipelineDraft();
 
   // Migrate old single-platform draft schema (idea.platform: string) to new multi-platform (idea.platforms: array)
@@ -5920,10 +5935,30 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
   // captions is keyed by platform id: { instagram: {text}, facebook: {text}, ... }
   const [captions, setCaptions] = useState(saved?.captions || {});
-  const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"" });
+  const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"", perPlatform:{} });
   const [imageData, setImageData] = useState(saved?.imageData || { prompt:"", url:null, mediaType:"image", imgProvider: resolveImageProvider(apiKeys) });
   const [schedule, setSchedule] = useState(saved?.schedule || { date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
   const [publishResults, setPublishResults] = useState({});
+  const [editingSocialPostId, setEditingSocialPostId] = useState(saved?.editingSocialPostId || null);
+
+  // Load a saved post handed back from Social Posts ("✎ Edit in Pipeline")
+  // — hydrates the full pipeline state so the user can pick up right where
+  // they left off, and tracks the post's own id so saving again updates it
+  // instead of creating a duplicate.
+  useEffect(() => {
+    if (!editPost) return;
+    setIdea(i => ({ ...i, platforms: editPost.platforms || i.platforms }));
+    setCaptions(editPost.captions || {});
+    setHashtags(
+      typeof editPost.hashtags === "string"
+        ? { sets:null, selected: editPost.hashtags, perPlatform:{} }
+        : { sets:null, selected: editPost.hashtags?.selected || "", perPlatform: editPost.hashtags?.perPlatform || {} }
+    );
+    setImageData(d => ({ ...d, url: editPost.imageUrl || null, mediaType: editPost.mediaType || "image", prompt: editPost.imagePrompt || "" }));
+    setEditingSocialPostId(editPost.id);
+    setStage("caption");
+    if (onConsumedEditPost) onConsumedEditPost();
+  }, [editPost]);
 
   const [loading, setLoading] = useState(false);
   const [loadMsg, setLoadMsg] = useState("");
@@ -5938,10 +5973,10 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   // Auto-save draft
   useEffect(() => {
     if (!idea.topic && Object.keys(captions).length === 0) return;
-    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url: imageData.url?.startsWith("https://") ? imageData.url : null }, schedule, savedAt:new Date().toISOString() };
+    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url: imageData.url?.startsWith("https://") ? imageData.url : null }, schedule, editingSocialPostId, savedAt:new Date().toISOString() };
     saveSocialPipelineDraft(data);
     setSavedAt(data.savedAt);
-  }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, schedule]);
+  }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, schedule, editingSocialPostId]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
   const advance  = (next) => { setStage(next); setError(""); setSuccess(""); };
@@ -6091,9 +6126,10 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   });
 
   const buildSocialPostRecord = (status, scheduledAt = null) => createSocialPost({
+    id: editingSocialPostId || null,
     platforms: idea.platforms,
     captions,
-    hashtags: hashtags.selected,
+    hashtags: { selected: hashtags.selected, perPlatform: hashtags.perPlatform || {} },
     imageUrl: imageData.url,
     imagePrompt: imageData.prompt,
     mediaType: imageData.mediaType || "image",
@@ -6177,7 +6213,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
     for (const plat of selectedPlatforms) {
       const captionText = captions[plat.id]?.text || "";
-      const fullMessage = [captionText, limitHashtagsForPlatform(hashtags.selected, plat.id)].filter(Boolean).join("\n\n");
+      const fullMessage = [captionText, limitHashtagsForPlatform(getHashtagsForPlatform(hashtags, plat.id), plat.id)].filter(Boolean).join("\n\n");
       setLoadMsg(`Publishing to ${plat.label}…`);
 
       try {
@@ -6240,7 +6276,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     }
 
     const manualPlat = selectedPlatforms.find(p => results[p.id]?.success === "manual");
-    if (manualPlat) navigator.clipboard.writeText(`${captions[manualPlat.id]?.text || ""}\n\n${hashtags.selected}`);
+    if (manualPlat) navigator.clipboard.writeText(`${captions[manualPlat.id]?.text || ""}\n\n${getHashtagsForPlatform(hashtags, manualPlat.id)}`);
 
     const allOk = selectedPlatforms.every(p => results[p.id]?.success === true || results[p.id]?.success === "manual");
     if (allOk) {
@@ -6262,8 +6298,9 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setStage("idea"); setCompleted([]); setError(""); setSuccess(""); setSavedAt(null); setPublishResults({});
     setIdea({ topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
     setCaptions({});
-    setHashtags({ sets:null, selected:"" });
+    setHashtags({ sets:null, selected:"", perPlatform:{} });
     setImageData({ prompt:"", url:null, mediaType:"image", imgProvider: resolveImageProvider(apiKeys) });
+    setEditingSocialPostId(null);
   };
 
   const allCaptionsReady = selectedPlatforms.length > 0 && selectedPlatforms.every(p => captions[p.id]?.text?.trim());
@@ -6561,10 +6598,50 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               {/* Editable final set */}
               <div>
                 <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-                  Final Set <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0 }}>— editable, added to every caption</span>
+                  Final Set <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0 }}>— editable, added to every caption by default</span>
                 </label>
                 <textarea value={hashtags.selected} onChange={e=>setHashtags(h=>({...h,selected:e.target.value}))} rows={3}
                   style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
+              </div>
+
+              {/* Per-platform overrides — e.g. trim down for Twitter's tighter limit
+                  while keeping the full set for every other platform */}
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>
+                  Customize Per Platform <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0 }}>— optional, overrides the shared set above for just that platform</span>
+                </label>
+                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                  {selectedPlatforms.map(p => {
+                    const isCustom = hashtags.perPlatform?.[p.id] != null;
+                    const value = isCustom ? hashtags.perPlatform[p.id] : hashtags.selected;
+                    const count = value.split(/\s+/).filter(Boolean).length;
+                    const isOver = p.hashtagLimit > 0 && count > p.hashtagLimit;
+                    return (
+                      <div key={p.id} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:`1px solid ${isCustom?"var(--amber)44":"var(--border)"}` }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:isCustom?8:0 }}>
+                          <span style={{ fontSize:12, fontWeight:600, color:p.color }}>{p.icon} {p.label}</span>
+                          <span style={{ fontSize:10, color:isOver?"var(--red)":"var(--muted)" }}>
+                            {p.hashtagLimit === 0 ? "no hashtags" : `${count}/${p.hashtagLimit>0?p.hashtagLimit:"∞"}`}
+                          </span>
+                          <button onClick={() => {
+                            if (isCustom) {
+                              setHashtags(h => { const next = {...h.perPlatform}; delete next[p.id]; return {...h, perPlatform: next}; });
+                            } else {
+                              setHashtags(h => ({...h, perPlatform: {...h.perPlatform, [p.id]: h.selected}}));
+                            }
+                          }}
+                            style={{ marginLeft:"auto", padding:"2px 8px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:10, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            {isCustom ? "↺ Reset to shared" : "✎ Customize"}
+                          </button>
+                        </div>
+                        {isCustom && (
+                          <textarea value={hashtags.perPlatform[p.id]} onChange={e=>setHashtags(h=>({...h, perPlatform:{...h.perPlatform, [p.id]:e.target.value}}))} rows={2}
+                            style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6, borderColor: isOver?"var(--red)":undefined }} />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               <button onClick={generateHashtagsForPost} disabled={loading}
@@ -6716,7 +6793,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                         </div>
                         <div style={{ fontSize:12, lineHeight:1.6, whiteSpace:"pre-wrap", color:"var(--text-secondary)" }}>
                           {captions[plat.id]?.text}
-                          {hashtags.selected && <div style={{ marginTop:6, color:"var(--amber)" }}>{hashtags.selected}</div>}
+                          {getHashtagsForPlatform(hashtags, plat.id) && <div style={{ marginTop:6, color:"var(--amber)" }}>{getHashtagsForPlatform(hashtags, plat.id)}</div>}
                           {prevResult && (
                             <div style={{ marginTop:8, fontSize:11, color:prevResult.success===true?"#5cba6c":prevResult.success==="manual"?"var(--amber)":"var(--red)" }}>
                               {prevResult.message}
@@ -6756,7 +6833,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   const overs = selectedPlatforms
                     .map(p => {
                       const captionText = captions[p.id]?.text || "";
-                      const combined = [captionText, limitHashtagsForPlatform(hashtags.selected, p.id)].filter(Boolean).join("\n\n");
+                      const combined = [captionText, limitHashtagsForPlatform(getHashtagsForPlatform(hashtags, p.id), p.id)].filter(Boolean).join("\n\n");
                       return { p, len: combined.length };
                     })
                     .filter(({ p, len }) => len > p.charLimit);
@@ -7554,7 +7631,7 @@ My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
 
 // ─── SOCIAL POSTS MANAGER ─────────────────────────────────────────────────────
 
-function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, tierConfig = TIER_CONFIG.operative }) {
+function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, tierConfig = TIER_CONFIG.operative, onEditInPipeline = null }) {
   const [filter,   setFilter]   = useState("all");
   const [expanded, setExpanded] = useState(null);
   const [posting,  setPosting]  = useState({});
@@ -7586,7 +7663,7 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
 
     for (const plat of selectedPlats) {
       const captionRaw = post.captions?.[plat.id]; const captionText = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
-      const fullMessage = `${captionText}\n\n${limitHashtagsForPlatform(post.hashtags || "", plat.id)}`.trim();
+      const fullMessage = `${captionText}\n\n${limitHashtagsForPlatform(getHashtagsForPlatform(post.hashtags, plat.id), plat.id)}`.trim();
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
           const page = metaConfig.pages[0];
@@ -7696,6 +7773,13 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
                       {posting[post.id] ? "◌" : "↑ Post Now"}
                     </button>
                   )}
+                  {post.status !== "published" && onEditInPipeline && (
+                    <button onClick={e=>{ e.stopPropagation(); onEditInPipeline(post); }}
+                      title="Open in Social Pipeline to edit captions, hashtags, image, or platforms"
+                      style={{ padding:"5px 12px", borderRadius:7, border:"1px solid var(--amber)", background:"transparent", color:"var(--amber)", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      ✎ Edit
+                    </button>
+                  )}
                   <button onClick={e=>{ e.stopPropagation(); onDelete(post.id); }}
                     style={{ padding:"5px 10px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                     🗑
@@ -7723,9 +7807,16 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
                   </div>
 
                   {/* Hashtags */}
-                  {post.hashtags && (
-                    <div style={{ fontSize:12, color:"var(--amber)", lineHeight:1.6 }}>{post.hashtags}</div>
-                  )}
+                  {(() => {
+                    const display = typeof post.hashtags === "string" ? post.hashtags : post.hashtags?.selected;
+                    const hasCustom = typeof post.hashtags === "object" && post.hashtags?.perPlatform && Object.keys(post.hashtags.perPlatform).length > 0;
+                    return display ? (
+                      <div style={{ fontSize:12, color:"var(--amber)", lineHeight:1.6 }}>
+                        {display}
+                        {hasCustom && <span style={{ marginLeft:8, fontSize:10, color:"var(--muted)", fontWeight:600 }}>(customized per platform)</span>}
+                      </div>
+                    ) : null;
+                  })()}
 
                   {/* Image */}
                   {post.imageUrl && (
