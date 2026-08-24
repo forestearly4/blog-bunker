@@ -217,6 +217,7 @@ export default async () => {
                   text:     fullMessage,
                   imageUrl: imageUrl || "",
                   mediaType: post.mediaType || "image",
+                  platform: platId,
                   scheduledAt: post.scheduledAt,
                   pinterestBoardId: platId === "pinterest" ? bufferConfig?.boardMapping?.[channelId] : undefined,
                 }),

@@ -7,6 +7,9 @@
  * { apiKey, channels: [{channelId, text, imageUrl?, scheduledAt?}] }
  */
 
+import { getStore } from "@netlify/blobs";
+import { Jimp } from "jimp";
+
 const CORS = {
   "Access-Control-Allow-Origin":  "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -15,6 +18,45 @@ const CORS = {
 };
 
 const BUFFER_GQL = "https://api.buffer.com";
+
+// TikTok caps images at this total pixel count (width × height) — the
+// equivalent of 1920×1080, but enforced as a pixel BUDGET rather than a
+// fixed shape, so any aspect ratio is fine as long as it fits under this.
+// Confirmed via the actual error TikTok/Buffer returns when it's exceeded.
+const TIKTOK_MAX_PIXELS = 2073600;
+
+// Downscales an image to fit TikTok's pixel budget if it's over, preserving
+// aspect ratio, and re-hosts it via the same image-hosting mechanism already
+// used elsewhere in the app (get-image.js) so Buffer gets a real, fetchable
+// URL back. Leaves the image untouched (and returns the original URL) if it's
+// already within budget — this only ever downscales, never upscales.
+async function resizeForTikTokIfNeeded(imageUrl) {
+  try {
+    const imgRes = await fetch(imageUrl);
+    if (!imgRes.ok) return imageUrl; // can't check it — let Buffer/TikTok's own validation catch it
+    const buffer = Buffer.from(await imgRes.arrayBuffer());
+    const image = await Jimp.read(buffer);
+    const { width, height } = image.bitmap;
+    const pixelCount = width * height;
+    if (pixelCount <= TIKTOK_MAX_PIXELS) return imageUrl; // already fits
+
+    const scale = Math.sqrt(TIKTOK_MAX_PIXELS / pixelCount);
+    const newWidth  = Math.floor(width * scale);
+    const newHeight = Math.floor(height * scale);
+    image.resize({ w: newWidth, h: newHeight });
+
+    const resizedBuffer = await image.getBuffer("image/jpeg");
+    const id = `tiktok_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const store = getStore("blog-bunker-images");
+    await store.set(id, resizedBuffer, { metadata: { mimeType: "image/jpeg" } });
+
+    console.log(`[buffer-post] resized image for TikTok: ${width}x${height} (${pixelCount} px) → ${newWidth}x${newHeight}`);
+    return `https://blogbunker.netlify.app/api/get-image?id=${id}`;
+  } catch(e) {
+    console.error("[buffer-post] TikTok resize failed, using original image:", e.message);
+    return imageUrl; // fail open — better to try the original than block the whole post
+  }
+}
 
 async function bufferQuery(apiKey, query, variables = {}) {
   const res = await fetch(BUFFER_GQL, {
@@ -86,7 +128,7 @@ export default async (req) => {
   try { body = await req.json(); }
   catch { return new Response(JSON.stringify({ error:"Invalid JSON" }), { status: 400, headers: CORS }); }
 
-  const { apiKey, action, channelId, text, imageUrl, mediaType = "image", scheduledAt, organizationId, pinterestBoardId } = body;
+  const { apiKey, action, channelId, text, imageUrl, mediaType = "image", platform, scheduledAt, organizationId, pinterestBoardId } = body;
 
   if (!apiKey) return new Response(JSON.stringify({ error:"apiKey required" }), { status: 400, headers: CORS });
 
@@ -117,9 +159,18 @@ export default async (req) => {
     if (action === "createPost") {
       if (!channelId || !text) return new Response(JSON.stringify({ error:"channelId and text required" }), { status: 400, headers: CORS });
 
+      // TikTok rejects images over its pixel-count budget outright — resize
+      // proportionally before it ever reaches Buffer/TikTok's own validation.
+      // Only applies to images (video has separate, different constraints
+      // and isn't what this specific error is about).
+      let finalImageUrl = imageUrl;
+      if (platform === "tiktok" && imageUrl?.startsWith("https://") && mediaType !== "video") {
+        finalImageUrl = await resizeForTikTokIfNeeded(imageUrl);
+      }
+
       // Per Buffer schema (May 2026): assets is required, even if empty
-      const assets = imageUrl?.startsWith("https://")
-        ? [mediaType === "video" ? { video: { url: imageUrl } } : { image: { url: imageUrl } }]
+      const assets = finalImageUrl?.startsWith("https://")
+        ? [mediaType === "video" ? { video: { url: finalImageUrl } } : { image: { url: finalImageUrl } }]
         : [];
       const input = {
         channelId,
