@@ -4246,10 +4246,10 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
 
       <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:1,background:"var(--border)",borderRadius:12,overflow:"hidden",border:"1px solid var(--border)"}}>
         {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=>(
-          <div key={d} style={{background:"var(--bg-elevated)",padding:10,textAlign:"center",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{d}</div>
+          <div key={d} style={{background:"var(--bg-elevated)",padding:10,textAlign:"center",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",minWidth:0}}>{d}</div>
         ))}
         {Array(firstDow).fill(null).map((_,i)=>(
-          <div key={`empty-${i}`} style={{background:"var(--bg-surface)",padding:12,minHeight:80,opacity:0.3}}/>
+          <div key={`empty-${i}`} style={{background:"var(--bg-surface)",padding:12,minHeight:80,opacity:0.3,minWidth:0}}/>
         ))}
         {Array(daysInMonth).fill(null).map((_,i)=>{
           const day=i+1;
@@ -4258,7 +4258,7 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
           return (
             <div key={day}
               onClick={()=>{setCalModalDay(day);setCalModalOpen(true);}}
-              style={{background:"var(--bg-surface)",padding:"8px 10px",minHeight:80,cursor:"pointer",borderTop:tod?"2px solid var(--amber)":"none",boxSizing:"border-box"}}
+              style={{background:"var(--bg-surface)",padding:"8px 10px",minHeight:80,minWidth:0,overflow:"hidden",cursor:"pointer",borderTop:tod?"2px solid var(--amber)":"none",boxSizing:"border-box"}}
               onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"}
               onMouseLeave={e=>e.currentTarget.style.background="var(--bg-surface)"}>
               <div style={{fontSize:12,fontWeight:tod?700:400,color:tod?"var(--amber)":"var(--text-secondary)",marginBottom:4,display:"flex",alignItems:"center",gap:5}}>
@@ -4269,7 +4269,7 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
                 <div key={ei}
                   onClick={e=>{e.stopPropagation();deleteCalEvent(calEvents.findIndex(c=>c.day===day&&c.title===ev.title));}}
                   title="Click to remove"
-                  style={{fontSize:10,padding:"2px 6px",borderRadius:4,background:(tc[ev.type]||"var(--muted)")+"22",color:tc[ev.type]||"var(--muted)",fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>
+                  style={{fontSize:10,padding:"2px 6px",borderRadius:4,background:(tc[ev.type]||"var(--muted)")+"22",color:tc[ev.type]||"var(--muted)",fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer",maxWidth:"100%"}}>
                   {ev.title}
                 </div>
               ))}
