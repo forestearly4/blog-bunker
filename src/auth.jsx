@@ -33,6 +33,18 @@ export function AuthProvider({ children }) {
   const [authData, setAuthData] = useState(loadAuth);
   const [loading,  setLoading]  = useState(false);
 
+  // Set the global userId SYNCHRONOUSLY on every render (not inside a
+  // useEffect) — this must be available before ANY child component's first
+  // render, since several parts of the app read window.__bbUserId directly
+  // during their own initial render/state setup. Deferring this to an effect
+  // created a real race condition: on a fresh page load, effects only run
+  // after the full render tree commits, so a child reading this during its
+  // own first render could see it unset even though the user is already
+  // logged in — intermittently requiring a reload (or two) to "catch up."
+  if (authData?.user) {
+    window.__bbUserId = authData.user.email || authData.user.id || "anonymous";
+  }
+
   // Auto-refresh token before expiry
   useEffect(() => {
     if (!authData?.refreshToken || !authData?.expiry) return;
@@ -108,13 +120,6 @@ export function AuthProvider({ children }) {
     setAuthData(null);
     window.__bbUserId = null;
   }, []);
-
-  // Set global userId on mount if already logged in
-  useEffect(() => {
-    if (authData?.user) {
-      window.__bbUserId = authData.user.email || authData.user.id || "anonymous";
-    }
-  }, [authData]);
 
   // Expose accessToken getter (auto-refreshes if needed)
   const getAccessToken = useCallback(async () => {

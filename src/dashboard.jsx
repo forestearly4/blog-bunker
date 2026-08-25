@@ -64,20 +64,30 @@ function buildBrandImageContext(guide) {
 async function cloudGet(key, userId) {
   try {
     const res = await fetch(`/api/data?key=${encodeURIComponent(key)}&userId=${encodeURIComponent(userId)}`);
+    if (!res.ok) { console.error(`[cloudGet] "${key}" failed: HTTP ${res.status}`); return null; }
     const data = await res.json();
     return data.value;
-  } catch { return null; }
+  } catch(e) { console.error(`[cloudGet] "${key}" threw:`, e.message); return null; }
 }
 
 async function cloudSet(key, userId, value) {
   try {
-    await fetch("/api/data", {
+    const res = await fetch("/api/data", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, userId, value }),
     });
+    if (!res.ok) {
+      let errText;
+      try { errText = (await res.json()).error; } catch { errText = `HTTP ${res.status}`; }
+      console.error(`[cloudSet] "${key}" failed:`, errText);
+      return false;
+    }
     return true;
-  } catch { return false; }
+  } catch(e) {
+    console.error(`[cloudSet] "${key}" threw:`, e.message);
+    return false;
+  }
 }
 
 // Debounced cloud save — avoids hammering the API on every keystroke
@@ -2518,10 +2528,16 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
 
 const LOGO_STORAGE = "bb_workspace_logo";
 function loadLogo() { try { return localStorage.getItem(LOGO_STORAGE) || null; } catch { return null; } }
-function saveLogo(data) {
+async function saveLogo(data) {
   try { localStorage.setItem(LOGO_STORAGE, data); } catch {}
   const uid = window.__bbUserId;
-  if (uid) cloudSet("workspace_logo", uid, data);
+  console.log("[logo] saveLogo called, userId:", uid, "data length:", data?.length);
+  if (uid) {
+    const ok = await cloudSet("workspace_logo", uid, data);
+    console.log("[logo] cloudSet result:", ok);
+  } else {
+    console.log("[logo] NOT saved to cloud — window.__bbUserId was not set at save time");
+  }
 }
 
 function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
@@ -5979,16 +5995,53 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   const [success, setSuccess] = useState("");
   const [savedAt, setSavedAt] = useState(saved?.savedAt || null);
 
+  // Pull the cloud copy of the in-progress draft on mount — if it's newer
+  // than (or exists when local doesn't) what was loaded synchronously from
+  // localStorage above, hydrate everything from it instead. This is what
+  // actually lets an in-progress social post resume on a different device;
+  // the local-only auto-save (see below) never reached other devices before.
+  useEffect(() => {
+    const uid = window.__bbUserId;
+    if (!uid) return;
+    (async () => {
+      const cloud = await cloudGet("social_pipeline_draft", uid);
+      if (!cloud) return;
+      const cloudTime = cloud.savedAt ? new Date(cloud.savedAt).getTime() : 0;
+      const localTime = saved?.savedAt ? new Date(saved.savedAt).getTime() : 0;
+      if (cloudTime <= localTime) return; // local copy is already current or newer
+      let hydrated = cloud;
+      if (hydrated?.idea && !Array.isArray(hydrated.idea.platforms)) {
+        const legacyPlatform = hydrated.idea.platform || "instagram";
+        hydrated = { ...hydrated, idea: { ...hydrated.idea, platforms: [legacyPlatform] } };
+      }
+      setStage(hydrated.stage || "idea");
+      setCompleted(hydrated.completed || []);
+      setIdea(hydrated.idea || { topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
+      setCaptions(hydrated.captions || {});
+      setHashtags(hydrated.hashtags || { sets:null, selected:"", perPlatform:{} });
+      setImageData(d => ({ ...d, ...(hydrated.imageData || {}) }));
+      setSchedule(hydrated.schedule || { date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
+      setEditingSocialPostId(hydrated.editingSocialPostId || null);
+      saveSocialPipelineDraft(hydrated); // keep local copy in sync too
+      setSavedAt(hydrated.savedAt);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
   const btnA = { padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 };
   const btnS = { padding:"10px 20px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" };
 
-  // Auto-save draft
+  // Auto-save draft — local immediately, cloud debounced so it can be picked
+  // up on another device (this was localStorage-only before, the real gap
+  // behind "doesn't pick up where I left off" on a different computer).
   useEffect(() => {
     if (!idea.topic && Object.keys(captions).length === 0) return;
     const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url: imageData.url?.startsWith("https://") ? imageData.url : null }, schedule, editingSocialPostId, savedAt:new Date().toISOString() };
     saveSocialPipelineDraft(data);
     setSavedAt(data.savedAt);
+    const uid = window.__bbUserId;
+    if (uid) cloudSaveDebounced("social_pipeline_draft", uid, data);
   }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, schedule, editingSocialPostId]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
@@ -12146,6 +12199,7 @@ export default function Dashboard({ user, workspace }) {
       }
       // Pull workspace logo
       const cloudLogo = await cloudGet("workspace_logo", userId);
+      console.log("[logo] pulled from cloud:", cloudLogo ? `string, length ${cloudLogo.length}` : cloudLogo);
       if (cloudLogo && typeof cloudLogo === "string") {
         try { localStorage.setItem(LOGO_STORAGE, cloudLogo); } catch {}
         window.dispatchEvent(new CustomEvent("bb-logo-updated", { detail: cloudLogo }));

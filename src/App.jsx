@@ -10,19 +10,22 @@ function userKey(user) {
 async function cloudGet(key, userId) {
   try {
     const res  = await fetch(`/api/data?key=${encodeURIComponent(key)}&userId=${encodeURIComponent(userId)}`);
+    if (!res.ok) { console.error(`[App cloudGet] "${key}" failed: HTTP ${res.status}`); return null; }
     const data = await res.json();
     return data.value;
-  } catch { return null; }
+  } catch(e) { console.error(`[App cloudGet] "${key}" threw:`, e.message); return null; }
 }
 
 async function cloudSet(key, userId, value) {
   try {
-    await fetch("/api/data", {
+    const res = await fetch("/api/data", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ key, userId, value }),
     });
-  } catch {}
+    if (!res.ok) { console.error(`[App cloudSet] "${key}" failed: HTTP ${res.status}`); return false; }
+    return true;
+  } catch(e) { console.error(`[App cloudSet] "${key}" threw:`, e.message); return false; }
 }
 
 function AppShell() {
