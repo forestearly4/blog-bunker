@@ -3680,18 +3680,6 @@ Titles and descriptions MUST be under their character limits. Score each on: key
             </button>
             <button onClick={() => setStage("brief")} style={btnS}>← Back to Brief</button>
           </div>
-
-          {draft.title && (
-            <HeadlineImagePanel
-              title={draft.title}
-              body={draft.body}
-              activeProvider={activeProvider}
-              activeModel={activeModel}
-              apiKeys={apiKeys}
-              onImageSaved={(url) => setDraft(d => ({ ...d, headlineImageUrl: url }))}
-              existingImageUrl={draft.headlineImageUrl || null}
-            />
-          )}
         </div>
       )}
 
@@ -3858,6 +3846,18 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                 ↻ Re-run Analysis
               </button>
             </div>
+          )}
+
+          {draft.title && (
+            <HeadlineImagePanel
+              title={draft.title}
+              body={draft.body}
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+              onImageSaved={(url) => setDraft(d => ({ ...d, headlineImageUrl: url }))}
+              existingImageUrl={draft.headlineImageUrl || null}
+            />
           )}
 
           <div style={{ display:"flex", gap:10 }}>
@@ -5954,14 +5954,6 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   // idea.platforms is now an ARRAY — supports multi-select
   const [idea, setIdea] = useState(saved?.idea || { topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
 
-  // Load an idea handed off from Inspiration ("→ Social Pipeline" button)
-  useEffect(() => {
-    if (!initialIdea) return;
-    setIdea(i => ({ ...i, topic: initialIdea.title || i.topic, inspirationSource: initialIdea.source || null }));
-    setStage("idea");
-    if (onConsumedInitialIdea) onConsumedInitialIdea();
-  }, [initialIdea]);
-
   // captions is keyed by platform id: { instagram: {text}, facebook: {text}, ... }
   const [captions, setCaptions] = useState(saved?.captions || {});
   const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"", perPlatform:{} });
@@ -5995,12 +5987,39 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   const [success, setSuccess] = useState("");
   const [savedAt, setSavedAt] = useState(saved?.savedAt || null);
 
+  // Load an idea handed off from Inspiration ("→ Social Pipeline" button) or
+  // from a Blog article ("Send to Social Pipeline") — starts a genuinely
+  // FRESH post rather than merging into whatever was previously being worked
+  // on, which was the real bug behind "carries over the last post I made."
+  useEffect(() => {
+    if (!initialIdea) return;
+    setStage("idea");
+    setCompleted([]);
+    setIdea({ topic: initialIdea.title || "", platforms:["instagram"], type:"photo", inspirationSource: initialIdea.source || null });
+    setCaptions({});
+    setHashtags({ sets:null, selected:"", perPlatform:{} });
+    setImageData({
+      prompt: "",
+      url: initialIdea.headlineImageUrl || null,
+      mediaType: "image",
+      imgProvider: resolveImageProvider(apiKeys),
+    });
+    setSchedule({ date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
+    setEditingSocialPostId(null);
+    clearSocialPipelineDraft();
+    if (onConsumedInitialIdea) onConsumedInitialIdea();
+  }, [initialIdea]);
+
   // Pull the cloud copy of the in-progress draft on mount — if it's newer
   // than (or exists when local doesn't) what was loaded synchronously from
   // localStorage above, hydrate everything from it instead. This is what
   // actually lets an in-progress social post resume on a different device;
   // the local-only auto-save (see below) never reached other devices before.
+  // Skipped entirely when an explicit hand-off (initialIdea/editPost) is
+  // present — a fresh start or a specific post to edit should always win
+  // over silently resuming whatever was previously being drafted.
   useEffect(() => {
+    if (initialIdea || editPost) return;
     const uid = window.__bbUserId;
     if (!uid) return;
     (async () => {
