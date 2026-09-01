@@ -2,7 +2,7 @@ import { useState, useRef } from "react";
 
 const PLANS = [
   { id:"scout",     name:"Scout",     price:"$19/mo", byokPrice:"$16/mo", color:"#8a8880", features:["1 workspace","15,000 AI words/mo","20 AI images/mo","Meta (Facebook & Instagram) posting","Bring your own AI key","Community support"] },
-  { id:"operative", name:"Operative", price:"$45/mo", byokPrice:"$40/mo", color:"#d4a054", popular:true, features:["3 workspaces included, then +$5/mo per additional workspace","60,000 AI words/mo","100 AI images/mo","Buffer (TikTok, X, Pinterest, Reddit)","Bring your own AI key","Email support"] },
+  { id:"operative", name:"Operative", price:"$45/mo", byokPrice:"$40/mo", color:"#a67c52", popular:true, features:["3 workspaces included, then +$5/mo per additional workspace","60,000 AI words/mo","100 AI images/mo","Buffer (TikTok, X, Pinterest, Reddit)","Bring your own AI key","Email support"] },
 ];
 
 const BLOG_TYPES = [
@@ -18,7 +18,7 @@ const BLOG_TYPES = [
 
 const STEPS = ["Welcome","Your Blog","Platform","Choose Plan","All Set"];
 
-const DARK = { "--bg":"#0e0f11","--bg-surface":"#16171b","--bg-elevated":"#1c1d22","--border":"#2a2b33","--text":"#e8e6e1","--text-secondary":"#8a8880","--amber":"#d4a054","--amber-glow":"rgba(212,160,84,0.12)","--green":"#5cba6c","--red":"#c75454","--muted":"#5c5b56" };
+const DARK = { "--bg":"#2b2620","--bg-surface":"#3a332a","--bg-elevated":"#443c30","--border":"#4a4234","--text":"#e8dfc9","--text-secondary":"#a89a80","--amber":"#a67c52","--amber-glow":"rgba(166,124,82,0.14)","--green":"#7a9166","--red":"#b3543a","--muted":"#6b5f4d" };
 const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box", transition:"border-color 0.2s" };
 
 function ProgressBar({ step }) {
@@ -135,7 +135,7 @@ function StepPlatform({ data, onChange, onNext, onBack }) {
         ))}
       </div>
       {data.platform==="wordpress" && (data.connected
-        ? <div style={{ padding:16, borderRadius:10, border:"1px solid rgba(92,186,108,0.4)", background:"rgba(92,186,108,0.08)", display:"flex", alignItems:"center", gap:12 }}><span style={{ width:10, height:10, borderRadius:99, background:"#5cba6c", display:"inline-block", boxShadow:"0 0 8px rgba(92,186,108,0.5)" }}/><span style={{ fontWeight:600, fontSize:13 }}>WordPress Connected!</span></div>
+        ? <div style={{ padding:16, borderRadius:10, border:"1px solid rgba(92,186,108,0.4)", background:"rgba(92,186,108,0.08)", display:"flex", alignItems:"center", gap:12 }}><span style={{ width:10, height:10, borderRadius:99, background:"#7a9166", display:"inline-block", boxShadow:"0 0 8px rgba(92,186,108,0.5)" }}/><span style={{ fontWeight:600, fontSize:13 }}>WordPress Connected!</span></div>
         : <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
             <div style={{ fontSize:11, color:"var(--text-secondary)", padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", lineHeight:1.6 }}>
               In your WordPress admin: <strong style={{ color:"var(--amber)" }}>Users → Profile → Application Passwords</strong> — name it "Blog Bunker" and generate one. No plugin needed, it's built into WordPress.
@@ -181,7 +181,7 @@ function StepPlan({ data, onChange, onNext, onBack }) {
                 <span style={{ marginLeft:"auto", fontSize:15, fontWeight:700, color:data.plan===plan.id?plan.color:"var(--text-secondary)", fontFamily:"'Fraunces',serif" }}>{plan.price}</span>
               </div>
               {plan.byokPrice && (
-                <div style={{ fontSize:10, color:"#5cba6c", marginBottom:4 }}>
+                <div style={{ fontSize:10, color:"#7a9166", marginBottom:4 }}>
                   or {plan.byokPrice} with your own AI key
                 </div>
               )}
@@ -223,13 +223,13 @@ function StepDone({ wsData, platformData, planData, ideaData, onComplete }) {
   const handleGo = () => onComplete({ ...wsData, ...platformData, plan:planData.plan, firstIdea: ideaData?.title ? ideaData : null });
   return (
     <div style={{ padding:40, textAlign:"center" }}>
-      <div style={{ width:64, height:64, borderRadius:99, background:"rgba(92,186,108,0.15)", border:"2px solid #5cba6c", display:"flex", alignItems:"center", justifyContent:"center", fontSize:26, margin:"0 auto 20px" }}>✓</div>
+      <div style={{ width:64, height:64, borderRadius:99, background:"rgba(92,186,108,0.15)", border:"2px solid #7a9166", display:"flex", alignItems:"center", justifyContent:"center", fontSize:26, margin:"0 auto 20px" }}>✓</div>
       <h2 style={{ fontFamily:"'Fraunces',serif", fontSize:24, fontWeight:700, marginBottom:8 }}>You're in the Bunker.</h2>
       <p style={{ fontSize:13, color:"var(--text-secondary)", marginBottom:24 }}>Your workspace is ready. Here's what we set up:</p>
       <div style={{ display:"flex", flexDirection:"column", gap:10, maxWidth:400, margin:"0 auto 24px", textAlign:"left" }}>
         {[
           { icon:"▤", label:"Workspace", value:wsData.name||"My Blog", sub:blogType?`${blogType.icon} ${blogType.label}`:null, color:null },
-          { icon:"◉", label:"Platform", value:platformData.platform==="wordpress"&&platformData.connected?"WordPress — Connected":platformData.platform==="wordpress"?"WordPress — Not connected":"No platform yet", color:platformData.connected?"#5cba6c":null },
+          { icon:"◉", label:"Platform", value:platformData.platform==="wordpress"&&platformData.connected?"WordPress — Connected":platformData.platform==="wordpress"?"WordPress — Not connected":"No platform yet", color:platformData.connected?"#7a9166":null },
           { icon:"✦", label:"Plan", value:`${plan.name} — first month free`, color:plan.color },
         ].map(row=>(
           <div key={row.label} style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>

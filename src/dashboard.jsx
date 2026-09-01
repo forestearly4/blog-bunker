@@ -428,12 +428,12 @@ function UsagePanel({ tierConfig, userId }) {
   const wordsUsed  = usage?.wordsUsed ?? 0;
   const wordCap    = tierConfig.wordsPerMonth;
   const wordPct    = Math.min(100, Math.round((wordsUsed / wordCap) * 100));
-  const wordColor  = wordPct >= 100 ? "var(--red)" : wordPct >= 80 ? "var(--amber)" : "#5cba6c";
+  const wordColor  = wordPct >= 100 ? "var(--red)" : wordPct >= 80 ? "var(--amber)" : "#7a9166";
 
   const imagesUsed = usage?.imagesUsed ?? 0;
   const imageCap   = tierConfig.imagesPerMonth;
   const imagePct   = Math.min(100, Math.round((imagesUsed / imageCap) * 100));
-  const imageColor = imagePct >= 100 ? "var(--red)" : imagePct >= 80 ? "var(--amber)" : "#5cba6c";
+  const imageColor = imagePct >= 100 ? "var(--red)" : imagePct >= 80 ? "var(--amber)" : "#7a9166";
 
   return (
     <div style={{ borderTop:"1px solid var(--border)", paddingTop:20 }}>
@@ -607,7 +607,7 @@ const AI_PROVIDERS = [
     name: "Claude",
     company: "Anthropic",
     logo: "◈",
-    color: "#d4a054",
+    color: "#a67c52",
     models: ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
     defaultModel: "claude-sonnet-5",
     keyPrefix: "sk-ant-",
@@ -1125,7 +1125,7 @@ function ImageSavePanel({ imageUrl, tags = ["generated"], name = "generated" }) 
         </div>
       </div>
       {status && (
-        <div style={{ padding:"8px 12px", background:status.startsWith("✗")?"var(--red)11":status.startsWith("✓")?"#5cba6c11":"var(--bg-elevated)", fontSize:11, color:status.startsWith("✗")?"var(--red)":status.startsWith("✓")?"#5cba6c":"var(--text-secondary)", borderTop:"1px solid var(--border)" }}>
+        <div style={{ padding:"8px 12px", background:status.startsWith("✗")?"var(--red)11":status.startsWith("✓")?"#7a916611":"var(--bg-elevated)", fontSize:11, color:status.startsWith("✗")?"var(--red)":status.startsWith("✓")?"#7a9166":"var(--text-secondary)", borderTop:"1px solid var(--border)" }}>
           {status}
         </div>
       )}
@@ -1517,7 +1517,7 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig 
               {plat.id === "twitter" && (
                 <div style={{ display:"flex", alignItems:"center", gap:10 }}>
                   <div style={{ flex:1, height:4, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
-                    <div style={{ height:"100%", width:`${Math.min(100,(charCount(plat.id)/280)*100)}%`, background:charCount(plat.id)>280?"var(--red)":charCount(plat.id)>240?"var(--amber)":"#5cba6c", borderRadius:99, transition:"width 0.2s" }} />
+                    <div style={{ height:"100%", width:`${Math.min(100,(charCount(plat.id)/280)*100)}%`, background:charCount(plat.id)>280?"var(--red)":charCount(plat.id)>240?"var(--amber)":"#7a9166", borderRadius:99, transition:"width 0.2s" }} />
                   </div>
                   <span style={{ fontSize:12, fontWeight:700, color:charCount(plat.id)>280?"var(--red)":charCount(plat.id)>240?"var(--amber)":"var(--muted)", flexShrink:0 }}>
                     {280 - charCount(plat.id)} chars left
@@ -2399,14 +2399,14 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
       </div>
 
       {/* Connection status */}
-      <div style={{ padding:16, borderRadius:10, border:`1px solid ${isConnected?"#5cba6c44":"var(--border)"}`, background:isConnected?"#5cba6c0a":"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+      <div style={{ padding:16, borderRadius:10, border:`1px solid ${isConnected?"#7a916644":"var(--border)"}`, background:isConnected?"#7a91660a":"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
         <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-          <span style={{ width:10, height:10, borderRadius:99, background:isConnected?"#5cba6c":"var(--muted)", display:"inline-block", boxShadow:isConnected?"0 0 8px #5cba6c66":"none" }}/>
+          <span style={{ width:10, height:10, borderRadius:99, background:isConnected?"#7a9166":"var(--muted)", display:"inline-block", boxShadow:isConnected?"0 0 8px #7a916666":"none" }}/>
           <div>
             <div style={{ fontWeight:600, fontSize:14 }}>{isConnected ? "Wix Blog Connected" : "Not Connected"}</div>
             {lastSync && <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>Last sync: {new Date(lastSync).toLocaleString()}</div>}
-            {isConnected && pullCount > 0 && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>{pullCount} posts pulled</div>}
-            {isConnected && cfg.oauthToken && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>✓ OAuth — full read/write access</div>}
+            {isConnected && pullCount > 0 && <div style={{ fontSize:11, color:"#7a9166", marginTop:2 }}>{pullCount} posts pulled</div>}
+            {isConnected && cfg.oauthToken && <div style={{ fontSize:11, color:"#7a9166", marginTop:2 }}>✓ OAuth — full read/write access</div>}
           </div>
         </div>
         {isConnected && <button onClick={disconnect} style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Disconnect</button>}
@@ -2487,7 +2487,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
       {isConnected && (
         <div style={{ display:"flex", gap:10 }}>
           <button onClick={pullPosts} disabled={syncing}
-            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:syncing?"var(--bg-elevated)":"#5cba6c", color:syncing?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:syncing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:syncing?"var(--bg-elevated)":"#7a9166", color:syncing?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:syncing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
             {syncing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Syncing…</> : "↓ Pull Posts from Wix"}
           </button>
         </div>
@@ -2510,7 +2510,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
             {log.map((l,i)=>(
               <div key={i} style={{ fontSize:11, display:"flex", gap:10, alignItems:"flex-start" }}>
                 <span style={{ color:"var(--muted)", flexShrink:0, fontFamily:"monospace", fontSize:10 }}>{l.ts}</span>
-                <span style={{ color:l.type==="success"?"#5cba6c":l.type==="error"?"var(--red)":"var(--text-secondary)", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>{l.msg}</span>
+                <span style={{ color:l.type==="success"?"#7a9166":l.type==="error"?"var(--red)":"var(--text-secondary)", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>{l.msg}</span>
               </div>
             ))}
           </div>
@@ -2613,7 +2613,7 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
                 Remove Logo
               </button>
             )}
-            {logoStatus && <span style={{ fontSize:11, color:"#5cba6c" }}>{logoStatus}</span>}
+            {logoStatus && <span style={{ fontSize:11, color:"#7a9166" }}>{logoStatus}</span>}
           </div>
         </div>
         <input ref={logoInput} type="file" accept="image/*" style={{ display:"none" }} onChange={e => handleLogoUpload(e.target.files[0])} />
@@ -2955,9 +2955,9 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
               <div style={{ display:"flex", alignItems:"center", gap:6 }}>
                 {data.realData && (
                   <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99,
-                    background: data.source==="rss" ? "#5cba6c15" : "#7c3aed15",
-                    color:      data.source==="rss" ? "#5cba6c"   : "#7c3aed",
-                    border:    `1px solid ${data.source==="rss" ? "#5cba6c33" : "#7c3aed33"}`,
+                    background: data.source==="rss" ? "#7a916615" : "#7c3aed15",
+                    color:      data.source==="rss" ? "#7a9166"   : "#7c3aed",
+                    border:    `1px solid ${data.source==="rss" ? "#7a916633" : "#7c3aed33"}`,
                     fontWeight:600 }}>
                     {data.source==="rss" ? "● RSS feed" : "● Web search"}
                   </span>
@@ -3487,7 +3487,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
 
       {/* Error / Success */}
       {error   && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>{error}</div>}
-      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", color:"#5cba6c", fontSize:13 }}>{success}</div>}
+      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#7a916611", border:"1px solid #7a916633", color:"#7a9166", fontSize:13 }}>{success}</div>}
 
       {/* Loading overlay */}
       {loading && (
@@ -3584,7 +3584,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                   </span>
                 )}
                 {saveStatus === "saved" && (
-                  <span style={{ fontSize:11, color:"#5cba6c", display:"flex", alignItems:"center", gap:4 }}>
+                  <span style={{ fontSize:11, color:"#7a9166", display:"flex", alignItems:"center", gap:4 }}>
                     ✓ Saved
                   </span>
                 )}
@@ -3645,7 +3645,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               </div>
 
               {linkError && <div style={{ fontSize:12, color:"var(--red)", marginBottom:10 }}>{linkError}</div>}
-              {linkInserted && <div style={{ fontSize:12, color:"#5cba6c", marginBottom:10 }}>✓ Links inserted into the draft body.</div>}
+              {linkInserted && <div style={{ fontSize:12, color:"#7a9166", marginBottom:10 }}>✓ Links inserted into the draft body.</div>}
 
               {[...linkSuggestions.internal, ...linkSuggestions.external].length > 0 && (
                 <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
@@ -3655,7 +3655,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                       <div style={{ flex:1, minWidth:0 }}>
                         <div style={{ fontSize:12, color:"var(--text)" }}>
                           <span style={{ fontWeight:700 }}>"{l.anchorText}"</span> → {l.targetTitle}
-                          <span style={{ marginLeft:6, fontSize:10, padding:"1px 6px", borderRadius:99, background:l.kind==="internal"?"#7c9ce022":"#5cba6c22", color:l.kind==="internal"?"#7c9ce0":"#5cba6c" }}>{l.kind === "internal" ? "internal" : "external"}</span>
+                          <span style={{ marginLeft:6, fontSize:10, padding:"1px 6px", borderRadius:99, background:l.kind==="internal"?"#7c9ce022":"#7a916622", color:l.kind==="internal"?"#7c9ce0":"#7a9166" }}>{l.kind === "internal" ? "internal" : "external"}</span>
                         </div>
                         <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>{l.reason}</div>
                         {l.kind === "internal" && !l.url && (
@@ -3704,7 +3704,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               {/* Overall score + keyword */}
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
                 {[
-                  { label:"Overall SEO Score", value:`${enhance.overallScore}/100`, color: enhance.overallScore>=80?"#5cba6c":enhance.overallScore>=60?"var(--amber)":"var(--red)" },
+                  { label:"Overall SEO Score", value:`${enhance.overallScore}/100`, color: enhance.overallScore>=80?"#7a9166":enhance.overallScore>=60?"var(--amber)":"var(--red)" },
                   { label:"Readability Score",  value:`${enhance.readabilityScore}/100`, color:"#7c3aed" },
                   { label:"Primary Keyword",   value:enhance.primaryKeyword, color:"var(--amber)" },
                 ].map(s => (
@@ -3725,7 +3725,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                     const selected = enhance.selectedTitle === i;
                     const over = t.charCount > 60 || t.text?.length > 60;
                     const score = t.score || 0;
-                    const scoreColor = score >= 80 ? "#5cba6c" : score >= 65 ? "var(--amber)" : "var(--red)";
+                    const scoreColor = score >= 80 ? "#7a9166" : score >= 65 ? "var(--amber)" : "var(--red)";
                     return (
                       <div key={i} onClick={() => setEnhance(e => ({ ...e, selectedTitle:i, metaTitle:t.text }))}
                         style={{ padding:"12px 14px", borderRadius:9, border:`2px solid ${selected?"var(--amber)":"var(--border)"}`, background:selected?"var(--amber-glow)":"var(--bg-elevated)", cursor:"pointer", transition:"all 0.15s" }}>
@@ -3766,7 +3766,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                     const selected = enhance.selectedDesc === i;
                     const over = d.charCount > 160 || d.text?.length > 160;
                     const score = d.score || 0;
-                    const scoreColor = score >= 80 ? "#5cba6c" : score >= 65 ? "var(--amber)" : "var(--red)";
+                    const scoreColor = score >= 80 ? "#7a9166" : score >= 65 ? "var(--amber)" : "var(--red)";
                     return (
                       <div key={i} onClick={() => setEnhance(e => ({ ...e, selectedDesc:i, metaDescription:d.text }))}
                         style={{ padding:"12px 14px", borderRadius:9, border:`2px solid ${selected?"var(--amber)":"var(--border)"}`, background:selected?"var(--amber-glow)":"var(--bg-elevated)", cursor:"pointer", transition:"all 0.15s" }}>
@@ -3954,7 +3954,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
       {stage === "publish" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           {success ? (
-            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:40, textAlign:"center" }}>
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #7a916644", borderRadius:12, padding:40, textAlign:"center" }}>
               <div style={{ fontSize:48, marginBottom:16 }}>✓</div>
               <h3 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, marginBottom:8 }}>Post Published!</h3>
               <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:24 }}>{success}</p>
@@ -4175,7 +4175,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               </div>
 
               <div style={{ display:"flex", gap:10 }}>
-                <button onClick={handlePublish} disabled={loading} style={{ ...btnA, background:loading?"var(--bg-elevated)":"#5cba6c", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
+                <button onClick={handlePublish} disabled={loading} style={{ ...btnA, background:loading?"var(--bg-elevated)":"#7a9166", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
                   {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : schedule.status==="published" ? "↑ Publish Now" : schedule.status==="draft" ? "Save as Draft" : "Schedule Post"}
                 </button>
                 <button onClick={()=>setStage("social")} style={btnS}>← Back to Social</button>
@@ -4446,7 +4446,7 @@ function GSCPanel({ onDataLoaded }) {
         </p>
       </div>
 
-      {success && <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c0a", border:"1px solid #5cba6c44", fontSize:12, color:"#5cba6c" }}>{success}</div>}
+      {success && <div style={{ padding:"10px 14px", borderRadius:8, background:"#7a91660a", border:"1px solid #7a916644", fontSize:12, color:"#7a9166" }}>{success}</div>}
       {error   && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)0a", border:"1px solid var(--red)44", fontSize:12, color:"var(--red)" }}>{error}</div>}
 
       {/* OAuth Client ID input */}
@@ -4476,7 +4476,7 @@ function GSCPanel({ onDataLoaded }) {
                 style={{ padding:"8px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:6 }}>
                 {loadingSites ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Loading…</> : "↓ Load my GSC properties"}
               </button>
-              {siteUrl && <div style={{ fontSize:12, color:"#5cba6c", alignSelf:"center", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>✓ {siteUrl}</div>}
+              {siteUrl && <div style={{ fontSize:12, color:"#7a9166", alignSelf:"center", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>✓ {siteUrl}</div>}
             </div>
             {sites.length > 0 && (
               <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
@@ -4522,7 +4522,7 @@ function GSCPanel({ onDataLoaded }) {
               style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
               Disconnect
             </button>
-            <span style={{ fontSize:12, color:"#5cba6c", alignSelf:"center" }}>● Connected{cfg.lastFetch ? ` · Last synced ${new Date(cfg.lastFetch).toLocaleString()}` : ""}</span>
+            <span style={{ fontSize:12, color:"#7a9166", alignSelf:"center" }}>● Connected{cfg.lastFetch ? ` · Last synced ${new Date(cfg.lastFetch).toLocaleString()}` : ""}</span>
           </>
         )}
       </div>
@@ -4896,7 +4896,7 @@ function MetaConnectPanel({ onConnected }) {
   if (cfg.connected && cfg.pages) {
     return (
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-        <div style={{ padding:14, borderRadius:10, border:"1px solid #5cba6c44", background:"#5cba6c0a", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <div style={{ padding:14, borderRadius:10, border:"1px solid #7a916644", background:"#7a91660a", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <div>
             <div style={{ fontWeight:700, fontSize:14 }}>✓ Facebook & Instagram Connected</div>
             <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:3 }}>
@@ -5385,7 +5385,7 @@ Be specific and actionable. Use real fly fishing and whiskey terminology. Vary t
                     <div style={{ fontSize:11, color:"var(--muted)", fontStyle:"italic" }}>Why it works: {idea.why}</div>
                   </div>
                   <button onClick={() => saveIdea(idea, i)} disabled={saved[i]}
-                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:saved[i]?"#5cba6c":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[i]?"default":"pointer", fontFamily:"var(--font-body)", flexShrink:0, whiteSpace:"nowrap" }}>
+                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:saved[i]?"#7a9166":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[i]?"default":"pointer", fontFamily:"var(--font-body)", flexShrink:0, whiteSpace:"nowrap" }}>
                     {saved[i] ? "✓ Saved" : "+ Save Idea"}
                   </button>
                 </div>
@@ -5441,7 +5441,7 @@ Be specific and actionable. Use real fly fishing and whiskey terminology. Vary t
 
           {/* Angles */}
           <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
-            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:14 }}>💡 Content Angles</div>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166", marginBottom:14 }}>💡 Content Angles</div>
             {results.angles?.map((a,i) => (
               <div key={i} style={{ padding:"10px 0", borderBottom:"1px solid var(--border)" }}>
                 <div style={{ fontWeight:600, fontSize:13, marginBottom:3 }}>{a.angle}</div>
@@ -5558,7 +5558,7 @@ primary = 5 high-volume (100k-1M posts), niche = 8 medium-volume (10k-100k), tre
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:12 }}>
             {[
               { key:"primary",  label:"High Volume",  color:"var(--amber)" },
-              { key:"niche",    label:"Niche Focus",  color:"#5cba6c"      },
+              { key:"niche",    label:"Niche Focus",  color:"#7a9166"      },
               { key:"trending", label:"Trending",     color:"#7c3aed"      },
               { key:"branded",  label:"Branded",      color:"var(--amber)", span:3 },
             ].map(g => (
@@ -6165,7 +6165,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   // Tolerates both the new {tag,score} shape and legacy plain-string entries from
   // previously-saved in-progress drafts.
   const tagText = (t) => typeof t === "string" ? t : t?.tag;
-  const scoreColor = (score) => score == null ? "var(--muted)" : score >= 70 ? "#5cba6c" : score >= 40 ? "var(--amber)" : "#7c9ce0";
+  const scoreColor = (score) => score == null ? "var(--muted)" : score >= 70 ? "#7a9166" : score >= 40 ? "var(--amber)" : "#7c9ce0";
 
   // ── STAGE 4: IMAGE (shared across platforms) ────────────────────────────────
 
@@ -6410,7 +6410,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       <SocialPipelineProgress stage={stage} setStage={setStage} completed={completed} />
 
       {error   && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>{error}</div>}
-      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", color:"#5cba6c", fontSize:13 }}>{success}</div>}
+      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#7a916611", border:"1px solid #7a916633", color:"#7a9166", fontSize:13 }}>{success}</div>}
       {loading && (
         <div style={{ marginBottom:16, padding:"12px 16px", borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)44", display:"flex", alignItems:"center", gap:10, fontSize:13, color:"var(--amber)" }}>
           <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>
@@ -6581,7 +6581,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               {/* Clickable tag groups */}
               {[
                 { key:"primary", label:"High Volume",  color:"var(--amber)", hint:"Broad reach" },
-                { key:"niche",   label:"Niche",         color:"#5cba6c",      hint:"Targeted audience" },
+                { key:"niche",   label:"Niche",         color:"#7a9166",      hint:"Targeted audience" },
                 { key:"branded", label:"Branded",       color:"#7c3aed",      hint:"Your brand tags" },
               ].map(g => (
                 <div key={g.key}>
@@ -6653,7 +6653,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                         const isOver = p.hashtagLimit > 0 && count > p.hashtagLimit;
                         const isNone = p.hashtagLimit === 0;
                         return (
-                          <span key={p.id} style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:isOver?"var(--red)15":isNone?"var(--bg-elevated)":"#5cba6c15", color:isOver?"var(--red)":isNone?"var(--muted)":"#5cba6c", border:`1px solid ${isOver?"var(--red)33":isNone?"var(--border)":"#5cba6c33"}`, fontWeight:600 }}>
+                          <span key={p.id} style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:isOver?"var(--red)15":isNone?"var(--bg-elevated)":"#7a916615", color:isOver?"var(--red)":isNone?"var(--muted)":"#7a9166", border:`1px solid ${isOver?"var(--red)33":isNone?"var(--border)":"#7a916633"}`, fontWeight:600 }}>
                             {p.icon} {p.label}: {isNone ? "no hashtags" : `${count}/${p.hashtagLimit}`}
                           </span>
                         );
@@ -6838,7 +6838,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       {stage === "publish" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           {success ? (
-            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:40, textAlign:"center" }}>
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #7a916644", borderRadius:12, padding:40, textAlign:"center" }}>
               <div style={{ fontSize:48, marginBottom:16 }}>✓</div>
               <h3 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, marginBottom:8 }}>Done!</h3>
               <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:20 }}>{success}</p>
@@ -6847,7 +6847,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   <div key={plat.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", textAlign:"left" }}>
                     <span>{plat.icon}</span>
                     <span style={{ fontSize:12, fontWeight:600, flex:1 }}>{plat.label}</span>
-                    <span style={{ fontSize:11, color:publishResults[plat.id].success===true?"#5cba6c":publishResults[plat.id].success==="manual"?"var(--amber)":"var(--red)" }}>
+                    <span style={{ fontSize:11, color:publishResults[plat.id].success===true?"#7a9166":publishResults[plat.id].success==="manual"?"var(--amber)":"var(--red)" }}>
                       {publishResults[plat.id].message}
                     </span>
                   </div>
@@ -6868,7 +6868,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                     const isBufferConnected = bufferCfg?.connected && !!bufferCfg?.mapping?.[plat.id];
                     const isConnected = isMetaConnected || isBufferConnected;
                     const connectionLabel = isMetaConnected ? "● Direct" : isBufferConnected ? "● Buffer" : "Manual";
-                    const connectionColor = isMetaConnected ? "#5cba6c" : isBufferConnected ? "#1da1f2" : "var(--muted)";
+                    const connectionColor = isMetaConnected ? "#7a9166" : isBufferConnected ? "#1da1f2" : "var(--muted)";
                     const prevResult = publishResults[plat.id];
                     const captionText = captions[plat.id]?.text || "";
                     const hashtagText = getHashtagsForPlatform(hashtags, plat.id);
@@ -6877,7 +6877,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                     const overChar = plat.charLimit > 0 && charCount > plat.charLimit;
                     const overHashtags = plat.hashtagLimit > 0 && hashtagCount > plat.hashtagLimit;
                     return (
-                      <div key={plat.id} style={{ display:"grid", gridTemplateColumns: imageData.url ? "auto 1fr 120px" : "auto 1fr", gap:14, alignItems:"flex-start", padding:14, borderRadius:10, background:"var(--bg-elevated)", border:`1px solid ${overChar||overHashtags?"var(--red)66":isConnected?"#5cba6c33":"var(--border)"}` }}>
+                      <div key={plat.id} style={{ display:"grid", gridTemplateColumns: imageData.url ? "auto 1fr 120px" : "auto 1fr", gap:14, alignItems:"flex-start", padding:14, borderRadius:10, background:"var(--bg-elevated)", border:`1px solid ${overChar||overHashtags?"var(--red)66":isConnected?"#7a916633":"var(--border)"}` }}>
                         <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4, width:70 }}>
                           <span style={{ fontSize:20 }}>{plat.icon}</span>
                           <span style={{ fontSize:10, fontWeight:700, color:plat.color }}>{plat.label}</span>
@@ -6912,7 +6912,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                             )}
                           </div>
                           {prevResult && (
-                            <div style={{ fontSize:11, color:prevResult.success===true?"#5cba6c":prevResult.success==="manual"?"var(--amber)":"var(--red)" }}>
+                            <div style={{ fontSize:11, color:prevResult.success===true?"#7a9166":prevResult.success==="manual"?"var(--amber)":"var(--red)" }}>
                               {prevResult.message}
                             </div>
                           )}
@@ -6963,8 +6963,8 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 })()}
 
                 {/* Best post times */}
-                <div style={{ background:"var(--bg-elevated)", border:"1px solid #5cba6c33", borderRadius:10, padding:14 }}>
-                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>⏰ Best Times to Post — click to schedule</div>
+                <div style={{ background:"var(--bg-elevated)", border:"1px solid #7a916633", borderRadius:10, padding:14 }}>
+                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166", marginBottom:10 }}>⏰ Best Times to Post — click to schedule</div>
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:8 }}>
                     {selectedPlatforms.map(p => (
                       <div key={p.id} style={{ padding:"8px 10px", borderRadius:7, background:"var(--bg-surface)", border:"1px solid var(--border)" }}>
@@ -6975,7 +6975,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                             if (slot) { setScheduleDate(slot); setScheduleMode("schedule"); }
                           }} title="Use this time"
                             style={{ display:"block", width:"100%", textAlign:"left", fontSize:11, color:"var(--text-secondary)", background:"transparent", border:"none", padding:"2px 0", cursor:"pointer", fontFamily:"var(--font-body)" }}
-                            onMouseEnter={e=>e.currentTarget.style.color="#5cba6c"} onMouseLeave={e=>e.currentTarget.style.color="var(--text-secondary)"}>
+                            onMouseEnter={e=>e.currentTarget.style.color="#7a9166"} onMouseLeave={e=>e.currentTarget.style.color="var(--text-secondary)"}>
                             · {t}
                           </button>
                         ))}
@@ -6991,7 +6991,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:18 }}>
                   <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>When to post?</div>
                   <div style={{ display:"flex", gap:6, marginBottom:14 }}>
-                    {[["now","↑ Publish Now","#5cba6c"],["schedule","⏰ Schedule","var(--amber)"],["draft","📋 Save as Draft","var(--text-secondary)"]].map(([id,label,color]) => (
+                    {[["now","↑ Publish Now","#7a9166"],["schedule","⏰ Schedule","var(--amber)"],["draft","📋 Save as Draft","var(--text-secondary)"]].map(([id,label,color]) => (
                       <button key={id} onClick={() => setScheduleMode(id)}
                         style={{ padding:"7px 16px", borderRadius:8, border:scheduleMode===id?`1px solid ${color}`:"1px solid var(--border)", background:scheduleMode===id?color+"18":"transparent", color:scheduleMode===id?color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                         {label}
@@ -7019,7 +7019,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
                     {scheduleMode === "now" && (
                       <button onClick={handlePublish} disabled={loading}
-                        style={{ ...btnA, background:loading?"var(--bg-elevated)":"#5cba6c", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
+                        style={{ ...btnA, background:loading?"var(--bg-elevated)":"#7a9166", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
                         {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `↑ Publish to ${selectedPlatforms.length} Platform${selectedPlatforms.length>1?"s":""}`}
                       </button>
                     )}
@@ -7084,7 +7084,7 @@ function BrandGuidePanel({ onSave }) {
     {
       title:"Voice & Writing Style",
       icon:"✎",
-      color:"#5cba6c",
+      color:"#7a9166",
       fields:[
         { key:"voiceTone",    label:"Voice & Tone",     ph:"e.g. Warm, knowledgeable, poetic. Like a seasoned guide talking to a friend over a pour of bourbon...", rows:3 },
         { key:"writingStyle", label:"Writing Style",    ph:"e.g. Short punchy sentences. Active voice. Evocative nature descriptions. Avoid corporate jargon...", rows:3 },
@@ -7114,7 +7114,7 @@ function BrandGuidePanel({ onSave }) {
           </p>
         </div>
         {hasContent && (
-          <div style={{ fontSize:11, color:"#5cba6c", padding:"4px 10px", borderRadius:99, background:"#5cba6c0a", border:"1px solid #5cba6c33", whiteSpace:"nowrap", marginLeft:16 }}>
+          <div style={{ fontSize:11, color:"#7a9166", padding:"4px 10px", borderRadius:99, background:"#7a91660a", border:"1px solid #7a916633", whiteSpace:"nowrap", marginLeft:16 }}>
             ● Active
           </div>
         )}
@@ -7498,7 +7498,7 @@ long_tail array = 6 keywords. Focus heavily on low-difficulty, high-specificity 
     setSaved(s => ({ ...s, [i]:true }));
   };
 
-  const diffColor = { low:"#5cba6c", medium:"var(--amber)", high:"var(--red)" };
+  const diffColor = { low:"#7a9166", medium:"var(--amber)", high:"var(--red)" };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
@@ -7538,7 +7538,7 @@ long_tail array = 6 keywords. Focus heavily on low-difficulty, high-specificity 
 
           {/* Long-tail keywords */}
           <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
-            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:14 }}>🎯 Long-Tail Keywords (Rankable for Small Blogs)</div>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166", marginBottom:14 }}>🎯 Long-Tail Keywords (Rankable for Small Blogs)</div>
             <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
               {results.long_tail?.map((kw, i) => (
                 <div key={i} style={{ padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", display:"flex", gap:12, alignItems:"flex-start" }}>
@@ -7666,8 +7666,8 @@ My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
       {analysis && (
         <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
           {/* Quick wins */}
-          <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:20 }}>
-            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:12 }}>⚡ Quick Wins</div>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid #7a916644", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166", marginBottom:12 }}>⚡ Quick Wins</div>
             {analysis.quick_wins?.map((win,i) => (
               <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom:"1px solid var(--border)" }}>
                 <span style={{ fontSize:13 }}>{win}</span>
@@ -7701,7 +7701,7 @@ My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
             {[
               { key:"strengths",  label:"Their Strengths",  color:"var(--text-secondary)", icon:"👍" },
-              { key:"weaknesses", label:"Their Weaknesses", color:"#5cba6c",               icon:"🎯" },
+              { key:"weaknesses", label:"Their Weaknesses", color:"#7a9166",               icon:"🎯" },
             ].map(({ key, label, color, icon }) => (
               <div key={key} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
                 <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color, marginBottom:10 }}>{icon} {label}</div>
@@ -7760,7 +7760,7 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
   const filtered = filter === "all" ? socialPosts : socialPosts.filter(p => p.status === filter);
   const counts = { all: socialPosts.length, draft: socialPosts.filter(p=>p.status==="draft").length, scheduled: socialPosts.filter(p=>p.status==="scheduled").length, published: socialPosts.filter(p=>p.status==="published").length };
 
-  const statusColor = { draft:"var(--muted)", scheduled:"var(--amber)", published:"#5cba6c" };
+  const statusColor = { draft:"var(--muted)", scheduled:"var(--amber)", published:"#7a9166" };
   const statusIcon  = { draft:"📋", scheduled:"⏰", published:"✓" };
 
   const publishNow = async (post) => {
@@ -7887,7 +7887,7 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
                 <div style={{ display:"flex", gap:6, flexShrink:0 }}>
                   {post.status !== "published" && (
                     <button onClick={e=>{ e.stopPropagation(); publishNow(post); }} disabled={posting[post.id]}
-                      style={{ padding:"5px 12px", borderRadius:7, border:"none", background:posting[post.id]?"var(--bg-elevated)":"#5cba6c", color:posting[post.id]?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:posting[post.id]?"not-allowed":"pointer", fontFamily:"var(--font-body)" }}>
+                      style={{ padding:"5px 12px", borderRadius:7, border:"none", background:posting[post.id]?"var(--bg-elevated)":"#7a9166", color:posting[post.id]?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:posting[post.id]?"not-allowed":"pointer", fontFamily:"var(--font-body)" }}>
                       {posting[post.id] ? "◌" : "↑ Post Now"}
                     </button>
                   )}
@@ -7949,7 +7949,7 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
                   {postResults[post.id] && (
                     <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
                       {Object.entries(postResults[post.id]).map(([platId, result]) => (
-                        <div key={platId} style={{ fontSize:11, color:result.startsWith("✓")?"#5cba6c":"var(--red)" }}>
+                        <div key={platId} style={{ fontSize:11, color:result.startsWith("✓")?"#7a9166":"var(--red)" }}>
                           {PLATFORMS.find(p=>p.id===platId)?.icon} {result}
                         </div>
                       ))}
@@ -8666,7 +8666,7 @@ function MediaLibrary({ userId }) {
                         </div>
                         <div style={{ display:"flex", gap:8 }}>
                           <button onClick={saveRestyleResult}
-                            style={{ padding:"8px 20px", borderRadius:8, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            style={{ padding:"8px 20px", borderRadius:8, border:"none", background:"#7a9166", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                             ✓ Save to Library
                           </button>
                           <button onClick={() => { const a=document.createElement("a"); a.href=restyleResult; a.download=`${selected?.name||"image"}-restyled.png`; a.click(); }}
@@ -9012,7 +9012,7 @@ function VideoPlanningStudio({ activeProvider, activeModel, apiKeys, posts, user
                     ⎘ Copy
                   </button>
                   <button onClick={savePlan}
-                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:"#7a9166", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                     ✓ Save Plan
                   </button>
                   <button onClick={generate}
@@ -9094,9 +9094,9 @@ function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, bt
     pinterest:{icon:"📌",color:"#e60023"},
     youtube:{icon:"▶",color:"var(--red)"},
     podcast:{icon:"🎙",color:"#a78bfa"},
-    email:{icon:"✉",color:"#5cba6c"},
+    email:{icon:"✉",color:"#7a9166"},
     visual:{icon:"🖼",color:"#7c8abf"},
-    thread:{icon:"💬",color:"#5cba6c"},
+    thread:{icon:"💬",color:"#7a9166"},
     keyword:{icon:"◎",color:"#7c3aed"},
     video:{icon:"🎬",color:"var(--red)"},
   };
@@ -9244,7 +9244,7 @@ function BlogHealthScore({ posts, socialPosts, metaConfig, dark }) {
   const score = computeBlogHealthScore(posts, socialPosts, metaConfig);
 
   const label = score.overall >= 80 ? "Thriving" : score.overall >= 60 ? "Healthy" : score.overall >= 40 ? "Needs Attention" : "Just Getting Started";
-  const color = score.overall >= 80 ? "#5cba6c" : score.overall >= 60 ? "var(--amber)" : score.overall >= 40 ? "#e08a3c" : "var(--muted)";
+  const color = score.overall >= 80 ? "#7a9166" : score.overall >= 60 ? "var(--amber)" : score.overall >= 40 ? "#e08a3c" : "var(--muted)";
 
   // The single most impactful thing to work on — whichever component is weakest
   const components = [
@@ -9407,7 +9407,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
           <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Search performance, social reach, and content insights in one place.</p>
         </div>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-          {gscData && <span style={{ fontSize:11, color:"#5cba6c", padding:"3px 10px", borderRadius:99, background:"#5cba6c11", border:"1px solid #5cba6c33" }}>● GSC Connected</span>}
+          {gscData && <span style={{ fontSize:11, color:"#7a9166", padding:"3px 10px", borderRadius:99, background:"#7a916611", border:"1px solid #7a916633" }}>● GSC Connected</span>}
           {metaConfig?.connected && <span style={{ fontSize:11, color:"#1877f2", padding:"3px 10px", borderRadius:99, background:"#1877f211", border:"1px solid #1877f233" }}>● Meta Connected</span>}
         </div>
       </div>
@@ -9507,7 +9507,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                     return (
                       <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:12 }}>
                         <span style={{ color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"70%" }}>{text.slice(0,50)}…</span>
-                        <span style={{ fontSize:10, color:"#5cba6c", flexShrink:0, marginLeft:8 }}>✓ Published</span>
+                        <span style={{ fontSize:10, color:"#7a9166", flexShrink:0, marginLeft:8 }}>✓ Published</span>
                       </div>
                     );
                   })}
@@ -9532,7 +9532,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                     <div key={post.id} style={{ padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                       <div style={{ fontSize:12, fontWeight:600, marginBottom:6, lineHeight:1.4 }}>{post.title}</div>
                       <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-                        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-surface)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#7a916615":"var(--bg-surface)", color:post.status==="published"?"#7a9166":"var(--muted)", border:`1px solid ${post.status==="published"?"#7a916633":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
                         {gscPage && <span style={{ fontSize:11, color:"var(--amber)" }}>◎ {gscPage.clicks} clicks</span>}
                         <span style={{ fontSize:10, color:"var(--muted)", marginLeft:"auto" }}>{post.date || post.createdAt?.slice(0,10)}</span>
                       </div>
@@ -9562,7 +9562,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
               <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12 }}>
                 <StatCard label="Total Clicks"      value={gscData.totalClicks.toLocaleString()}       sub={`Last ${gscData.days} days`} />
                 <StatCard label="Impressions"        value={gscData.totalImpressions.toLocaleString()} sub="Search appearances" />
-                <StatCard label="Avg CTR"            value={`${(gscData.totalClicks/Math.max(gscData.totalImpressions,1)*100).toFixed(1)}%`} sub="Click-through rate" color="#5cba6c" />
+                <StatCard label="Avg CTR"            value={`${(gscData.totalClicks/Math.max(gscData.totalImpressions,1)*100).toFixed(1)}%`} sub="Click-through rate" color="#7a9166" />
                 <StatCard label="Avg Position"       value={avgPosition} sub="Google rank" color="#7c3aed" />
               </div>
 
@@ -9585,7 +9585,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                           <td style={{ padding:"7px 8px", fontSize:12, fontWeight:700, color:"var(--amber)" }}>{k.clicks}</td>
                           <td style={{ padding:"7px 8px", fontSize:11, color:"var(--text-secondary)" }}>{k.impressions}</td>
                           <td style={{ padding:"7px 8px", fontSize:11, color:"var(--text-secondary)" }}>#{k.position.toFixed(1)}</td>
-                          <td style={{ padding:"7px 8px", fontSize:11, color:"#5cba6c" }}>{k.impressions>0?(k.clicks/k.impressions*100).toFixed(1):0}%</td>
+                          <td style={{ padding:"7px 8px", fontSize:11, color:"#7a9166" }}>{k.impressions>0?(k.clicks/k.impressions*100).toFixed(1):0}%</td>
                         </tr>
                       ))}
                     </tbody>
@@ -9745,7 +9745,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                                 {post.publishedAt ? new Date(post.publishedAt).toLocaleDateString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}) : ""}
                               </span>
                               {post.results && Object.values(post.results).some(r=>r.success) && (
-                                <span style={{ fontSize:10, color:"#5cba6c", fontWeight:600 }}>✓ Published</span>
+                                <span style={{ fontSize:10, color:"#7a9166", fontWeight:600 }}>✓ Published</span>
                               )}
                             </div>
                           </div>
@@ -9786,7 +9786,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                       <tr key={post.id} style={{ borderBottom:"1px solid var(--border)11" }}>
                         <td style={{ padding:"10px 10px", fontSize:12, fontWeight:500, maxWidth:240, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{post.title}</td>
                         <td style={{ padding:"10px 10px" }}>
-                          <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-elevated)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                          <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#7a916615":"var(--bg-elevated)", color:post.status==="published"?"#7a9166":"var(--muted)", border:`1px solid ${post.status==="published"?"#7a916633":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
                         </td>
                         <td style={{ padding:"10px 10px", fontSize:11, color:"var(--text-secondary)" }}>{post.date || post.createdAt?.slice(0,10) || "—"}</td>
                         <td style={{ padding:"10px 10px", fontSize:12, fontWeight:700, color:gscPage?"var(--amber)":"var(--muted)" }}>{gscPage ? gscPage.clicks : "—"}</td>
@@ -9953,9 +9953,9 @@ Page clicks: ${gscPage?.clicks || 0}`,
     setAnalyzingPost(null);
   };
 
-  const scoreColor = (s) => s >= 80 ? "#5cba6c" : s >= 60 ? "var(--amber)" : "var(--red)";
-  const impactColor = { High:"#5cba6c", Medium:"var(--amber)", Low:"var(--text-secondary)" };
-  const effortColor = { Easy:"#5cba6c", Medium:"var(--amber)", Hard:"var(--red)" };
+  const scoreColor = (s) => s >= 80 ? "#7a9166" : s >= 60 ? "var(--amber)" : "var(--red)";
+  const impactColor = { High:"#7a9166", Medium:"var(--amber)", Low:"var(--text-secondary)" };
+  const effortColor = { Easy:"#7a9166", Medium:"var(--amber)", Hard:"var(--red)" };
 
   if (!gscData) return (
     <div style={{ textAlign:"center", padding:"60px 20px", background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12 }}>
@@ -10033,7 +10033,7 @@ Page clicks: ${gscPage?.clicks || 0}`,
                 {analysis.title_rewrites?.map((t, i) => (
                   <div key={i} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                     <div style={{ fontSize:11, color:"var(--red)", marginBottom:4, textDecoration:"line-through", opacity:0.7 }}>{t.current}</div>
-                    <div style={{ fontSize:12, fontWeight:600, color:"#5cba6c", marginBottom:4 }}>→ {t.suggested}</div>
+                    <div style={{ fontSize:12, fontWeight:600, color:"#7a9166", marginBottom:4 }}>→ {t.suggested}</div>
                     <div style={{ fontSize:11, color:"var(--muted)" }}>{t.reason}</div>
                   </div>
                 ))}
@@ -10078,9 +10078,9 @@ Page clicks: ${gscPage?.clicks || 0}`,
 
           {/* Low-hanging fruit */}
           {opportunities.lowHanging.length > 0 && (
-            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c33", borderRadius:12, padding:20 }}>
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #7a916633", borderRadius:12, padding:20 }}>
               <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c" }}>🎯 Low-Hanging Fruit</div>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166" }}>🎯 Low-Hanging Fruit</div>
                 <div style={{ fontSize:11, color:"var(--text-secondary)" }}>— Ranking positions 5-20, one good update away from page 1</div>
               </div>
               <table style={{ width:"100%", borderCollapse:"collapse" }}>
@@ -10098,7 +10098,7 @@ Page clicks: ${gscPage?.clicks || 0}`,
                       <td style={{ padding:"8px 8px", fontSize:13, fontWeight:700, color:"var(--amber)" }}>#{k.position.toFixed(0)}</td>
                       <td style={{ padding:"8px 8px", fontSize:12, color:"var(--text-secondary)" }}>{k.impressions}</td>
                       <td style={{ padding:"8px 8px", fontSize:12 }}>{k.clicks}</td>
-                      <td style={{ padding:"8px 8px", fontSize:11, color:"#5cba6c" }}>Update &amp; expand post</td>
+                      <td style={{ padding:"8px 8px", fontSize:11, color:"#7a9166" }}>Update &amp; expand post</td>
                     </tr>
                   ))}
                 </tbody>
@@ -10132,12 +10132,12 @@ Page clicks: ${gscPage?.clicks || 0}`,
             {/* Winning keywords */}
             {opportunities.winning.length > 0 && (
               <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>✓ Already Winning</div>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166", marginBottom:10 }}>✓ Already Winning</div>
                 {opportunities.winning.map((k, i) => (
                   <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:"1px solid var(--border)11", fontSize:12 }}>
                     <span style={{ color:"var(--text-secondary)" }}>{k.query}</span>
                     <div style={{ display:"flex", gap:8 }}>
-                      <span style={{ fontWeight:700, color:"#5cba6c" }}>#{k.position.toFixed(0)}</span>
+                      <span style={{ fontWeight:700, color:"#7a9166" }}>#{k.position.toFixed(0)}</span>
                       <span style={{ color:"var(--muted)" }}>{k.clicks} clicks</span>
                     </div>
                   </div>
@@ -10178,7 +10178,7 @@ Page clicks: ${gscPage?.clicks || 0}`,
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ fontSize:13, fontWeight:600, marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{post.title}</div>
                       <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-                        <span style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-surface)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                        <span style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:post.status==="published"?"#7a916615":"var(--bg-surface)", color:post.status==="published"?"#7a9166":"var(--muted)", border:`1px solid ${post.status==="published"?"#7a916633":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
                         {pa && <span style={{ fontSize:11, color:scoreColor(pa.seo_score), fontWeight:700 }}>SEO: {pa.seo_score}/100</span>}
                       </div>
                     </div>
@@ -10211,7 +10211,7 @@ Page clicks: ${gscPage?.clicks || 0}`,
                       <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--amber)22" }}>
                         <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Title Feedback</div>
                         <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:6 }}>{pa.title_feedback}</div>
-                        <div style={{ fontSize:12, fontWeight:600, color:"#5cba6c" }}>→ {pa.suggested_title}</div>
+                        <div style={{ fontSize:12, fontWeight:600, color:"#7a9166" }}>→ {pa.suggested_title}</div>
                       </div>
 
                       <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)" }}>
@@ -10425,7 +10425,7 @@ function WordPressSettings() {
         </div>
 
         {testResult && (
-          <div style={{ padding:"10px 14px", borderRadius:8, fontSize:12, background: testResult.success ? "#5cba6c11" : "var(--red)11", border: `1px solid ${testResult.success ? "#5cba6c33" : "var(--red)33"}`, color: testResult.success ? "#5cba6c" : "var(--red)" }}>
+          <div style={{ padding:"10px 14px", borderRadius:8, fontSize:12, background: testResult.success ? "#7a916611" : "var(--red)11", border: `1px solid ${testResult.success ? "#7a916633" : "var(--red)33"}`, color: testResult.success ? "#7a9166" : "var(--red)" }}>
             {testResult.message}
           </div>
         )}
@@ -10442,7 +10442,7 @@ function WordPressSettings() {
         </div>
 
         {config.connected && (
-          <div style={{ fontSize:12, color:"#5cba6c" }}>✓ WordPress is connected — a "🌐 Publish to WordPress" option is now available in the Article Pipeline's Publish stage.</div>
+          <div style={{ fontSize:12, color:"#7a9166" }}>✓ WordPress is connected — a "🌐 Publish to WordPress" option is now available in the Article Pipeline's Publish stage.</div>
         )}
       </div>
     </div>
@@ -10536,7 +10536,7 @@ function BufferSettings() {
         <span style={{ fontSize:28 }}>🟦</span>
         <div>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>Buffer — Extended Reach</h3>
-          <div style={{ fontSize:11, color: config.connected ? "#5cba6c" : "var(--muted)", fontWeight: config.connected ? 600 : 400 }}>
+          <div style={{ fontSize:11, color: config.connected ? "#7a9166" : "var(--muted)", fontWeight: config.connected ? 600 : 400 }}>
             {config.connected ? `● Connected · ${channels.length} channels` : "○ Optional · not connected"}
           </div>
         </div>
@@ -10558,8 +10558,8 @@ function BufferSettings() {
           What each connection covers
         </div>
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-          <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-surface)", border:"1px solid #5cba6c33" }}>
-            <div style={{ fontSize:11, fontWeight:700, color:"#5cba6c", marginBottom:6 }}>✓ Built-in (no Buffer needed)</div>
+          <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-surface)", border:"1px solid #7a916633" }}>
+            <div style={{ fontSize:11, fontWeight:700, color:"#7a9166", marginBottom:6 }}>✓ Built-in (no Buffer needed)</div>
             <div style={{ fontSize:12, color:"var(--text-secondary)", display:"flex", flexDirection:"column", gap:3 }}>
               <span>📸 Instagram</span>
               <span>👍 Facebook</span>
@@ -10619,7 +10619,7 @@ function BufferSettings() {
       {error && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{error}</div>}
 
       {account && !error && (
-        <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", fontSize:12, color:"#5cba6c", display:"flex", alignItems:"center", gap:8 }}>
+        <div style={{ padding:"10px 14px", borderRadius:8, background:"#7a916611", border:"1px solid #7a916633", fontSize:12, color:"#7a9166", display:"flex", alignItems:"center", gap:8 }}>
           ✓ Connected as <strong style={{marginLeft:4}}>{account.name || account.email}</strong> · {channels.length} channel{channels.length !== 1 ? "s" : ""} found
         </div>
       )}
@@ -10701,7 +10701,7 @@ function BufferSettings() {
             Disconnect Buffer
           </button>
         )}
-        {saved && <span style={{ fontSize:12, color:"#5cba6c" }}>✓ Saved</span>}
+        {saved && <span style={{ fontSize:12, color:"#7a9166" }}>✓ Saved</span>}
       </div>
     </div>
   );
@@ -11030,7 +11030,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
             </div>
 
             <div style={{ display:"flex", flexDirection:"column", gap:5, paddingTop:6, borderTop:"1px solid var(--border)" }}>
-              <button onClick={save} disabled={saving} style={{ padding:"9px", borderRadius:8, border:"none", background:saving?"var(--bg-elevated)":"#5cba6c", color:saving?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:saving?"not-allowed":"pointer" }}>
+              <button onClick={save} disabled={saving} style={{ padding:"9px", borderRadius:8, border:"none", background:saving?"var(--bg-elevated)":"#7a9166", color:saving?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:saving?"not-allowed":"pointer" }}>
                 {saving ? "Saving…" : "✓ Save to Library"}
               </button>
               <button onClick={()=>{ if(!canvasEl) return; const a=document.createElement("a"); a.href=canvasEl.toDataURL("image/png"); a.download=`${imageName||"image"}-overlay.png`; a.click(); }} style={{ padding:"9px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer" }}>
@@ -11299,7 +11299,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
             )}
           </div>
           {cloudUrl && (
-            <div style={{ position:"absolute", top:8, left:8, fontSize:10, padding:"3px 8px", borderRadius:99, background:"rgba(0,0,0,0.65)", color:"#5cba6c", fontWeight:600 }}>
+            <div style={{ position:"absolute", top:8, left:8, fontSize:10, padding:"3px 8px", borderRadius:99, background:"rgba(0,0,0,0.65)", color:"#7a9166", fontWeight:600 }}>
               ☁ Synced to GCS
             </div>
           )}
@@ -11575,7 +11575,7 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
               </div>
               <div style={{ display:"flex", gap:8 }}>
                 <button onClick={applyRewrite}
-                  style={{ padding:"7px 18px", borderRadius:7, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  style={{ padding:"7px 18px", borderRadius:7, border:"none", background:"#7a9166", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                   ✓ Apply
                 </button>
                 <button onClick={() => { setAiResult(""); }}
@@ -11802,7 +11802,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
             </span>
           )}
           {saveStatus === "saved" && (
-            <span style={{ fontSize:11, color:"#5cba6c" }}>✓ Autosaved</span>
+            <span style={{ fontSize:11, color:"#7a9166" }}>✓ Autosaved</span>
           )}
           {!saveStatus && lastSaved && (
             <span style={{ fontSize:11, color:"var(--muted)" }}>
@@ -12104,7 +12104,7 @@ function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Type</label>
           <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-            {[{id:"scheduled",color:"var(--amber)"},{id:"newsletter",color:"#5cba6c"},{id:"draft",color:"var(--muted)"},{id:"idea",color:"var(--text-secondary)"}].map(t=>(
+            {[{id:"scheduled",color:"var(--amber)"},{id:"newsletter",color:"#7a9166"},{id:"draft",color:"var(--muted)"},{id:"idea",color:"var(--text-secondary)"}].map(t=>(
               <button key={t.id} onClick={()=>setForm(f=>({...f,type:t.id}))}
                 style={{ padding:"6px 14px", borderRadius:99, border:form.type===t.id?`1px solid ${t.color}`:"1px solid var(--border)", background:form.type===t.id?t.color+"22":"transparent", color:form.type===t.id?t.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textTransform:"capitalize" }}>
                 {t.id}
@@ -12425,27 +12425,27 @@ export default function Dashboard({ user, workspace }) {
   const planLabel = TIER_CONFIG[userTier]?.label || "Scout";
   const changeTier = (tier) => { setUserTier(tier); saveUserTier(tier); };
   const isScout   = false;
-  const fixedGreen= "#5cba6c";
+  const fixedGreen= "#7a9166";
 
   const filteredPosts = posts.filter(p => postFilter==="all" ? true : p.status===postFilter);
 
   const theme = dark ? {
-    "--bg":"#0e0f11","--bg-surface":"#16171b","--bg-elevated":"#1c1d22","--bg-hover":"#22232a",
-    "--border":"#2a2b33","--text":"#e8e6e1","--text-secondary":"#8a8880",
-    "--amber":"#d4a054","--amber-glow":"rgba(212,160,84,0.12)",
-    "--green":"#5cba6c","--red":"#c75454","--muted":"#5c5b56",
-    "--sidebar-bg":"#111215",
+    "--bg":"#2b2620","--bg-surface":"#3a332a","--bg-elevated":"#443c30","--bg-hover":"#4d4436",
+    "--border":"#4a4234","--text":"#e8dfc9","--text-secondary":"#a89a80",
+    "--amber":"#a67c52","--amber-glow":"rgba(166,124,82,0.14)",
+    "--green":"#7a9166","--red":"#b3543a","--muted":"#6b5f4d",
+    "--sidebar-bg":"#221e19",
     "--font-display":"'Fraunces',serif","--font-body":"'DM Sans',sans-serif",
   } : {
-    "--bg":"#f5f2ec","--bg-surface":"#ffffff","--bg-elevated":"#faf8f4","--bg-hover":"#eeeae2",
-    "--border":"#ddd8ce","--text":"#1a1915","--text-secondary":"#6b6860",
-    "--amber":"#b8862e","--amber-glow":"rgba(184,134,46,0.1)",
-    "--green":"#3d8a4e","--red":"#b84040","--muted":"#9a9590",
-    "--sidebar-bg":"#eae6dc",
+    "--bg":"#f2ecdc","--bg-surface":"#faf6ea","--bg-elevated":"#efe8d4","--bg-hover":"#e6ddc4",
+    "--border":"#d8cca8","--text":"#2b2620","--text-secondary":"#6b5f4d",
+    "--amber":"#8a6a3d","--amber-glow":"rgba(138,106,61,0.1)",
+    "--green":"#5c7449","--red":"#963e28","--muted":"#9a8f75",
+    "--sidebar-bg":"#e6ddc4",
     "--font-display":"'Fraunces',serif","--font-body":"'DM Sans',sans-serif",
   };
 
-  const card    = { background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 };
+  const card    = { background:"var(--bg-surface)", backgroundImage: dark ? "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Cfilter id='n2'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n2)' opacity='0.1'/%3E%3C/svg%3E\")" : "none", border:"1px solid var(--border)", borderRadius:12, padding:24 };
   const btnP    = { padding:"8px 18px", border:"none", borderRadius:8, background:"var(--amber)", color:dark?"#0e0f11":"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" };
   const btnS    = { padding:"8px 16px", border:"1px solid var(--border)", borderRadius:8, background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" };
   const inputSt = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
@@ -12476,7 +12476,7 @@ export default function Dashboard({ user, workspace }) {
   ];
 
   return (
-    <div className="bb-root" style={{...theme,fontFamily:"var(--font-body)",color:"var(--text)",background:"var(--bg)",minHeight:"100vh",display:"flex",fontSize:14,lineHeight:1.5}}>
+    <div className="bb-root" style={{...theme,fontFamily:"var(--font-body)",color:"var(--text)",background:"var(--bg)",backgroundImage: dark ? "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.1'/%3E%3C/svg%3E\")" : "none",minHeight:"100vh",display:"flex",fontSize:14,lineHeight:1.5}}>
       <style>{MOBILE_CSS}</style>
       <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;700;900&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
@@ -12952,7 +12952,7 @@ export default function Dashboard({ user, workspace }) {
                           <div style={{fontSize:22,fontWeight:700,color:"var(--amber)",fontFamily:"var(--font-display)"}}>{p.price}</div>
                           {p.byokPrice && (
                             byokUnlocked ? (
-                              <div style={{fontSize:11,color:"#5cba6c",marginBottom:12}}>or {p.byokPrice} with your own AI key</div>
+                              <div style={{fontSize:11,color:"#7a9166",marginBottom:12}}>or {p.byokPrice} with your own AI key</div>
                             ) : (
                               <div style={{fontSize:11,color:"var(--muted)",marginBottom:12}}>{p.byokPrice} with your own key — Operative and above</div>
                             )
