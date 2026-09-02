@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { useAuth } from "./auth";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
@@ -64,20 +64,30 @@ function buildBrandImageContext(guide) {
 async function cloudGet(key, userId) {
   try {
     const res = await fetch(`/api/data?key=${encodeURIComponent(key)}&userId=${encodeURIComponent(userId)}`);
+    if (!res.ok) { console.error(`[cloudGet] "${key}" failed: HTTP ${res.status}`); return null; }
     const data = await res.json();
     return data.value;
-  } catch { return null; }
+  } catch(e) { console.error(`[cloudGet] "${key}" threw:`, e.message); return null; }
 }
 
 async function cloudSet(key, userId, value) {
   try {
-    await fetch("/api/data", {
+    const res = await fetch("/api/data", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, userId, value }),
     });
+    if (!res.ok) {
+      let errText;
+      try { errText = (await res.json()).error; } catch { errText = `HTTP ${res.status}`; }
+      console.error(`[cloudSet] "${key}" failed:`, errText);
+      return false;
+    }
     return true;
-  } catch { return false; }
+  } catch(e) {
+    console.error(`[cloudSet] "${key}" threw:`, e.message);
+    return false;
+  }
 }
 
 // Debounced cloud save — avoids hammering the API on every keystroke
@@ -144,6 +154,349 @@ function parseAIJson(text) {
   throw new Error("AI response was cut off and couldn't be repaired — try again.");
 }
 
+// Plain-text fallback that keeps links VISIBLE as "text (url)" instead of silently
+// discarding the URL — for paste destinations that don't accept rich HTML.
+function markdownToPlainWithLinks(md) {
+  return (md || "")
+    .replace(/^#{1,3}\s+/gm, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
+    .trim();
+}
+
+// Writes both HTML and plain-text to the clipboard so links survive when pasted into
+// a rich-text editor, with a plain-text-only fallback for older browsers/permissions.
+// Reuses the app's existing markdownToHtml() converter (defined later in this file,
+// used by RichTextEditor — safe to call here due to function hoisting).
+// Uploads a file to a GCS resumable-upload session URL, following Google's own
+// documented retry protocol: a bare single PUT with no retry logic (the previous
+// implementation) turns any transient GCS 500/503 into a permanent user-facing
+// failure. Per Google's docs, a 500/503 on a resumable upload is expected/normal
+// and the client must check how many bytes were actually received (an empty PUT
+// with Content-Range: bytes */total) and resume from that offset rather than
+// re-sending the whole file blind.
+// A plain fetch() has no timeout at all — if it stalls (mobile connectivity
+// blip), the caller just hangs forever with nothing to show the user. Used for
+// steps in the upload chain that aren't already XHR-based with their own abort.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch(e) {
+    if (e.name === "AbortError") throw new Error(`Request to ${url} stalled — no response after ${timeoutMs/1000}s`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function uploadToGCSResumable(uploadUrl, file, onProgress) {
+  // Sending the whole remaining file in one PUT (the previous approach) is
+  // exactly the pattern that struggles on mobile — one very large request is
+  // much more likely to get interrupted (backgrounding, network handoffs, OS-
+  // level suspension of long transfers) than several small ones. Explicit
+  // fixed-size chunking is what Google's own docs recommend for unreliable
+  // connections. Must be a multiple of 256 KiB for all but the final chunk.
+  const CHUNK_SIZE = 2 * 1024 * 1024; // 2 MiB
+
+  const putChunk = (blob, startByte) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+    // xhr.timeout alone isn't reliably honored by every mobile browser for a
+    // connection that stalls before any response starts (as opposed to one
+    // that's merely slow) — this was the actual cause of uploads sitting at 0%
+    // forever with no error ever surfacing. A manual hard-abort guarantees
+    // SOMETHING happens within a bounded time no matter what.
+    const hardAbort = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      xhr.abort();
+      reject(new Error("Upload stalled — no response from the server after 20s"));
+    }, 20000);
+    const finish = (fn) => (...args) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardAbort);
+      fn(...args);
+    };
+    xhr.open("PUT", uploadUrl);
+    xhr.timeout = 25000; // secondary — the manual hardAbort above is the real backstop
+    if (blob.size > 0) xhr.setRequestHeader("Content-Type", file.type);
+    if (startByte > 0 || blob.size < file.size) {
+      xhr.setRequestHeader("Content-Range", `bytes ${startByte}-${startByte + blob.size - 1}/${file.size}`);
+    }
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round(((startByte + e.loaded) / file.size) * 100));
+    };
+    xhr.onload    = finish(() => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range"), body: xhr.responseText }));
+    xhr.onerror   = finish(() => reject(new Error("Network error during upload")));
+    xhr.ontimeout = finish(() => reject(new Error("Chunk upload timed out")));
+    xhr.onabort   = finish(() => reject(new Error("Upload was aborted")));
+    xhr.send(blob);
+  });
+
+  const checkStatus = () => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+    const hardAbort = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      xhr.abort();
+      reject(new Error("Status check stalled — no response after 15s"));
+    }, 15000);
+    const finish = (fn) => (...args) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardAbort);
+      fn(...args);
+    };
+    xhr.open("PUT", uploadUrl);
+    xhr.timeout = 12000;
+    xhr.setRequestHeader("Content-Range", `bytes */${file.size}`);
+    xhr.onload    = finish(() => resolve({ status: xhr.status, range: xhr.getResponseHeader("Range") }));
+    xhr.onerror   = finish(() => reject(new Error("Network error checking upload status")));
+    xhr.ontimeout = finish(() => reject(new Error("Status check timed out")));
+    xhr.onabort   = finish(() => reject(new Error("Status check was aborted")));
+    xhr.send(new Blob([]));
+  });
+
+  const parseRange = (rangeHeader) => {
+    if (!rangeHeader) return null;
+    const match = rangeHeader.match(/bytes=0-(\d+)/);
+    return match ? parseInt(match[1], 10) + 1 : null;
+  };
+
+  return new Promise(async (resolve, reject) => {
+    // Google's own client libraries retry near-indefinitely on 500/503 (bounded
+    // only by an overall deadline, not a small fixed attempt count).
+    const maxErrorAttempts = 8;
+    let startByte = 0;
+    let lastBody = "";
+    let errorAttempts = 0;
+
+    while (startByte < file.size) {
+      try {
+        const chunkEnd = Math.min(startByte + CHUNK_SIZE, file.size);
+        const chunk = file.slice(startByte, chunkEnd);
+        console.log(`[gcs-upload] sending bytes ${startByte}-${chunkEnd-1} of ${file.size}…`);
+        const result = await putChunk(chunk, startByte);
+        console.log(`[gcs-upload] response: status=${result.status} range=${result.range || "(none)"}`);
+
+        if (result.status === 200 || result.status === 201) { console.log("[gcs-upload] COMPLETE"); return resolve(); }
+
+        if (result.status === 308) {
+          const confirmedByte = parseRange(result.range);
+          if (confirmedByte != null) {
+            // GCS explicitly confirmed how many bytes it has — trust it, even
+            // if it's less than this chunk's full range (a partial chunk write).
+            startByte = confirmedByte;
+            errorAttempts = 0; // real confirmed progress
+            continue;
+          }
+          // No Range header on the 308 means GCS is NOT confirming any bytes
+          // were persisted for this attempt — previously this blindly assumed
+          // success and advanced to chunkEnd anyway, which is exactly what
+          // caused "upload offset exceeds already uploaded size" errors (we'd
+          // move on to the next chunk while GCS's session still had 0 bytes).
+          // Ask GCS directly what it actually has before deciding what to do.
+          try {
+            const status = await checkStatus();
+            const confirmed = parseRange(status.range);
+            startByte = confirmed != null ? confirmed : startByte; // never advance without explicit confirmation
+          } catch { /* leave startByte where it was — retry this same chunk */ }
+          errorAttempts++;
+          if (errorAttempts >= maxErrorAttempts) return reject(new Error(`GCS never confirmed receiving the data after ${maxErrorAttempts} attempts — try again, possibly on a different network.`));
+          await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, errorAttempts - 1), 8000)));
+          continue;
+        }
+
+        if (result.status === 500 || result.status === 503) {
+          errorAttempts++;
+          lastBody = result.body || "";
+          if (errorAttempts >= maxErrorAttempts) return reject(new Error(`Upload failed after ${maxErrorAttempts} attempts (${result.status}): ${lastBody.slice(0,300) || "no further detail from GCS"}`));
+          await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, errorAttempts - 1), 16000)));
+          try {
+            const status = await checkStatus();
+            if (status.status === 200 || status.status === 201) return resolve();
+            const confirmed = parseRange(status.range);
+            if (confirmed != null) startByte = confirmed;
+          } catch { /* status check failed — retry this same chunk */ }
+          continue;
+        }
+
+        return reject(new Error(`Upload failed: ${result.status} — ${(result.body || "").slice(0,300)}`));
+      } catch(e) {
+        // Network error or chunk timeout — retry this same chunk, don't lose
+        // progress on already-confirmed earlier chunks.
+        errorAttempts++;
+        if (errorAttempts >= maxErrorAttempts) return reject(new Error(`The connection kept dropping partway through (last error: ${e.message}). Try again — progress up to ${Math.round((startByte/file.size)*100)}% was made before it failed.`));
+        await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, errorAttempts - 1), 16000)));
+      }
+    }
+    resolve(); // startByte reached file.size without an explicit 200/201 (shouldn't normally happen, but treat as done)
+  });
+}
+
+// The Hashtags stage produces one shared hashtag string used across every
+// selected platform, but some platforms want far fewer than others (X performs
+// best with ~1-2 hashtags, unlike Instagram's 20-30). Trims down per-platform
+// without touching the underlying hashtags.selected the user actually picked.
+const DAY_INDEX = { sun:0, mon:1, tue:2, wed:3, thu:4, fri:5, sat:6 };
+
+// Parses a bestTimes string like "Tue–Fri 11am–1pm" or "Mon–Fri 7–9pm" into the
+// next real upcoming occurrence, returned as a datetime-local input value
+// ("YYYY-MM-DDTHH:MM"). Uses the first day and the start of the time range.
+function nextBestTimeSlot(bestTimeStr) {
+  try {
+    const [dayPart, ...rest] = bestTimeStr.trim().split(" ");
+    const timePart = rest.join(" ");
+    const firstDayAbbr = dayPart.split(/[–-]/)[0].toLowerCase().slice(0, 3);
+    const dayIndex = DAY_INDEX[firstDayAbbr];
+    if (dayIndex === undefined) return null;
+
+    const [startToken, endToken = ""] = timePart.split(/[–-]/).map(s => s.trim());
+    let start = startToken;
+    if (!/am|pm/i.test(start) && /am|pm/i.test(endToken)) start += endToken.match(/am|pm/i)[0];
+    const m = start.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+    if (!m) return null;
+    let hour = parseInt(m[1], 10);
+    const minute = m[2] ? parseInt(m[2], 10) : 0;
+    const isPM = /pm/i.test(m[3]);
+    if (isPM && hour !== 12) hour += 12;
+    if (!isPM && hour === 12) hour = 0;
+
+    const now = new Date();
+    const result = new Date(now);
+    const daysAhead = (dayIndex - now.getDay() + 7) % 7;
+    result.setDate(now.getDate() + daysAhead);
+    result.setHours(hour, minute, 0, 0);
+    if (result <= now) result.setDate(result.getDate() + 7); // slot already passed this week
+
+    const pad = n => String(n).padStart(2, "0");
+    return `${result.getFullYear()}-${pad(result.getMonth()+1)}-${pad(result.getDate())}T${pad(result.getHours())}:${pad(result.getMinutes())}`;
+  } catch { return null; }
+}
+
+// Resolves the effective hashtag string for a given platform — a manual
+// per-platform override if the user has set one, otherwise the shared set.
+// Handles both the current {selected, perPlatform} object format and the
+// legacy plain-string format used by posts saved before per-platform
+// overrides existed.
+function getHashtagsForPlatform(hashtags, platformId) {
+  if (typeof hashtags === "string") return hashtags; // legacy saved posts
+  return hashtags?.perPlatform?.[platformId] ?? hashtags?.selected ?? "";
+}
+
+function limitHashtagsForPlatform(hashtagString, platformId, maxCounts = { twitter: 2 }) {
+  const max = maxCounts[platformId];
+  if (max == null || !hashtagString) return hashtagString;
+  const tags = hashtagString.split(/\s+/).filter(Boolean);
+  return tags.slice(0, max).join(" ");
+}
+
+function TierLockedNotice({ feature, requiredTier = "Operative" }) {
+  return (
+    <div style={{ padding:"24px 20px", borderRadius:12, border:"1px solid var(--amber)33", background:"var(--amber)0a", textAlign:"center" }}>
+      <div style={{ fontSize:28, marginBottom:10 }}>🔒</div>
+      <div style={{ fontSize:15, fontWeight:700, marginBottom:6 }}>{feature} is available on {requiredTier} and above</div>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 16px", maxWidth:420, marginLeft:"auto", marginRight:"auto", lineHeight:1.6 }}>
+        Upgrade your plan in Settings → Billing & Plan to unlock this.
+      </p>
+    </div>
+  );
+}
+
+function UsagePanel({ tierConfig, userId }) {
+  const [usage, setUsage] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/usage?userId=${encodeURIComponent(userId)}`);
+        const data = await res.json();
+        if (!cancelled) setUsage(data);
+      } catch { /* fall through to loading:false below */ }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [userId]);
+
+  const wordsUsed  = usage?.wordsUsed ?? 0;
+  const wordCap    = tierConfig.wordsPerMonth;
+  const wordPct    = Math.min(100, Math.round((wordsUsed / wordCap) * 100));
+  const wordColor  = wordPct >= 100 ? "var(--red)" : wordPct >= 80 ? "var(--amber)" : "#7a9166";
+
+  const imagesUsed = usage?.imagesUsed ?? 0;
+  const imageCap   = tierConfig.imagesPerMonth;
+  const imagePct   = Math.min(100, Math.round((imagesUsed / imageCap) * 100));
+  const imageColor = imagePct >= 100 ? "var(--red)" : imagePct >= 80 ? "var(--amber)" : "#7a9166";
+
+  return (
+    <div style={{ borderTop:"1px solid var(--border)", paddingTop:20 }}>
+      <h4 style={{ fontFamily:"var(--font-display)", fontSize:14, fontWeight:700, margin:"0 0 12px" }}>This Month's AI Usage</h4>
+      {loading ? (
+        <div style={{ fontSize:12, color:"var(--muted)" }}>Loading…</div>
+      ) : (
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          <div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:6 }}>
+              <span style={{ color:"var(--text-secondary)" }}>AI writing (platform-managed Claude credits)</span>
+              <span style={{ fontWeight:700, color: wordPct >= 100 ? "var(--red)" : "var(--text)" }}>{wordsUsed.toLocaleString()} / {wordCap.toLocaleString()} words</span>
+            </div>
+            <div style={{ height:8, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
+              <div style={{ height:"100%", width:`${wordPct}%`, background:wordColor, borderRadius:99, transition:"width 0.3s" }} />
+            </div>
+            {wordPct >= 100 && (
+              <div style={{ fontSize:11, color:"var(--red)", marginTop:6 }}>
+                ⚠ Monthly limit reached — add your own API key in Settings → API Keys{tierConfig.byok ? "" : " (upgrade to Operative to unlock this)"}, or wait until next month.
+              </div>
+            )}
+          </div>
+          <div>
+            <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:6 }}>
+              <span style={{ color:"var(--text-secondary)" }}>AI images (platform-managed Stability credits)</span>
+              <span style={{ fontWeight:700, color: imagePct >= 100 ? "var(--red)" : "var(--text)" }}>{imagesUsed.toLocaleString()} / {imageCap.toLocaleString()} images</span>
+            </div>
+            <div style={{ height:8, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
+              <div style={{ height:"100%", width:`${imagePct}%`, background:imageColor, borderRadius:99, transition:"width 0.3s" }} />
+            </div>
+            {imagePct >= 100 && (
+              <div style={{ fontSize:11, color:"var(--red)", marginTop:6 }}>
+                ⚠ Monthly limit reached — add your own OpenAI/Gemini/Stability key in Settings → API Keys{tierConfig.byok ? "" : " (upgrade to Operative to unlock this)"}, or wait until next month.
+              </div>
+            )}
+          </div>
+          <div style={{ fontSize:11, color:"var(--muted)", lineHeight:1.6 }}>
+            Platform-managed images use Blog Bunker's built-in Stability AI credits — no setup needed. Prefer OpenAI or Gemini instead? Add your own key in Settings → API Keys{tierConfig.byok ? "" : " (Operative and above)"}.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+async function copyPostWithLinks(title, body, headlineImageUrl = null) {
+  const plainText = `${title}${headlineImageUrl ? `\n[Headline image: ${headlineImageUrl}]` : ""}\n\n${markdownToPlainWithLinks(body)}`;
+  const escTitle = (title||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const html = `<p><strong>${escTitle}</strong></p>\n${headlineImageUrl ? `<p><img src="${headlineImageUrl}" alt="${escTitle}"></p>\n` : ""}${markdownToHtml(body)}`;
+  try {
+    if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": new Blob([plainText], { type: "text/plain" }),
+          "text/html":  new Blob([html], { type: "text/html" }),
+        }),
+      ]);
+      return;
+    }
+  } catch {} // fall through to plain-text copy below
+  await navigator.clipboard.writeText(plainText);
+}
+
 const DEFAULT_POSTS = [
   { id:1, title:"Cast at Dawn, Sip at Dusk: A Philosophy",           status:"published", date:"2026-03-28", views:1843, category:"Culture"      },
   { id:2, title:"Whiskey & Waders: Perfect Pairings for the Stream",  status:"published", date:"2026-03-22", views:1204, category:"Whiskey"      },
@@ -175,11 +528,11 @@ const CALENDAR_EVENTS = [
 ];
 
 const COMPETITORS = [
-  { name:"Hatch Magazine",  url:"hatchmag.com",       da:52, posts:"4/wk", traffic:"120K", strengths:"Strong SEO, video content",   threat:"high"   },
-  { name:"MidCurrent",      url:"midcurrent.com",      da:48, posts:"3/wk", traffic:"95K",  strengths:"Expert contributors, guides", threat:"high"   },
-  { name:"Gink & Gasoline", url:"ginkandgasoline.com", da:41, posts:"2/wk", traffic:"45K",  strengths:"Community, humor",            threat:"medium" },
-  { name:"The Drake",       url:"drakemag.com",        da:38, posts:"1/wk", traffic:"30K",  strengths:"Literary voice, photography", threat:"low"    },
-  { name:"Whisky Advocate", url:"whiskyadvocate.com",  da:61, posts:"5/wk", traffic:"310K", strengths:"Authority, reviews",          threat:"medium" },
+  { name:"Hatch Magazine",  url:"hatchmag.com",       posts:"4/wk", traffic:"120K", strengths:"Strong SEO, video content",   threat:"high"   },
+  { name:"MidCurrent",      url:"midcurrent.com",      posts:"3/wk", traffic:"95K",  strengths:"Expert contributors, guides", threat:"high"   },
+  { name:"Gink & Gasoline", url:"ginkandgasoline.com", posts:"2/wk", traffic:"45K",  strengths:"Community, humor",            threat:"medium" },
+  { name:"The Drake",       url:"drakemag.com",        posts:"1/wk", traffic:"30K",  strengths:"Literary voice, photography", threat:"low"    },
+  { name:"Whisky Advocate", url:"whiskyadvocate.com",  posts:"5/wk", traffic:"310K", strengths:"Authority, reviews",          threat:"medium" },
 ];
 
 const INSPIRATION = [
@@ -190,10 +543,61 @@ const INSPIRATION = [
 ];
 
 const PLANS = [
-  { name:"Scout",     price:"Free",   features:["1 Workspace","50 Posts","Basic Analytics","Community Support"] },
-  { name:"Operative", price:"$19/mo", features:["3 Workspaces","Unlimited Posts","AI Writing Tools","Advanced Analytics","Email Support"] },
-  { name:"Command",   price:"$49/mo", features:["Unlimited Workspaces","Team Collaboration","Priority Support","Custom Integrations","Wix API"] },
+  { name:"Scout",     price:"$19/mo", byokPrice:"$16/mo", features:["1 Workspace","15,000 AI words/mo","20 AI images/mo","Meta (Facebook & Instagram) posting only","Bring your own AI key (BYOK)","Community Support"] },
+  { name:"Operative", price:"$45/mo", byokPrice:"$40/mo", features:["3 Workspaces included (+$5/mo each additional)","60,000 AI words/mo","100 AI images/mo","Buffer integration (TikTok, X, Pinterest, Reddit)","Bring your own AI key (BYOK)","Email Support"] },
 ];
+// "Command" is a status, not a purchasable tier — auto-unlocks at 10 workspaces
+// on one account (shared API keys across workspaces, priority support).
+// byokPrice reflects bringing your own Anthropic/Stability key instead of
+// using Blog Bunker's platform-managed AI — genuinely cheaper for us to serve
+// (near-zero AI cost vs the real cost of the platform-managed path), so it's
+// passed on as a discount. Available on both tiers.
+
+// Feature gating by tier. Both tiers can bring their own AI key (BYOK) — at a
+// discounted price, since that costs Blog Bunker ~$0 in AI spend to serve.
+// Operative additionally unlocks Buffer (TikTok/X/Pinterest/Reddit) and a
+// bigger platform-managed credit pool; Scout stays Meta-only for posting.
+// Since OpenAI/Gemini already require the user's own key with no
+// platform-managed fallback, a Scout user without their own key still has no
+// AI image generation from those providers — only Stability's
+// platform-managed path (see image-generate.js) covers that for them.
+const TIER_CONFIG = {
+  scout:     { label:"Scout",     wordsPerMonth:15000, imagesPerMonth:20,  byok:true,  buffer:false, socialPlatforms:["facebook","instagram"] },
+  operative: { label:"Operative", wordsPerMonth:60000, imagesPerMonth:100, byok:true,  buffer:true,  socialPlatforms:["facebook","instagram","tiktok","twitter","pinterest","reddit"] },
+};
+const TIER_STORAGE = "bb_user_tier";
+function loadUserTier() { try { return localStorage.getItem(TIER_STORAGE) || "scout"; } catch { return "scout"; } }
+function saveUserTier(tier) {
+  try { localStorage.setItem(TIER_STORAGE, tier); } catch {}
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("user_tier", uid, tier);
+}
+
+// ─── FREE TRIAL (first 30 days) ───────────────────────────────────────────────
+// New users get full Operative-tier access for their first month, regardless
+// of whatever userTier is set to underneath — this is the "hook" period, and
+// reverts to their real tier automatically once it ends. No payment processor
+// exists yet (userTier itself is a manual toggle), so this is proportionally
+// scoped the same way — a real, working mechanic today that a future Stripe
+// integration can plug into rather than something to rebuild from scratch.
+const TRIAL_STORAGE = "bb_trial_start";
+const TRIAL_DAYS = 30;
+function getOrStartTrial() {
+  try {
+    let start = localStorage.getItem(TRIAL_STORAGE);
+    if (!start) {
+      start = String(Date.now());
+      localStorage.setItem(TRIAL_STORAGE, start);
+      const uid = window.__bbUserId;
+      if (uid) cloudSet("trial_start", uid, start);
+    }
+    return parseInt(start, 10);
+  } catch { return Date.now(); }
+}
+function trialDaysLeft(trialStart) {
+  const elapsed = (Date.now() - trialStart) / (24*60*60*1000);
+  return Math.max(0, Math.ceil(TRIAL_DAYS - elapsed));
+}
 
 // ─── AI PROVIDER CONFIG ───────────────────────────────────────────────────────
 
@@ -203,9 +607,9 @@ const AI_PROVIDERS = [
     name: "Claude",
     company: "Anthropic",
     logo: "◈",
-    color: "#d4a054",
-    models: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
-    defaultModel: "claude-sonnet-4-20250514",
+    color: "#a67c52",
+    models: ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
+    defaultModel: "claude-sonnet-5",
     keyPrefix: "sk-ant-",
     keyPlaceholder: "sk-ant-api03-...",
     docsUrl: "https://console.anthropic.com",
@@ -270,7 +674,16 @@ function saveKeys(keys) {
   if (uid) cloudSet("api_keys", uid, keys);
 }
 function loadModels() {
-  try { return JSON.parse(localStorage.getItem(MODEL_STORAGE) || "{}"); } catch { return {}; }
+  try {
+    const m = JSON.parse(localStorage.getItem(MODEL_STORAGE) || "{}");
+    // Migrate deprecated dated model snapshots saved before this fix
+    const DEPRECATED_MODEL_MAP = { "claude-sonnet-4-20250514": "claude-sonnet-5", "claude-opus-4-20250514": "claude-opus-4-8" };
+    if (m.anthropic && DEPRECATED_MODEL_MAP[m.anthropic]) {
+      m.anthropic = DEPRECATED_MODEL_MAP[m.anthropic];
+      saveModels(m);
+    }
+    return m;
+  } catch { return {}; }
 }
 function saveModels(models) {
   try { localStorage.setItem(MODEL_STORAGE, JSON.stringify(models)); } catch {}
@@ -288,10 +701,13 @@ async function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 15
       : { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
     const res = await fetch(endpoint, {
       method: "POST", headers,
-      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role:"user", content: userMsg }] }),
+      body: JSON.stringify({
+        model, max_tokens: maxTokens, system, messages: [{ role:"user", content: userMsg }],
+        ...(useProxy ? { userId: window.__bbUserId || null } : {}),
+      }),
     });
     const data = await res.json();
-    if (data.error) throw new Error(data.error.message || "Anthropic error");
+    if (data.error) throw new Error(data.error.message || data.error || "Anthropic error");
     return data.content?.[0]?.text || "";
   }
 
@@ -431,15 +847,18 @@ const PLATFORM_IMAGE_SPECS = {
   twitter:   { ratio:"16:9", label:"Widescreen (16:9)",style:"editorial photography, wide cinematic"            },
 };
 
-// Determine which image provider to use based on available keys
+// Determine which image provider to use based on available keys — falls back
+// to Blog Bunker's own platform-managed Stability credits if the user hasn't
+// added their own key for anything, so image generation always works.
 function getImageProvider(apiKeys) {
   if (apiKeys["stability"]) return "stability";
   if (apiKeys["openai"])    return "dalle";
   if (apiKeys["gemini"])    return "gemini-image";
-  return null;
+  return "stability"; // platform-managed fallback (no key) — see generateImage()
 }
 
-function getImageProviderLabel(provider) {
+function getImageProviderLabel(provider, apiKeys = null) {
+  if (provider === "stability" && apiKeys && !apiKeys["stability"]) return "Blog Bunker (built-in Stability AI credits)";
   return { stability:"Stability AI", dalle:"GPT Image (OpenAI)", "gemini-image":"Gemini Image" }[provider] || "No image provider";
 }
 
@@ -450,16 +869,20 @@ function getAvailableImageProviders(apiKeys) {
     { id:"dalle",         label:"GPT Image (OpenAI)",  keyName:"openai",    logo:"●" },
     { id:"gemini-image",  label:"Gemini Image",        keyName:"gemini",    logo:"✦" },
   ];
-  return all.map(p => ({ ...p, available: !!apiKeys[p.keyName] }));
+  // Stability alone has a platform-managed fallback (Blog Bunker's own key,
+  // used when the user hasn't set their own) — it's always available, unlike
+  // OpenAI/Gemini which have no such fallback and genuinely require a key.
+  return all.map(p => ({ ...p, available: p.id === "stability" ? true : !!apiKeys[p.keyName] }));
 }
 
 async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
   const provider = forceProvider || getImageProvider(apiKeys);
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
-  if (!provider) throw new Error("No image provider connected. Add an OpenAI or Gemini key in Settings → API Keys.");
   const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
   const apiKey = apiKeys[keyMap[provider]];
-  if (!apiKey) throw new Error(`${getImageProviderLabel(provider)} key not set. Add it in Settings → API Keys.`);
+  // Stability alone has a platform-managed fallback (no key needed) — every
+  // other provider still requires the user's own key with no exception.
+  if (!apiKey && provider !== "stability") throw new Error(`${getImageProviderLabel(provider)} key not set. Add it in Settings → API Keys.`);
   const sizeMap = { "1:1":"1024x1024", "3:2":"1536x1024", "2:3":"1024x1536", "16:9":"1536x1024" };
   const size = sizeMap[spec.ratio] || "1024x1024";
 
@@ -506,11 +929,17 @@ async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
     throw new Error(`Gemini image failed: ${lastErr}`);
   }
 
-  // Stability AI — still needs proxy (no CORS support)
+  // Stability AI — routes through the proxy (no CORS support). "stability" here
+  // means straightforward text-to-image, NOT the img2img/restyle case in
+  // image-generate.js — this was previously calling that endpoint by mistake,
+  // which always failed since img2img requires an existing image to transform.
+  const isPlatformManaged = provider === "stability" && !apiKey;
   const res = await fetch("/api/image-generate", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ provider:"stability", prompt, apiKey, size }),
+    body: JSON.stringify(isPlatformManaged
+      ? { provider:"stability-platform", prompt, size, userId: window.__bbUserId || null }
+      : { provider:"stability-text", prompt, apiKey, size }),
   });
   const text = await res.text();
   if (text.trimStart().startsWith("<")) throw new Error("Image generation timed out — try again");
@@ -696,7 +1125,7 @@ function ImageSavePanel({ imageUrl, tags = ["generated"], name = "generated" }) 
         </div>
       </div>
       {status && (
-        <div style={{ padding:"8px 12px", background:status.startsWith("✗")?"var(--red)11":status.startsWith("✓")?"#5cba6c11":"var(--bg-elevated)", fontSize:11, color:status.startsWith("✗")?"var(--red)":status.startsWith("✓")?"#5cba6c":"var(--text-secondary)", borderTop:"1px solid var(--border)" }}>
+        <div style={{ padding:"8px 12px", background:status.startsWith("✗")?"var(--red)11":status.startsWith("✓")?"#7a916611":"var(--bg-elevated)", fontSize:11, color:status.startsWith("✗")?"var(--red)":status.startsWith("✓")?"#7a9166":"var(--text-secondary)", borderTop:"1px solid var(--border)" }}>
           {status}
         </div>
       )}
@@ -783,7 +1212,7 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
 
   const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
   const provider    = imgProvider;
-  const providerLabel = getImageProviderLabel(provider);
+  const providerLabel = getImageProviderLabel(provider, apiKeys);
   const spec        = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
   const isLoading   = genLoading || promptLoad;
 
@@ -995,10 +1424,9 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig 
               </button>
             ))}
           </div>
-          {/* Image provider status badge */}
-          <div style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 12px", borderRadius:99, border:`1px solid ${getImageProvider(apiKeys)?"#7c3aed44":"var(--border)"}`, background:getImageProvider(apiKeys)?"#7c3aed0a":"transparent", fontSize:11, color:getImageProvider(apiKeys)?"#a78bfa":"var(--muted)" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 12px", borderRadius:99, border:"1px solid #7c3aed44", background:"#7c3aed0a", fontSize:11, color:"#a78bfa" }}>
             <span>▣</span>
-            {getImageProvider(apiKeys) ? `${getImageProviderLabel(getImageProvider(apiKeys))} — images ready` : "Add Stability AI, OpenAI or Gemini key for images"}
+            {getImageProviderLabel(getImageProvider(apiKeys), apiKeys)} — images ready
           </div>
         </div>
 
@@ -1089,7 +1517,7 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig 
               {plat.id === "twitter" && (
                 <div style={{ display:"flex", alignItems:"center", gap:10 }}>
                   <div style={{ flex:1, height:4, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
-                    <div style={{ height:"100%", width:`${Math.min(100,(charCount(plat.id)/280)*100)}%`, background:charCount(plat.id)>280?"var(--red)":charCount(plat.id)>240?"var(--amber)":"#5cba6c", borderRadius:99, transition:"width 0.2s" }} />
+                    <div style={{ height:"100%", width:`${Math.min(100,(charCount(plat.id)/280)*100)}%`, background:charCount(plat.id)>280?"var(--red)":charCount(plat.id)>240?"var(--amber)":"#7a9166", borderRadius:99, transition:"width 0.2s" }} />
                   </div>
                   <span style={{ fontSize:12, fontWeight:700, color:charCount(plat.id)>280?"var(--red)":charCount(plat.id)>240?"var(--amber)":"var(--muted)", flexShrink:0 }}>
                     {280 - charCount(plat.id)} chars left
@@ -1159,7 +1587,7 @@ function SocialSettings() {
       <div>
         <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Social Media</h3>
         <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
-          Mark which platforms you're active on. Direct API publishing is on the roadmap — for now, use the Social tab to generate and copy posts.
+          Mark which platforms you're active on. Facebook and Instagram post directly via <strong style={{color:"var(--text)"}}>Facebook & Instagram</strong> settings, and X, TikTok, Pinterest, and Reddit post directly via <strong style={{color:"var(--text)"}}>Buffer (Social)</strong> settings. For any platform without a direct connection yet, use the Social tab to generate and copy posts.
         </p>
       </div>
 
@@ -1193,7 +1621,9 @@ function SocialSettings() {
                   onBlur={e=>e.target.style.borderColor="var(--border)"}
                 />
                 <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:8, padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
-                  ✦ Direct publishing via {plat.name} API coming soon. For now, generate posts in the Social tab and copy them across.
+                  {(plat.id === "instagram" || plat.id === "facebook")
+                    ? <>✦ Direct posting is live — connect your account under <strong style={{color:"var(--text)"}}>Facebook & Instagram</strong> in Settings.</>
+                    : <>✦ Direct posting is live via Buffer — connect your account under <strong style={{color:"var(--text)"}}>Buffer (Social)</strong> in Settings.</>}
                 </div>
               </div>
             )}
@@ -1316,10 +1746,10 @@ function AIQuickSwitcher({ activeProvider, activeModel, onProviderChange, onMode
   const [open,        setOpen]       = useState(false);
   const [imageProvider, setImageProvider] = useState(() => getImageProvider(apiKeys) || "stability");
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
-  const imgProviderLabel = getImageProviderLabel(getImageProvider(apiKeys));
+  const imgProviderLabel = getImageProviderLabel(getImageProvider(apiKeys), apiKeys);
 
   return (
-    <div style={{ position:"fixed", bottom:24, right:24, zIndex:999, display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
+    <div className="bb-ai-switcher" style={{ position:"fixed", bottom:24, right:24, zIndex:999, display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
       {open && (
         <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:14, padding:20, width:320, boxShadow:"0 8px 40px rgba(0,0,0,0.4)", display:"flex", flexDirection:"column", gap:16 }}>
           {/* Text AI */}
@@ -1574,7 +2004,7 @@ function SEOOptimizer({ activeProvider, activeModel, apiKeys }) {
 
 // ─── SETTINGS: API KEYS TAB ───────────────────────────────────────────────────
 
-function APIKeysSettings({ apiKeys, onSave }) {
+function APIKeysSettings({ apiKeys, onSave, byokEnabled = true }) {
   const [draft,    setDraft]    = useState({ ...apiKeys });
   const [models,   setModels]   = useState(loadModels);
   const [saved,    setSaved]    = useState(false);
@@ -1644,24 +2074,37 @@ function APIKeysSettings({ apiKeys, onSave }) {
 
             {provider.id === "anthropic" ? (
               <div style={{padding:"10px 14px",borderRadius:8,background:"var(--bg-elevated)",border:"1px solid var(--border)",fontSize:12,color:"var(--text-secondary)",lineHeight:1.6}}>
-                Claude runs through your Netlify environment variable <code style={{color:"var(--amber)",background:"var(--bg)",padding:"1px 5px",borderRadius:4}}>ANTHROPIC_API_KEY</code> — no browser key needed. You can optionally add a key below to override it.
+                Claude runs through your Netlify environment variable <code style={{color:"var(--amber)",background:"var(--bg)",padding:"1px 5px",borderRadius:4}}>ANTHROPIC_API_KEY</code> — no browser key needed.{byokEnabled ? " You can optionally add a key below to override it." : ""}
               </div>
             ) : null}
 
-            <div style={{marginTop:provider.id==="anthropic"?12:0}}>
-              <label style={{display:"block",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:6}}>
-                {provider.id === "anthropic" ? "Override API Key (optional)" : "API Key"}
-              </label>
-              <input
-                type="password"
-                placeholder={provider.keyPlaceholder}
-                value={draft[provider.id] || ""}
-                onChange={e => setDraft(d => ({ ...d, [provider.id]: e.target.value }))}
-                style={iS}
-                onFocus={e => e.target.style.borderColor = provider.color}
-                onBlur={e => e.target.style.borderColor = "var(--border)"}
-              />
-            </div>
+            {(byokEnabled || provider.id === "anthropic") ? (
+              <div style={{marginTop:provider.id==="anthropic"?12:0}}>
+                <label style={{display:"block",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:6}}>
+                  {provider.id === "anthropic" ? "Override API Key (optional)" : "API Key"}
+                </label>
+                <input
+                  type="password"
+                  placeholder={provider.keyPlaceholder}
+                  value={draft[provider.id] || ""}
+                  onChange={e => setDraft(d => ({ ...d, [provider.id]: e.target.value }))}
+                  style={iS}
+                  onFocus={e => e.target.style.borderColor = provider.color}
+                  onBlur={e => e.target.style.borderColor = "var(--border)"}
+                  disabled={provider.id === "anthropic" && !byokEnabled}
+                />
+              </div>
+            ) : (
+              <div style={{marginTop:0,padding:"10px 14px",borderRadius:8,background:"var(--amber)0a",border:"1px solid var(--amber)33",fontSize:12,color:"var(--text-secondary)",lineHeight:1.6}}>
+                🔒 Bringing your own {provider.name} key is available on <strong style={{color:"var(--amber)"}}>Operative</strong> and above — upgrade in Settings → Billing & Plan. {provider.name} has no platform-managed option, so this is required to use it at all.
+              </div>
+            )}
+
+            {provider.id !== "anthropic" && byokEnabled && (
+              <div style={{marginTop:10,fontSize:11,color:"var(--text-secondary)",lineHeight:1.5,padding:"8px 12px",borderRadius:6,background:"var(--bg-elevated)",border:"1px solid var(--border)"}}>
+                💡 You'll need your own {provider.name} API key from {provider.company}, which is billed separately as pay-as-you-go usage — not included with Blog Bunker. It's usually significantly cheaper than a monthly subscription to {provider.name} directly, since you only pay for what you actually use.
+              </div>
+            )}
 
             <div style={{marginTop:12}}>
               <label style={{display:"block",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:6}}>Default Model</label>
@@ -1956,14 +2399,14 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
       </div>
 
       {/* Connection status */}
-      <div style={{ padding:16, borderRadius:10, border:`1px solid ${isConnected?"#5cba6c44":"var(--border)"}`, background:isConnected?"#5cba6c0a":"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+      <div style={{ padding:16, borderRadius:10, border:`1px solid ${isConnected?"#7a916644":"var(--border)"}`, background:isConnected?"#7a91660a":"var(--bg-elevated)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
         <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-          <span style={{ width:10, height:10, borderRadius:99, background:isConnected?"#5cba6c":"var(--muted)", display:"inline-block", boxShadow:isConnected?"0 0 8px #5cba6c66":"none" }}/>
+          <span style={{ width:10, height:10, borderRadius:99, background:isConnected?"#7a9166":"var(--muted)", display:"inline-block", boxShadow:isConnected?"0 0 8px #7a916666":"none" }}/>
           <div>
             <div style={{ fontWeight:600, fontSize:14 }}>{isConnected ? "Wix Blog Connected" : "Not Connected"}</div>
             {lastSync && <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>Last sync: {new Date(lastSync).toLocaleString()}</div>}
-            {isConnected && pullCount > 0 && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>{pullCount} posts pulled</div>}
-            {isConnected && cfg.oauthToken && <div style={{ fontSize:11, color:"#5cba6c", marginTop:2 }}>✓ OAuth — full read/write access</div>}
+            {isConnected && pullCount > 0 && <div style={{ fontSize:11, color:"#7a9166", marginTop:2 }}>{pullCount} posts pulled</div>}
+            {isConnected && cfg.oauthToken && <div style={{ fontSize:11, color:"#7a9166", marginTop:2 }}>✓ OAuth — full read/write access</div>}
           </div>
         </div>
         {isConnected && <button onClick={disconnect} style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Disconnect</button>}
@@ -2044,7 +2487,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
       {isConnected && (
         <div style={{ display:"flex", gap:10 }}>
           <button onClick={pullPosts} disabled={syncing}
-            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:syncing?"var(--bg-elevated)":"#5cba6c", color:syncing?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:syncing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
+            style={{ padding:"10px 20px", borderRadius:8, border:"none", background:syncing?"var(--bg-elevated)":"#7a9166", color:syncing?"var(--muted)":"#fff", fontSize:13, fontWeight:700, cursor:syncing?"not-allowed":"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 }}>
             {syncing ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Syncing…</> : "↓ Pull Posts from Wix"}
           </button>
         </div>
@@ -2067,7 +2510,7 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
             {log.map((l,i)=>(
               <div key={i} style={{ fontSize:11, display:"flex", gap:10, alignItems:"flex-start" }}>
                 <span style={{ color:"var(--muted)", flexShrink:0, fontFamily:"monospace", fontSize:10 }}>{l.ts}</span>
-                <span style={{ color:l.type==="success"?"#5cba6c":l.type==="error"?"var(--red)":"var(--text-secondary)", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>{l.msg}</span>
+                <span style={{ color:l.type==="success"?"#7a9166":l.type==="error"?"var(--red)":"var(--text-secondary)", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>{l.msg}</span>
               </div>
             ))}
           </div>
@@ -2085,7 +2528,17 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
 
 const LOGO_STORAGE = "bb_workspace_logo";
 function loadLogo() { try { return localStorage.getItem(LOGO_STORAGE) || null; } catch { return null; } }
-function saveLogo(data) { try { localStorage.setItem(LOGO_STORAGE, data); } catch {} }
+async function saveLogo(data) {
+  try { localStorage.setItem(LOGO_STORAGE, data); } catch {}
+  const uid = window.__bbUserId;
+  console.log("[logo] saveLogo called, userId:", uid, "data length:", data?.length);
+  if (uid) {
+    const ok = await cloudSet("workspace_logo", uid, data);
+    console.log("[logo] cloudSet result:", ok);
+  } else {
+    console.log("[logo] NOT saved to cloud — window.__bbUserId was not set at save time");
+  }
+}
 
 function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
   const [form,       setForm]       = useState({ name:wsName, url:wsUrl, tagline:wsTagline });
@@ -2160,7 +2613,7 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
                 Remove Logo
               </button>
             )}
-            {logoStatus && <span style={{ fontSize:11, color:"#5cba6c" }}>{logoStatus}</span>}
+            {logoStatus && <span style={{ fontSize:11, color:"#7a9166" }}>{logoStatus}</span>}
           </div>
         </div>
         <input ref={logoInput} type="file" accept="image/*" style={{ display:"none" }} onChange={e => handleLogoUpload(e.target.files[0])} />
@@ -2494,7 +2947,7 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
                 </div>
                 <div>
                   <div style={{ fontWeight:700, fontSize:14 }}>{comp.name}</div>
-                  <div style={{ fontSize:11, color:"var(--text-secondary)" }}>{comp.url} · {comp.posts} · DA {comp.da}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)" }}>{comp.url} · {comp.posts}</div>
                 </div>
               </div>
               <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -2502,9 +2955,9 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
               <div style={{ display:"flex", alignItems:"center", gap:6 }}>
                 {data.realData && (
                   <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99,
-                    background: data.source==="rss" ? "#5cba6c15" : "#7c3aed15",
-                    color:      data.source==="rss" ? "#5cba6c"   : "#7c3aed",
-                    border:    `1px solid ${data.source==="rss" ? "#5cba6c33" : "#7c3aed33"}`,
+                    background: data.source==="rss" ? "#7a916615" : "#7c3aed15",
+                    color:      data.source==="rss" ? "#7a9166"   : "#7c3aed",
+                    border:    `1px solid ${data.source==="rss" ? "#7a916633" : "#7c3aed33"}`,
                     fontWeight:600 }}>
                     {data.source==="rss" ? "● RSS feed" : "● Web search"}
                   </span>
@@ -2631,11 +3084,12 @@ function clearPipelineDraft() {
   try { localStorage.removeItem(PIPELINE_STORAGE); } catch {}
 }
 
-function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null }) {
+function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null, initialPost = null, onConsumedInitialPost = null, onSendToSocialPipeline = null, onNavigateToTab = null, onNavigateToPosts = null }) {
   const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
   const saved = loadPipelineDraft();
   const [stage,     setStage]    = useState(saved?.stage     || "brief");
   const [completed, setCompleted]= useState(saved?.completed || []);
+  const [pipelinePostId, setPipelinePostId] = useState(saved?.pipelinePostId || null); // tracks the original post id when editing an existing article, so re-publishing updates it instead of creating a duplicate
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
 
   // Shared pipeline state — restored from localStorage if available
@@ -2648,6 +3102,11 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const [enhance, setEnhance] = useState(saved?.enhance || {
     metaTitle: "", metaDescription: "", primaryKeyword: "", suggestions: [], headlines: [], improved: "",
   });
+  const [linkSuggestions, setLinkSuggestions] = useState({ internal: [], external: [] });
+  const [linkSelected,    setLinkSelected]    = useState({});
+  const [linkLoading,     setLinkLoading]     = useState({ internal: false, external: false });
+  const [linkError,       setLinkError]       = useState("");
+  const [linkInserted,    setLinkInserted]    = useState(false);
   const [social, setSocial] = useState(saved?.social || { posts: {}, images: {} });
   const [schedule, setSchedule] = useState(saved?.schedule || {
     publishDate: new Date(Date.now() + 86400000).toISOString().split("T")[0],
@@ -2671,14 +3130,61 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     setSaveStatus("saving");
     clearTimeout(autosaveTimer.current);
     autosaveTimer.current = setTimeout(() => {
-      const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, savedAt: new Date().toISOString() };
+      const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, pipelinePostId, savedAt: new Date().toISOString() };
       savePipelineDraft(data);
       setSavedAt(data.savedAt);
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus(""), 2500);
+      const uid = window.__bbUserId;
+      if (uid) cloudSaveDebounced("pipeline_draft", uid, data);
     }, 1500);
     return () => clearTimeout(autosaveTimer.current);
-  }, [stage, completed, brief, draft, enhance, social.posts, schedule]);
+  }, [stage, completed, brief, draft, enhance, social.posts, schedule, pipelinePostId]);
+
+  // Pull the cloud copy of the in-progress article draft on mount — lets
+  // work-in-progress resume on a different device. Skipped when an explicit
+  // hand-off (initialPost) is present — that should always win over silently
+  // resuming an old draft.
+  useEffect(() => {
+    if (initialPost) return;
+    const uid = window.__bbUserId;
+    if (!uid) return;
+    (async () => {
+      const cloud = await cloudGet("pipeline_draft", uid);
+      if (!cloud) return;
+      const cloudTime = cloud.savedAt ? new Date(cloud.savedAt).getTime() : 0;
+      const localTime = saved?.savedAt ? new Date(saved.savedAt).getTime() : 0;
+      if (cloudTime <= localTime) return; // local copy is already current or newer
+      setStage(cloud.stage || "brief");
+      setCompleted(cloud.completed || []);
+      setPipelinePostId(cloud.pipelinePostId || null);
+      setBrief(cloud.brief || { topic:"", angle:"", audience:"fly fishing and whiskey enthusiasts", keywords:"", inspiration:null });
+      setDraft(cloud.draft || { title:"", body:"", category:"Culture", tone:"literary" });
+      setEnhance(cloud.enhance || { metaTitle:"", metaDescription:"", primaryKeyword:"", suggestions:[], headlines:[], improved:"" });
+      setSocial(cloud.social || { posts:{}, images:{} });
+      setSchedule(cloud.schedule || { publishDate:new Date(Date.now()+86400000).toISOString().split("T")[0], publishTime:"09:00", publishToWix:wixConnected, addToCalendar:true, status:"scheduled" });
+      savePipelineDraft(cloud); // keep local copy in sync too
+      setSavedAt(cloud.savedAt);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Load an article handed off from the Posts tab ("→ Pipeline" button) — skips
+  // straight to the Enhance stage since the brief/draft are already written.
+  useEffect(() => {
+    if (!initialPost || initialPost.id === pipelinePostId) return;
+    const hasUnsavedWork = (brief.topic || draft.title || draft.body) && pipelinePostId !== initialPost.id;
+    if (hasUnsavedWork && !window.confirm(`Load "${initialPost.title}" into the Pipeline? This will replace what's currently in progress here (your current work is saved separately and won't be lost, but the Pipeline will switch to this article).`)) {
+      if (onConsumedInitialPost) onConsumedInitialPost();
+      return;
+    }
+    setDraft({ title: initialPost.title || "", body: initialPost.body || "", category: initialPost.category || "Culture", tone: "literary", headlineImageUrl: initialPost.headlineImageUrl || "" });
+    setBrief(b => ({ ...b, topic: initialPost.title || b.topic }));
+    setPipelinePostId(initialPost.id);
+    setCompleted(c => [...new Set([...c, "brief", "draft"])]);
+    setStage("enhance");
+    if (onConsumedInitialPost) onConsumedInitialPost();
+  }, [initialPost]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
   const advanceTo = (next) => { setStage(next); setError(""); setSuccess(""); };
@@ -2794,6 +3300,105 @@ Titles and descriptions MUST be under their character limits. Score each on: key
     setLoading(false); setLoadMsg("");
   };
 
+  // ── LINK FINDER (internal + external links for the draft body) ──────────────
+  // Internal: matched against Forest's own known posts — no hallucination risk,
+  // since the AI is just pattern-matching against real titles it's given.
+  // External: grounded via Anthropic's native web_search tool (server executes
+  // the search and returns real URLs) — never asks the model to recall a URL
+  // from memory, which is how AI link tools produce dead/hallucinated links.
+  const LINK_MAX_BODY_CHARS = 6000;
+
+  const findInternalLinks = async () => {
+    setLinkLoading(l => ({ ...l, internal: true })); setLinkError("");
+    try {
+      const candidates = posts
+        .filter(p => p.id !== pipelinePostId && (p.title || "").trim())
+        .map(p => ({ id: p.id, title: p.title, category: p.category, hasUrl: !!p.url }));
+      if (candidates.length === 0) throw new Error("No other posts to link to yet — write a few more posts first.");
+
+      const text = await callAI(activeProvider, activeModel,
+        `You suggest internal links for a blog post. You will get the post's text and a list of the site's OTHER existing posts (title, category, id). Find natural places in the text that would benefit from linking to one of those other posts — ONLY suggest a link when it's genuinely topically relevant, not just because a word matches. Return ONLY valid JSON (no fences): {"links":[{"postId": <id from the list>, "anchorText": "exact short phrase copied VERBATIM from the post text (3-8 words)", "reason": "one short sentence"}]}. Suggest at most 5. anchorText MUST be an exact substring of the post text — do not paraphrase it.`,
+        `POST TEXT:\n${draft.body.slice(0, LINK_MAX_BODY_CHARS)}\n\nOTHER POSTS ON THE SITE:\n${JSON.stringify(candidates)}`,
+        apiKeys[activeProvider],
+        1500
+      );
+      const parsed = parseAIJson(text);
+      const bodyLower = draft.body.toLowerCase();
+      const valid = (parsed.links || [])
+        .map(l => {
+          const post = posts.find(p => p.id === l.postId);
+          if (!post) return null;
+          if (!l.anchorText || !bodyLower.includes(l.anchorText.toLowerCase())) return null; // reject hallucinated anchors that don't actually appear in the draft
+          return { kind: "internal", key: `int-${l.postId}-${l.anchorText}`, anchorText: l.anchorText, url: post.url || "", targetTitle: post.title, reason: l.reason || "" };
+        })
+        .filter(Boolean);
+      setLinkSuggestions(s => ({ ...s, internal: valid }));
+      if (valid.length === 0) setLinkError("No confident internal link matches found for this draft.");
+    } catch(e) { setLinkError(e.message); }
+    setLinkLoading(l => ({ ...l, internal: false }));
+  };
+
+  const findExternalLinks = async () => {
+    setLinkLoading(l => ({ ...l, external: true })); setLinkError("");
+    try {
+      const key = apiKeys.anthropic; // web search only available via Anthropic
+      const useProxy = !key;
+      const endpoint = useProxy ? "/api/claude" : "https://api.anthropic.com/v1/messages";
+      const headers = useProxy
+        ? { "Content-Type": "application/json" }
+        : { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" };
+      const model = activeProvider === "anthropic" ? activeModel : (AI_PROVIDERS.find(p=>p.id==="anthropic")?.defaultModel || "claude-sonnet-5");
+
+      const res = await fetch(endpoint, {
+        method: "POST", headers,
+        body: JSON.stringify({
+          model,
+          max_tokens: 1500,
+          system: `You find real, currently-live, authoritative external sources worth linking to from a blog post — official sites, studies, well-known publications. Use web search to verify each URL is real before suggesting it; never invent a URL. After searching, respond with ONLY valid JSON (no fences, no other text): {"links":[{"anchorText":"exact short phrase copied VERBATIM from the post text (3-8 words)","url":"https://real-verified-url","reason":"one short sentence on why this source is worth citing here"}]}. Suggest at most 4. Only include a link if you actually found and verified a real URL via search.`,
+          messages: [{ role: "user", content: `POST TEXT:\n${draft.body.slice(0, LINK_MAX_BODY_CHARS)}` }],
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          ...(useProxy ? { userId: window.__bbUserId || null } : {}),
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message || data.error || "Anthropic error");
+      const textBlocks = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
+      const parsed = parseAIJson(textBlocks);
+      const bodyLower = draft.body.toLowerCase();
+      const valid = (parsed.links || [])
+        .map(l => {
+          if (!l.anchorText || !l.url || !bodyLower.includes(l.anchorText.toLowerCase())) return null;
+          if (!/^https?:\/\//i.test(l.url)) return null;
+          let hostname;
+          try { hostname = new URL(l.url).hostname.replace(/^www\./,""); } catch { return null; }
+          return { kind: "external", key: `ext-${l.url}-${l.anchorText}`, anchorText: l.anchorText, url: l.url, targetTitle: hostname, reason: l.reason || "" };
+        })
+        .filter(Boolean);
+      setLinkSuggestions(s => ({ ...s, external: valid }));
+      if (valid.length === 0) setLinkError("No verified external sources found for this draft.");
+    } catch(e) { setLinkError(e.message); }
+    setLinkLoading(l => ({ ...l, external: false }));
+  };
+
+  const insertSelectedLinks = () => {
+    const all = [...linkSuggestions.internal, ...linkSuggestions.external].filter(l => linkSelected[l.key]);
+    if (all.length === 0) return;
+    let body = draft.body;
+    for (const l of all) {
+      const href = l.url || "PASTE-URL-HERE"; // internal links to unpublished posts get a clear placeholder, never a fake URL
+      // Replace only the first occurrence, case-insensitively, preserving the original casing found in the body
+      const idx = body.toLowerCase().indexOf(l.anchorText.toLowerCase());
+      if (idx === -1) continue;
+      const actualText = body.slice(idx, idx + l.anchorText.length);
+      body = body.slice(0, idx) + `[${actualText}](${href})` + body.slice(idx + l.anchorText.length);
+    }
+    setDraft(d => ({ ...d, body }));
+    setLinkSuggestions({ internal: [], external: [] });
+    setLinkSelected({});
+    setLinkInserted(true);
+    setTimeout(() => setLinkInserted(false), 3000);
+  };
+
   // ── STAGE 4: SOCIAL ─────────────────────────────────────────────────────────
 
   const generateSocialPosts = async () => {
@@ -2833,7 +3438,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
     setLoading(true); setLoadMsg("Publishing…"); setError(""); setSuccess("");
     try {
       const finalPost = {
-        id: Date.now(),
+        id: pipelinePostId || Date.now(),
         title: enhance.metaTitle || draft.title,
         body: draft.body,
         category: draft.category,
@@ -2843,6 +3448,8 @@ Titles and descriptions MUST be under their character limits. Score each on: key
         metaTitle: enhance.metaTitle,
         metaDescription: enhance.metaDescription,
         primaryKeyword: enhance.primaryKeyword,
+        url: posts.find(p => p.id === pipelinePostId)?.url || "",
+        headlineImageUrl: draft.headlineImageUrl || posts.find(p => p.id === pipelinePostId)?.headlineImageUrl || "",
       };
 
       // Save to Blog Bunker
@@ -2910,7 +3517,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
 
       {/* Error / Success */}
       {error   && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>{error}</div>}
-      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", color:"#5cba6c", fontSize:13 }}>{success}</div>}
+      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#7a916611", border:"1px solid #7a916633", color:"#7a9166", fontSize:13 }}>{success}</div>}
 
       {/* Loading overlay */}
       {loading && (
@@ -2923,6 +3530,20 @@ Titles and descriptions MUST be under their character limits. Score each on: key
       {/* ── STAGE 1: BRIEF ── */}
       {stage === "brief" && (
         <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+          {/* Content Multiplier intro — sets the value prop up front */}
+          <div style={{ background:"linear-gradient(135deg, var(--amber-glow), transparent)", border:"1px solid var(--amber)44", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)", marginBottom:8 }}>✦ Write once. Publish everywhere.</div>
+            <div style={{ display:"flex", gap:20, flexWrap:"wrap", fontSize:12, color:"var(--text-secondary)" }}>
+              <span>📝 <strong style={{color:"var(--text)"}}>1</strong> blog post</span>
+              <span>→</span>
+              <span>🔗 smart internal &amp; external links</span>
+              <span>→</span>
+              <span>📣 captions for every platform you post to</span>
+              <span>→</span>
+              <span>🌐 published straight to WordPress</span>
+            </div>
+          </div>
+
           <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
             <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 16px" }}>What are you writing about?</h3>
             <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -2993,7 +3614,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                   </span>
                 )}
                 {saveStatus === "saved" && (
-                  <span style={{ fontSize:11, color:"#5cba6c", display:"flex", alignItems:"center", gap:4 }}>
+                  <span style={{ fontSize:11, color:"#7a9166", display:"flex", alignItems:"center", gap:4 }}>
                     ✓ Saved
                   </span>
                 )}
@@ -3034,23 +3655,61 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               <RichTextEditor value={draft.body} onChange={(md)=>setDraft(d=>({...d,body:md}))} minHeight={380} activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys} />
             </div>
           </div>
+
+          {/* Link Finder — shown once the initial article is written */}
+          {draft.body.trim().length > 0 && (
+            <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
+              <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>
+                🔗 Link Finder
+              </div>
+              <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 14px", lineHeight:1.6 }}>
+                Nothing gets inserted automatically — review and pick which links to add. Links you insert here carry through the rest of the Pipeline into the final copyable post.
+              </p>
+              <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+                <button onClick={findInternalLinks} disabled={linkLoading.internal} style={{ ...btnS, fontSize:11 }}>
+                  {linkLoading.internal ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span> Searching your posts…</> : "🔗 Find Internal Links"}
+                </button>
+                <button onClick={findExternalLinks} disabled={linkLoading.external} style={{ ...btnS, fontSize:11 }}>
+                  {linkLoading.external ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span> Searching the web…</> : "🌐 Find External Links"}
+                </button>
+              </div>
+
+              {linkError && <div style={{ fontSize:12, color:"var(--red)", marginBottom:10 }}>{linkError}</div>}
+              {linkInserted && <div style={{ fontSize:12, color:"#7a9166", marginBottom:10 }}>✓ Links inserted into the draft body.</div>}
+
+              {[...linkSuggestions.internal, ...linkSuggestions.external].length > 0 && (
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  {[...linkSuggestions.internal, ...linkSuggestions.external].map(l => (
+                    <label key={l.key} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", cursor:"pointer" }}>
+                      <input type="checkbox" checked={!!linkSelected[l.key]} onChange={e=>setLinkSelected(s=>({...s,[l.key]:e.target.checked}))} style={{ marginTop:3 }} />
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:12, color:"var(--text)" }}>
+                          <span style={{ fontWeight:700 }}>"{l.anchorText}"</span> → {l.targetTitle}
+                          <span style={{ marginLeft:6, fontSize:10, padding:"1px 6px", borderRadius:99, background:l.kind==="internal"?"#7c9ce022":"#7a916622", color:l.kind==="internal"?"#7c9ce0":"#7a9166" }}>{l.kind === "internal" ? "internal" : "external"}</span>
+                        </div>
+                        <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>{l.reason}</div>
+                        {l.kind === "internal" && !l.url && (
+                          <div style={{ fontSize:11, color:"var(--amber)", marginTop:3 }}>⚠ That post has no recorded URL yet — this will insert a placeholder link for you to fill in later.</div>
+                        )}
+                        {l.url && <div style={{ fontSize:11, color:"var(--muted)", marginTop:3, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{l.url}</div>}
+                      </div>
+                    </label>
+                  ))}
+                  <button onClick={insertSelectedLinks} disabled={![...linkSuggestions.internal, ...linkSuggestions.external].some(l=>linkSelected[l.key])}
+                    style={{ ...btnA, alignSelf:"flex-start", fontSize:12, padding:"8px 16px" }}>
+                    Insert Selected Links
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           <div style={{ display:"flex", gap:10 }}>
             <button onClick={proceedToDraft} disabled={!draft.title.trim()||!draft.body.trim()} style={{ ...btnA, background:draft.title.trim()&&draft.body.trim()?"var(--amber)":"var(--bg-elevated)", color:draft.title.trim()&&draft.body.trim()?"#0e0f11":"var(--muted)", cursor:draft.title.trim()&&draft.body.trim()?"pointer":"not-allowed" }}>
               Continue to Enhance →
             </button>
             <button onClick={() => setStage("brief")} style={btnS}>← Back to Brief</button>
           </div>
-
-          {draft.title && (
-            <HeadlineImagePanel
-              title={draft.title}
-              body={draft.body}
-              activeProvider={activeProvider}
-              activeModel={activeModel}
-              apiKeys={apiKeys}
-              onImageSaved={(url) => setDraft(d => ({ ...d, headlineImageUrl: url }))}
-            />
-          )}
         </div>
       )}
 
@@ -3075,7 +3734,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               {/* Overall score + keyword */}
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
                 {[
-                  { label:"Overall SEO Score", value:`${enhance.overallScore}/100`, color: enhance.overallScore>=80?"#5cba6c":enhance.overallScore>=60?"var(--amber)":"var(--red)" },
+                  { label:"Overall SEO Score", value:`${enhance.overallScore}/100`, color: enhance.overallScore>=80?"#7a9166":enhance.overallScore>=60?"var(--amber)":"var(--red)" },
                   { label:"Readability Score",  value:`${enhance.readabilityScore}/100`, color:"#7c3aed" },
                   { label:"Primary Keyword",   value:enhance.primaryKeyword, color:"var(--amber)" },
                 ].map(s => (
@@ -3096,7 +3755,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                     const selected = enhance.selectedTitle === i;
                     const over = t.charCount > 60 || t.text?.length > 60;
                     const score = t.score || 0;
-                    const scoreColor = score >= 80 ? "#5cba6c" : score >= 65 ? "var(--amber)" : "var(--red)";
+                    const scoreColor = score >= 80 ? "#7a9166" : score >= 65 ? "var(--amber)" : "var(--red)";
                     return (
                       <div key={i} onClick={() => setEnhance(e => ({ ...e, selectedTitle:i, metaTitle:t.text }))}
                         style={{ padding:"12px 14px", borderRadius:9, border:`2px solid ${selected?"var(--amber)":"var(--border)"}`, background:selected?"var(--amber-glow)":"var(--bg-elevated)", cursor:"pointer", transition:"all 0.15s" }}>
@@ -3137,7 +3796,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                     const selected = enhance.selectedDesc === i;
                     const over = d.charCount > 160 || d.text?.length > 160;
                     const score = d.score || 0;
-                    const scoreColor = score >= 80 ? "#5cba6c" : score >= 65 ? "var(--amber)" : "var(--red)";
+                    const scoreColor = score >= 80 ? "#7a9166" : score >= 65 ? "var(--amber)" : "var(--red)";
                     return (
                       <div key={i} onClick={() => setEnhance(e => ({ ...e, selectedDesc:i, metaDescription:d.text }))}
                         style={{ padding:"12px 14px", borderRadius:9, border:`2px solid ${selected?"var(--amber)":"var(--border)"}`, background:selected?"var(--amber-glow)":"var(--bg-elevated)", cursor:"pointer", transition:"all 0.15s" }}>
@@ -3219,6 +3878,18 @@ Titles and descriptions MUST be under their character limits. Score each on: key
             </div>
           )}
 
+          {draft.title && (
+            <HeadlineImagePanel
+              title={draft.title}
+              body={draft.body}
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+              onImageSaved={(url) => setDraft(d => ({ ...d, headlineImageUrl: url }))}
+              existingImageUrl={draft.headlineImageUrl || null}
+            />
+          )}
+
           <div style={{ display:"flex", gap:10 }}>
             <button onClick={()=>{ markDone("enhance"); advanceTo("social"); }} disabled={!enhance.metaTitle}
               style={{ ...btnA, background:enhance.metaTitle?"var(--amber)":"var(--bg-elevated)", color:enhance.metaTitle?"#0e0f11":"var(--muted)", cursor:enhance.metaTitle?"pointer":"not-allowed" }}>
@@ -3232,9 +3903,25 @@ Titles and descriptions MUST be under their character limits. Score each on: key
       {/* ── STAGE 4: SOCIAL ── */}
       {stage === "social" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <div style={{ background:"var(--amber-glow)", border:"1px solid var(--amber)", borderRadius:12, padding:20 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:16, flexWrap:"wrap" }}>
+              <div>
+                <h3 style={{ fontFamily:"var(--font-display)", fontSize:16, fontWeight:700, margin:"0 0 4px", color:"var(--amber)" }}>🔗 Use the Social Pipeline</h3>
+                <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0, maxWidth:520 }}>
+                  For hashtags, per-platform character checks, best-posting-times, and scheduling/publishing, send this article to the full Social Pipeline. The quick generator below is still here for a fast one-off caption.
+                </p>
+              </div>
+              <button onClick={() => onSendToSocialPipeline && onSendToSocialPipeline({ title: draft.title, body: draft.body, headlineImageUrl: draft.headlineImageUrl })}
+                disabled={!draft.title.trim()}
+                style={{ padding:"10px 20px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:draft.title.trim()?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", opacity:draft.title.trim()?1:0.5 }}>
+                → Send to Social Pipeline
+              </button>
+            </div>
+          </div>
+
           <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
-              <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Social Media Posts</h3>
+              <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:0 }}>Quick Social Posts</h3>
               <button onClick={generateSocialPosts} disabled={loading} style={{ ...btnA, padding:"8px 18px", fontSize:12, background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", cursor:loading?"not-allowed":"pointer" }}>
                 {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `${provider.logo} Generate All Platforms`}
               </button>
@@ -3297,13 +3984,13 @@ Titles and descriptions MUST be under their character limits. Score each on: key
       {stage === "publish" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           {success ? (
-            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:40, textAlign:"center" }}>
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #7a916644", borderRadius:12, padding:40, textAlign:"center" }}>
               <div style={{ fontSize:48, marginBottom:16 }}>✓</div>
               <h3 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, marginBottom:8 }}>Post Published!</h3>
               <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:24 }}>{success}</p>
               <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
                 <button onClick={resetPipeline} style={btnA}>Start New Post</button>
-                <button onClick={()=>{ resetPipeline(); /* navigate to posts — handled by parent */; document.querySelector('[data-tab="posts"]')?.click(); }} style={btnS}>View in Posts →</button>
+                <button onClick={()=>{ resetPipeline(); onNavigateToPosts?.(); }} style={btnS}>View in Posts →</button>
                 <button onClick={()=>setStage("draft")} style={btnS}>Back to Draft</button>
               </div>
             </div>
@@ -3312,18 +3999,36 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 }}>
                 <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 20px" }}>Schedule & Publish</h3>
 
-                {/* Summary */}
-                <div style={{ padding:16, borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", marginBottom:20 }}>
-                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Post Summary</div>
-                  <div style={{ fontFamily:"var(--font-display)", fontSize:16, fontWeight:700, marginBottom:4 }}>{enhance.metaTitle || draft.title}</div>
-                  <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:8 }}>{enhance.metaDescription}</div>
-                  <div style={{ display:"flex", gap:12, fontSize:11, color:"var(--muted)" }}>
-                    <span>◈ {draft.category}</span>
-                    <span>▤ {draft.body.split(" ").filter(Boolean).length} words</span>
-                    {enhance.primaryKeyword && <span>🔑 {enhance.primaryKeyword}</span>}
-                    {Object.keys(social.posts).length > 0 && <span>◈ {Object.keys(social.posts).length} social posts ready</span>}
-                  </div>
-                </div>
+                {/* Content Multiplier summary — everything built from this one article */}
+                {(() => {
+                  const linkCount = (draft.body.match(/\[([^\]]+)\]\(([^)]+)\)/g) || []).length;
+                  const socialCount = Object.keys(social.posts).length;
+                  const wpConnected = loadWordPressConfig().connected;
+                  return (
+                    <div style={{ padding:16, borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", marginBottom:20 }}>
+                      <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>✦ From This One Article</div>
+                      <div style={{ fontFamily:"var(--font-display)", fontSize:16, fontWeight:700, marginBottom:4 }}>{enhance.metaTitle || draft.title}</div>
+                      <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:14 }}>{enhance.metaDescription}</div>
+                      <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                        <div style={{ fontSize:12, color:"var(--text)" }}>
+                          ✓ <strong>{draft.body.split(" ").filter(Boolean).length} words</strong> in {draft.category}{enhance.primaryKeyword ? ` · targeting "${enhance.primaryKeyword}"` : ""}
+                        </div>
+                        <div style={{ fontSize:12, color: linkCount > 0 ? "var(--text)" : "var(--muted)" }}>
+                          {linkCount > 0 ? "✓" : "○"} <strong>{linkCount}</strong> internal/external link{linkCount === 1 ? "" : "s"} found &amp; inserted
+                          {linkCount === 0 && <button onClick={()=>setStage("draft")} style={{ marginLeft:8, fontSize:11, background:"none", border:"none", color:"var(--amber)", cursor:"pointer", textDecoration:"underline" }}>find some →</button>}
+                        </div>
+                        <div style={{ fontSize:12, color: socialCount > 0 ? "var(--text)" : "var(--muted)" }}>
+                          {socialCount > 0 ? "✓" : "○"} <strong>{socialCount}</strong> platform caption{socialCount === 1 ? "" : "s"} ready to post
+                          {socialCount === 0 && <button onClick={()=>setStage("social")} style={{ marginLeft:8, fontSize:11, background:"none", border:"none", color:"var(--amber)", cursor:"pointer", textDecoration:"underline" }}>generate some →</button>}
+                        </div>
+                        <div style={{ fontSize:12, color: wpConnected ? "var(--text)" : "var(--muted)" }}>
+                          {wpConnected ? "✓" : "○"} WordPress {wpConnected ? "connected — publish below" : "not connected"}
+                          {!wpConnected && <button onClick={()=>onNavigateToTab?.("settings")} style={{ marginLeft:8, fontSize:11, background:"none", border:"none", color:"var(--amber)", cursor:"pointer", textDecoration:"underline" }}>connect it →</button>}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:20 }}>
                   <div>
@@ -3363,16 +4068,16 @@ Titles and descriptions MUST be under their character limits. Score each on: key
 
                   <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                     <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
-                      📋 Copy to Wix Blog
+                      📋 Copy for Your Blog
                     </div>
                     <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 10px", lineHeight:1.6 }}>
-                      Copy your post as formatted HTML, then paste it into the Wix Blog editor. The post is automatically saved to your Posts tab.
+                      Copies with formatting and links intact, then paste it into whichever blog host you publish on. The post is automatically saved to your Posts tab.
                     </p>
                     <div style={{ display:"flex", gap:8 }}>
                       <button onClick={() => {
                         // Auto-save to Posts tab first
                         const finalPost = {
-                          id: Date.now(),
+                          id: pipelinePostId || Date.now(),
                           title: enhance.metaTitle || draft.title,
                           body: draft.body,
                           category: draft.category,
@@ -3382,6 +4087,8 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                           metaTitle: enhance.metaTitle,
                           metaDescription: enhance.metaDescription,
                           primaryKeyword: enhance.primaryKeyword,
+                          url: posts.find(p => p.id === pipelinePostId)?.url || "",
+                          headlineImageUrl: draft.headlineImageUrl || posts.find(p => p.id === pipelinePostId)?.headlineImageUrl || "",
                         };
                         onSavePost(finalPost);
                         if (schedule.addToCalendar) {
@@ -3389,30 +4096,116 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                           onAddCalEvent({ title: finalPost.title, type: finalPost.status, day });
                         }
                         markDone("publish");
-                        // Copy as plain text — title + body, markdown stripped
-                        const plainText = `${enhance.metaTitle || draft.title}\n\n${(draft.body || "")
-                          .replace(/^#{1,3}\s+/gm, "")
-                          .replace(/\*\*(.*?)\*\*/g, "$1")
-                          .replace(/\*(.*?)\*/g, "$1")
-                          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-                          .trim()}`;
-                        navigator.clipboard.writeText(plainText);
+                        // Copy with links preserved — rich HTML for editors that accept
+                        // it (real clickable hyperlinks), plain text with visible (url)
+                        // fallback otherwise. Previously this stripped links to bare text,
+                        // silently discarding the URL entirely.
+                        copyPostWithLinks(enhance.metaTitle || draft.title, draft.body, draft.headlineImageUrl);
                         setSuccess(`✓ Copied! Post saved to Posts tab as "${finalPost.status}".`);
                       }}
                         style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                         📋 Copy Post Text
                       </button>
-                      <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
-                        style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                        ↗ Open Wix Blog
-                      </button>
                     </div>
                   </div>
+
+                  {(() => {
+                    const wpConfig = loadWordPressConfig();
+                    return (
+                      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
+                          🌐 Publish to WordPress
+                        </div>
+                        {wpConfig.connected ? (
+                          <>
+                            <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 10px", lineHeight:1.6 }}>
+                              Publishes directly to {wpConfig.siteUrl} — with your headline image, formatting, and links, no copy-paste needed. Publishing again after edits updates the same post instead of duplicating it.
+                            </p>
+                            <button onClick={async () => {
+                              setLoading(true); setError(""); setSuccess(""); setLoadMsg("Publishing to WordPress…");
+                              try {
+                                let featuredMediaId = null;
+                                if (draft.headlineImageUrl) {
+                                  setLoadMsg("Uploading featured image…");
+                                  const mediaRes = await fetch("/api/wordpress-post", {
+                                    method:"POST", headers:{"Content-Type":"application/json"},
+                                    body: JSON.stringify({ action:"uploadMedia", ...wpConfig, imageUrl: draft.headlineImageUrl, filename: `${(draft.title||"headline").slice(0,40).replace(/[^a-z0-9]+/gi,"-")}.jpg` }),
+                                  });
+                                  const mediaData = await mediaRes.json();
+                                  if (mediaData.error) throw new Error(`Featured image: ${mediaData.error}`);
+                                  featuredMediaId = mediaData.mediaId;
+                                }
+
+                                const existingWpPostId = posts.find(p => p.id === pipelinePostId)?.wpPostId;
+                                const statusMap = { published:"publish", draft:"draft", scheduled:"future" };
+                                const wpStatus = statusMap[schedule.status] || "draft";
+                                const dateIso = schedule.status === "scheduled" && schedule.publishDate
+                                  ? new Date(`${schedule.publishDate}T${schedule.publishTime || "09:00"}`).toISOString()
+                                  : undefined;
+
+                                setLoadMsg(existingWpPostId ? "Updating post…" : "Publishing post…");
+                                const res = await fetch("/api/wordpress-post", {
+                                  method:"POST", headers:{"Content-Type":"application/json"},
+                                  body: JSON.stringify({
+                                    action: existingWpPostId ? "updatePost" : "createPost",
+                                    ...wpConfig,
+                                    postId: existingWpPostId,
+                                    title: enhance.metaTitle || draft.title,
+                                    contentHtml: markdownToHtml(draft.body),
+                                    status: wpStatus,
+                                    featuredMediaId,
+                                    date: dateIso,
+                                  }),
+                                });
+                                const data = await res.json();
+                                if (data.error) throw new Error(data.error);
+
+                                const finalPost = {
+                                  id: pipelinePostId || Date.now(),
+                                  title: enhance.metaTitle || draft.title,
+                                  body: draft.body,
+                                  category: draft.category,
+                                  status: schedule.status || "draft",
+                                  date: schedule.publishDate || new Date().toISOString().split("T")[0],
+                                  views: 0,
+                                  metaTitle: enhance.metaTitle,
+                                  metaDescription: enhance.metaDescription,
+                                  primaryKeyword: enhance.primaryKeyword,
+                                  url: data.url || posts.find(p => p.id === pipelinePostId)?.url || "",
+                                  headlineImageUrl: draft.headlineImageUrl || posts.find(p => p.id === pipelinePostId)?.headlineImageUrl || "",
+                                  wpPostId: data.postId,
+                                  wpUrl: data.url,
+                                };
+                                onSavePost(finalPost);
+                                if (schedule.addToCalendar) {
+                                  const day = new Date(finalPost.date).getDate();
+                                  onAddCalEvent({ title: finalPost.title, type: finalPost.status, day });
+                                }
+                                markDone("publish");
+                                setSuccess(`✓ ${existingWpPostId ? "Updated" : "Published"} on WordPress — ${data.url}`);
+                              } catch(e) {
+                                setError(`WordPress: ${e.message}`);
+                              }
+                              setLoading(false); setLoadMsg("");
+                            }}
+                              disabled={loading || !draft.title.trim()}
+                              style={{ padding:"8px 16px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":"#21759b", color:loading?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
+                              {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg || "Publishing…"}</> : "🌐 Publish to WordPress"}
+                            </button>
+                          </>
+                        ) : (
+                          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0, lineHeight:1.6 }}>
+                            Connect your WordPress site in <strong>Settings → WordPress</strong> to publish directly instead of copy-pasting.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
 
               <div style={{ display:"flex", gap:10 }}>
-                <button onClick={handlePublish} disabled={loading} style={{ ...btnA, background:loading?"var(--bg-elevated)":"#5cba6c", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
+                <button onClick={handlePublish} disabled={loading} style={{ ...btnA, background:loading?"var(--bg-elevated)":"#7a9166", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
                   {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : schedule.status==="published" ? "↑ Publish Now" : schedule.status==="draft" ? "Save as Draft" : "Schedule Post"}
                 </button>
                 <button onClick={()=>setStage("social")} style={btnS}>← Back to Social</button>
@@ -3483,10 +4276,10 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
 
       <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:1,background:"var(--border)",borderRadius:12,overflow:"hidden",border:"1px solid var(--border)"}}>
         {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=>(
-          <div key={d} style={{background:"var(--bg-elevated)",padding:10,textAlign:"center",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{d}</div>
+          <div key={d} style={{background:"var(--bg-elevated)",padding:10,textAlign:"center",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",minWidth:0}}>{d}</div>
         ))}
         {Array(firstDow).fill(null).map((_,i)=>(
-          <div key={`empty-${i}`} style={{background:"var(--bg-surface)",padding:12,minHeight:80,opacity:0.3}}/>
+          <div key={`empty-${i}`} style={{background:"var(--bg-surface)",padding:12,minHeight:80,opacity:0.3,minWidth:0}}/>
         ))}
         {Array(daysInMonth).fill(null).map((_,i)=>{
           const day=i+1;
@@ -3495,7 +4288,7 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
           return (
             <div key={day}
               onClick={()=>{setCalModalDay(day);setCalModalOpen(true);}}
-              style={{background:"var(--bg-surface)",padding:"8px 10px",minHeight:80,cursor:"pointer",borderTop:tod?"2px solid var(--amber)":"none",boxSizing:"border-box"}}
+              style={{background:"var(--bg-surface)",padding:"8px 10px",minHeight:80,minWidth:0,overflow:"hidden",cursor:"pointer",borderTop:tod?"2px solid var(--amber)":"none",boxSizing:"border-box"}}
               onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"}
               onMouseLeave={e=>e.currentTarget.style.background="var(--bg-surface)"}>
               <div style={{fontSize:12,fontWeight:tod?700:400,color:tod?"var(--amber)":"var(--text-secondary)",marginBottom:4,display:"flex",alignItems:"center",gap:5}}>
@@ -3506,7 +4299,7 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
                 <div key={ei}
                   onClick={e=>{e.stopPropagation();deleteCalEvent(calEvents.findIndex(c=>c.day===day&&c.title===ev.title));}}
                   title="Click to remove"
-                  style={{fontSize:10,padding:"2px 6px",borderRadius:4,background:(tc[ev.type]||"var(--muted)")+"22",color:tc[ev.type]||"var(--muted)",fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>
+                  style={{fontSize:10,padding:"2px 6px",borderRadius:4,background:(tc[ev.type]||"var(--muted)")+"22",color:tc[ev.type]||"var(--muted)",fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer",maxWidth:"100%"}}>
                   {ev.title}
                 </div>
               ))}
@@ -3683,7 +4476,7 @@ function GSCPanel({ onDataLoaded }) {
         </p>
       </div>
 
-      {success && <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c0a", border:"1px solid #5cba6c44", fontSize:12, color:"#5cba6c" }}>{success}</div>}
+      {success && <div style={{ padding:"10px 14px", borderRadius:8, background:"#7a91660a", border:"1px solid #7a916644", fontSize:12, color:"#7a9166" }}>{success}</div>}
       {error   && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)0a", border:"1px solid var(--red)44", fontSize:12, color:"var(--red)" }}>{error}</div>}
 
       {/* OAuth Client ID input */}
@@ -3713,7 +4506,7 @@ function GSCPanel({ onDataLoaded }) {
                 style={{ padding:"8px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:6 }}>
                 {loadingSites ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Loading…</> : "↓ Load my GSC properties"}
               </button>
-              {siteUrl && <div style={{ fontSize:12, color:"#5cba6c", alignSelf:"center", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>✓ {siteUrl}</div>}
+              {siteUrl && <div style={{ fontSize:12, color:"#7a9166", alignSelf:"center", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>✓ {siteUrl}</div>}
             </div>
             {sites.length > 0 && (
               <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
@@ -3759,7 +4552,7 @@ function GSCPanel({ onDataLoaded }) {
               style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
               Disconnect
             </button>
-            <span style={{ fontSize:12, color:"#5cba6c", alignSelf:"center" }}>● Connected{cfg.lastFetch ? ` · Last synced ${new Date(cfg.lastFetch).toLocaleString()}` : ""}</span>
+            <span style={{ fontSize:12, color:"#7a9166", alignSelf:"center" }}>● Connected{cfg.lastFetch ? ` · Last synced ${new Date(cfg.lastFetch).toLocaleString()}` : ""}</span>
           </>
         )}
       </div>
@@ -3867,7 +4660,7 @@ function GSCAnalyticsView({ data, onRefresh }) {
 
 // ─── POSTS TAB ────────────────────────────────────────────────────────────────
 
-function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, savePost, openEditPost, card }) {
+function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, savePost, openEditPost, onSendToPipeline, card }) {
   const [selectedIds, setSelectedIds] = useState([]);
   const allSelected = filteredPosts.length > 0 && filteredPosts.every(p => selectedIds.includes(p.id));
 
@@ -3932,7 +4725,7 @@ function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, s
                   {allSelected&&<span style={{fontSize:10,color:"#0e0f11",fontWeight:900}}>✓</span>}
                 </div>
               </th>
-              {["Title","Category","Status","Date","Views"].map(h=>(
+              {["Title","Category","Status","Date","Views",""].map(h=>(
                 <th key={h} style={{textAlign:"left",padding:"12px 16px",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{h}</th>
               ))}
             </tr>
@@ -3961,6 +4754,12 @@ function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, s
                   </td>
                   <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)",cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.date}</td>
                   <td style={{padding:"14px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}} onClick={()=>openEditPost(p)}>{p.views>0?p.views.toLocaleString():"—"}</td>
+                  <td style={{padding:"14px 16px"}} onClick={e=>e.stopPropagation()}>
+                    <button onClick={()=>onSendToPipeline(p)} title="Continue this article in the Pipeline"
+                      style={{padding:"5px 12px",borderRadius:7,border:"1px solid var(--amber)44",background:"transparent",color:"var(--amber)",fontSize:11,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",whiteSpace:"nowrap"}}>
+                      → Pipeline
+                    </button>
+                  </td>
                 </tr>
               );
             })}
@@ -4047,17 +4846,41 @@ async function ensurePublicImageUrl(imageUrl) {
   return data.url;
 }
 
-async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, link, platforms }) {
+async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, mediaType = "image", link, platforms }) {
   let finalImageUrl = imageUrl;
   // Any blob: or data: URL must be uploaded to get a public https:// URL
   // before sending to meta-post.js (server can't fetch browser-local URLs)
   if (imageUrl && (imageUrl.startsWith("blob:") || imageUrl.startsWith("data:"))) {
     finalImageUrl = await ensurePublicImageUrl(imageUrl);
   }
+
+  // Instagram video needs the background-job flow — video processing can take
+  // several minutes, too long for a normal request/response cycle. Facebook
+  // video is handled synchronously server-side (Facebook doesn't block on
+  // processing the way Instagram's container model does).
+  if (mediaType === "video" && platforms.includes("instagram") && platforms.length === 1) {
+    const jobId = `vidpost_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+    await fetch("/api/meta-video-post", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ jobId, instagramId, pageToken, message, videoUrl: finalImageUrl }),
+    });
+    // Poll for completion — up to ~13 minutes, matching the background function's own budget
+    for (let i = 0; i < 100; i++) {
+      await new Promise(r => setTimeout(r, 8000));
+      const statusRes  = await fetch(`/api/meta-video-post-status?jobId=${jobId}`);
+      const statusData = await statusRes.json();
+      if (statusData.status === "success") return { instagram: { success:true, id: statusData.id } };
+      if (statusData.status === "error")   return { instagram: { success:false, error: statusData.error } };
+      // still processing — keep polling
+    }
+    return { instagram: { success:false, error: "Instagram video processing took too long — try again, or check the video isn't unusually large." } };
+  }
+
   const res = await fetch("/api/meta-post", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pageId, pageToken, instagramId, message, imageUrl: finalImageUrl, link, platforms }),
+    body: JSON.stringify({ pageId, pageToken, instagramId, message, imageUrl: finalImageUrl, mediaType, link, platforms }),
   });
   return await res.json();
 }
@@ -4103,7 +4926,7 @@ function MetaConnectPanel({ onConnected }) {
   if (cfg.connected && cfg.pages) {
     return (
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-        <div style={{ padding:14, borderRadius:10, border:"1px solid #5cba6c44", background:"#5cba6c0a", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <div style={{ padding:14, borderRadius:10, border:"1px solid #7a916644", background:"#7a91660a", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <div>
             <div style={{ fontWeight:700, fontSize:14 }}>✓ Facebook & Instagram Connected</div>
             <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:3 }}>
@@ -4179,26 +5002,36 @@ class MarketingErrorBoundary extends React.Component {
   }
 }
 
-function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous" }) {
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null }) {
   const [tab, setTab] = useState("pipeline");
+  const [editPostForPipeline, setEditPostForPipeline] = useState(null);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const scheduledCount = socialPosts.filter(p => p.status === "scheduled").length;
+  const [addSocialInspirationOpen, setAddSocialInspirationOpen] = useState(false);
+  const [addSocialCompetitorOpen,  setAddSocialCompetitorOpen]  = useState(false);
+  const [pipelineInitialIdea,      setPipelineInitialIdea]      = useState(null);
+  const sendInspirationToPipeline = (item) => { setPipelineInitialIdea(item); setTab("pipeline"); };
+
+  // Article Pipeline "→ Send to Social Pipeline" hand-off — routes through the
+  // same mechanism as the Inspiration hand-off above.
+  useEffect(() => {
+    if (!externalInitialIdea) return;
+    setPipelineInitialIdea(externalInitialIdea);
+    setTab("pipeline");
+    if (onConsumedExternalInitialIdea) onConsumedExternalInitialIdea();
+  }, [externalInitialIdea]);
 
   const TABS = [
     { id:"pipeline",   label:"Social Pipeline",  icon:"◈", highlight:true },
     { id:"scheduled",  label:"Social Posts",      icon:"▤", badge: socialPosts.length || null },
     { id:"media",      label:"Media Library",     icon:"🖼" },
     { id:"video",      label:"Video Planning",    icon:"🎬" },
-    { id:"create",     label:"Quick Post",        icon:"✎" },
     { id:"email",      label:"Email",             icon:"✉" },
-    { id:"pinterest",  label:"Pinterest",         icon:"📌" },
     { id:"seo",        label:"Keyword Research",  icon:"◎" },
     { id:"research",   label:"Research",          icon:"⊕" },
-    { id:"hashtags",   label:"Hashtags",          icon:"#" },
     { id:"image",      label:"Image Studio",      icon:"▣" },
-    { id:"ideas",      label:"Post Ideas",        icon:"✦" },
-    { id:"competitor", label:"Competitors",       icon:"⊗" },
   ];
+  const [researchSubTab, setResearchSubTab] = useState("research");
 
   return (
     <div>
@@ -4246,6 +5079,8 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           metaConfig={metaConfig}
           onSave={onSaveSocialPost}
           onDelete={onDeleteSocialPost}
+          tierConfig={tierConfig}
+          onEditInPipeline={(post) => { setEditPostForPipeline(post); setTab("pipeline"); }}
         />
       )}
 
@@ -4257,37 +5092,21 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           apiKeys={apiKeys}
           dark={dark}
           metaConfig={metaConfig}
-          inspiration={inspiration}
-          onAddInspiration={onAddInspiration}
+          inspiration={socialInspiration}
+          onAddInspiration={onAddSocialInspiration}
           onSaveSocialPost={onSaveSocialPost}
-        />
-      )}
-
-      {/* ── QUICK POST ── */}
-      {tab === "create" && (
-        <SocialPostTab
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-          dark={dark}
-          metaConfig={metaConfig}
+          initialIdea={pipelineInitialIdea}
+          onConsumedInitialIdea={() => setPipelineInitialIdea(null)}
+          tierConfig={tierConfig}
+          onAddCalEvent={onAddCalEvent}
+          editPost={editPostForPipeline}
+          onConsumedEditPost={() => setEditPostForPipeline(null)}
         />
       )}
 
       {/* ── EMAIL NEWSLETTER ── */}
       {tab === "email" && (
         <EmailNewsletterStudio
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-          posts={posts}
-          brandGuide={brandGuide}
-        />
-      )}
-
-      {/* ── PINTEREST ── */}
-      {tab === "pinterest" && (
-        <PinterestStudio
           activeProvider={activeProvider}
           activeModel={activeModel}
           apiKeys={apiKeys}
@@ -4303,30 +5122,117 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           activeModel={activeModel}
           apiKeys={apiKeys}
           posts={posts}
-          inspiration={inspiration}
-          onAddInspiration={onAddInspiration}
+          inspiration={socialInspiration}
+          onAddInspiration={onAddSocialInspiration}
         />
       )}
 
-      {/* ── RESEARCH ── */}
+      {/* ── RESEARCH (Competitors, Research, Inspiration, Post Ideas, Hashtags, Competitor Insights) ── */}
       {tab === "research" && (
-        <SocialResearch
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-          posts={posts}
-          inspiration={inspiration}
-          onAddInspiration={onAddInspiration}
-        />
-      )}
+        <div>
+          <div style={{display:"flex",gap:4,marginBottom:20,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content",flexWrap:"wrap"}}>
+            {[{id:"socialCompetitors",label:"Competitors",icon:"⊞"},{id:"research",label:"Research",icon:"⊕"},{id:"inspiration",label:"Inspiration",icon:"◐"},{id:"ideas",label:"Post Ideas",icon:"✦"},{id:"hashtags",label:"Hashtags",icon:"#"},{id:"competitor",label:"Competitor Insights",icon:"⊗"}].map(t=>(
+              <button key={t.id} onClick={()=>setResearchSubTab(t.id)} style={{padding:"7px 14px",borderRadius:7,border:"none",background:researchSubTab===t.id?"var(--amber)":"transparent",color:researchSubTab===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:5}}>
+                <span>{t.icon}</span>{t.label}
+              </button>
+            ))}
+          </div>
 
-      {/* ── HASHTAGS ── */}
-      {tab === "hashtags" && (
-        <HashtagOptimizer
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-        />
+          {researchSubTab === "socialCompetitors" && (
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                <div>
+                  <h2 style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,margin:0}}>Social Competitors</h2>
+                  <p style={{color:"var(--text-secondary)",fontSize:12,margin:"4px 0 0"}}>Track accounts competing for the same audience</p>
+                </div>
+                <button onClick={()=>setAddSocialCompetitorOpen(true)} style={{padding:"9px 18px",borderRadius:8,border:"none",background:"var(--amber)",color:dark?"#0e0f11":"#fff",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"var(--font-body)"}}>+ Add Competitor</button>
+              </div>
+              {socialCompetitors.length === 0 ? (
+                <div style={{padding:"40px 20px",textAlign:"center",background:"var(--bg-surface)",border:"1px solid var(--border)",borderRadius:12,color:"var(--text-secondary)",fontSize:13}}>
+                  No social competitors tracked yet — add an account to start.
+                </div>
+              ) : (
+                <div style={{background:"var(--bg-surface)",border:"1px solid var(--border)",borderRadius:12,padding:0,overflow:"hidden"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse"}}>
+                    <thead><tr style={{borderBottom:"1px solid var(--border)"}}>
+                      {["Account","Platform","Followers","Post Frequency","Engagement","Threat"].map(h=>(
+                        <th key={h} style={{textAlign:"left",padding:"12px 16px",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{h}</th>
+                      ))}
+                    </tr></thead>
+                    <tbody>
+                      {socialCompetitors.map(c=>(
+                        <tr key={c.name||c.id} style={{borderBottom:"1px solid var(--border)"}}>
+                          <td style={{padding:"14px 16px"}}><div style={{fontWeight:600,fontSize:13}}>{c.name}</div><div style={{fontSize:11,color:"var(--text-secondary)"}}>{c.handle}</div></td>
+                          <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{c.platform}</td>
+                          <td style={{padding:"14px 16px",fontSize:12,fontWeight:600}}>{c.followers}</td>
+                          <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{c.posts}</td>
+                          <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{c.engagement}</td>
+                          <td style={{padding:"14px 16px"}}><ThreatBadge level={c.threat}/></td>
+                          <td style={{padding:"14px 16px"}}><button onClick={()=>onDeleteSocialCompetitor(c.name)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14}} title="Remove">✕</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {researchSubTab === "research" && (
+            <SocialResearch
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+              posts={posts}
+              inspiration={socialInspiration}
+              onAddInspiration={onAddSocialInspiration}
+            />
+          )}
+
+          {researchSubTab === "inspiration" && (
+            <InspirationBoard
+              inspiration={socialInspiration}
+              onAddNew={()=>setAddSocialInspirationOpen(true)}
+              onDelete={onDeleteSocialInspiration}
+              onToDraft={sendInspirationToPipeline}
+              toDraftLabel="→ Social Pipeline"
+              card={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}
+              btnS={{ padding:"7px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}
+              btnP={{ padding:"9px 18px", borderRadius:8, border:"none", background:"var(--amber)", color:dark?"#0e0f11":"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}
+            />
+          )}
+
+          {researchSubTab === "ideas" && (
+            <SocialPostIdeas
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+              posts={posts}
+              inspiration={socialInspiration}
+              onAddInspiration={onAddSocialInspiration}
+            />
+          )}
+
+          {researchSubTab === "hashtags" && (
+            <HashtagOptimizer
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+            />
+          )}
+
+          {researchSubTab === "competitor" && (
+            <CompetitorMarketingPanel
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+              competitors={competitors}
+              posts={posts}
+              inspiration={socialInspiration}
+              onAddInspiration={onAddSocialInspiration}
+            />
+          )}
+        </div>
       )}
 
       {/* ── IMAGE STUDIO ── */}
@@ -4338,28 +5244,17 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
         />
       )}
 
-      {/* ── POST IDEAS ── */}
-      {tab === "ideas" && (
-        <SocialPostIdeas
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-          posts={posts}
-          inspiration={inspiration}
-          onAddInspiration={onAddInspiration}
+      {addSocialInspirationOpen && (
+        <AddInspirationModal
+          onSave={(item) => { onAddSocialInspiration({ ...item, id: Date.now() }); setAddSocialInspirationOpen(false); }}
+          onClose={() => setAddSocialInspirationOpen(false)}
         />
       )}
-
-      {/* ── COMPETITORS ── */}
-      {tab === "competitor" && (
-        <CompetitorMarketingPanel
-          activeProvider={activeProvider}
-          activeModel={activeModel}
-          apiKeys={apiKeys}
-          competitors={competitors}
-          posts={posts}
-          inspiration={inspiration}
-          onAddInspiration={onAddInspiration}
+      {addSocialCompetitorOpen && (
+        <AddSocialCompetitorModal
+          onSave={onAddSocialCompetitor}
+          onClose={() => setAddSocialCompetitorOpen(false)}
+          dark={dark}
         />
       )}
     </div>
@@ -4520,7 +5415,7 @@ Be specific and actionable. Use real fly fishing and whiskey terminology. Vary t
                     <div style={{ fontSize:11, color:"var(--muted)", fontStyle:"italic" }}>Why it works: {idea.why}</div>
                   </div>
                   <button onClick={() => saveIdea(idea, i)} disabled={saved[i]}
-                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:saved[i]?"#5cba6c":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[i]?"default":"pointer", fontFamily:"var(--font-body)", flexShrink:0, whiteSpace:"nowrap" }}>
+                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:saved[i]?"#7a9166":"var(--amber)", color:"#0e0f11", fontSize:11, fontWeight:700, cursor:saved[i]?"default":"pointer", fontFamily:"var(--font-body)", flexShrink:0, whiteSpace:"nowrap" }}>
                     {saved[i] ? "✓ Saved" : "+ Save Idea"}
                   </button>
                 </div>
@@ -4576,7 +5471,7 @@ Be specific and actionable. Use real fly fishing and whiskey terminology. Vary t
 
           {/* Angles */}
           <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
-            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:14 }}>💡 Content Angles</div>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166", marginBottom:14 }}>💡 Content Angles</div>
             {results.angles?.map((a,i) => (
               <div key={i} style={{ padding:"10px 0", borderBottom:"1px solid var(--border)" }}>
                 <div style={{ fontWeight:600, fontSize:13, marginBottom:3 }}>{a.angle}</div>
@@ -4693,7 +5588,7 @@ primary = 5 high-volume (100k-1M posts), niche = 8 medium-volume (10k-100k), tre
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:12 }}>
             {[
               { key:"primary",  label:"High Volume",  color:"var(--amber)" },
-              { key:"niche",    label:"Niche Focus",  color:"#5cba6c"      },
+              { key:"niche",    label:"Niche Focus",  color:"#7a9166"      },
               { key:"trending", label:"Trending",     color:"#7c3aed"      },
               { key:"branded",  label:"Branded",      color:"var(--amber)", span:3 },
             ].map(g => (
@@ -5008,12 +5903,13 @@ function saveSocialPostsToStorage(posts) {
   try { localStorage.setItem(SOCIAL_POSTS_STORAGE, JSON.stringify(posts)); } catch {}
 }
 
-function createSocialPost({ platforms, captions, hashtags, imageUrl, imagePrompt, scheduledAt, status = "draft" }) {
+function createSocialPost({ id = null, platforms, captions, hashtags, mediaType, imageUrl, imagePrompt, scheduledAt, status = "draft" }) {
   return {
-    id:          Date.now(),
+    id:          id || Date.now(),
     platforms,
     captions,       // { instagram: "...", facebook: "..." }
     hashtags,
+    mediaType,
     imageUrl,
     imagePrompt,
     status,         // "draft" | "scheduled" | "published"
@@ -5061,7 +5957,7 @@ function SocialPipelineProgress({ stage, setStage, completed }) {
   );
 }
 
-function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost }) {
+function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null, editPost = null, onConsumedEditPost = null }) {
   let saved = loadSocialPipelineDraft();
 
   // Migrate old single-platform draft schema (idea.platform: string) to new multi-platform (idea.platforms: array)
@@ -5079,23 +5975,41 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   const [completed, setCompleted] = useState(saved?.completed || []);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
 
-  const PLATFORMS = [
-    { id:"instagram", label:"Instagram", color:"#e1306c", icon:"📸" },
-    { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
-    { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
-    { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
-    { id:"pinterest", label:"Pinterest", color:"#e60023", icon:"📌" },
-    { id:"reddit",    label:"Reddit",    color:"#ff4500", icon:"🤖" },
-  ];
+  // Derived from the module-level SOCIAL_PLATFORMS so bestTimes/charLimit/hashtagLimit/
+  // tone/format stay in sync — the old hand-duplicated list here was missing all of
+  // those fields, which is why Best Times never showed and captions had no length cap.
+  const PLATFORMS = SOCIAL_PLATFORMS.filter(p => ["instagram","facebook","tiktok","twitter","pinterest","reddit"].includes(p.id))
+    .map(p => ({ id:p.id, label:p.name.replace(" (Twitter)",""), color:p.color, icon:p.icon, charLimit:p.charLimit, hashtagLimit:p.hashtagLimit, bestTimes:p.bestTimes, tone:p.tone, format:p.format }));
 
   // idea.platforms is now an ARRAY — supports multi-select
   const [idea, setIdea] = useState(saved?.idea || { topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
+
   // captions is keyed by platform id: { instagram: {text}, facebook: {text}, ... }
   const [captions, setCaptions] = useState(saved?.captions || {});
-  const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"" });
-  const [imageData, setImageData] = useState(saved?.imageData || { prompt:"", url:null, imgProvider: resolveImageProvider(apiKeys) });
+  const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"", perPlatform:{} });
+  const [imageData, setImageData] = useState(saved?.imageData || { prompt:"", url:null, mediaType:"image", imgProvider: resolveImageProvider(apiKeys) });
   const [schedule, setSchedule] = useState(saved?.schedule || { date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
   const [publishResults, setPublishResults] = useState({});
+  const [editingSocialPostId, setEditingSocialPostId] = useState(saved?.editingSocialPostId || null);
+
+  // Load a saved post handed back from Social Posts ("✎ Edit in Pipeline")
+  // — hydrates the full pipeline state so the user can pick up right where
+  // they left off, and tracks the post's own id so saving again updates it
+  // instead of creating a duplicate.
+  useEffect(() => {
+    if (!editPost) return;
+    setIdea(i => ({ ...i, platforms: editPost.platforms || i.platforms }));
+    setCaptions(editPost.captions || {});
+    setHashtags(
+      typeof editPost.hashtags === "string"
+        ? { sets:null, selected: editPost.hashtags, perPlatform:{} }
+        : { sets:null, selected: editPost.hashtags?.selected || "", perPlatform: editPost.hashtags?.perPlatform || {} }
+    );
+    setImageData(d => ({ ...d, url: editPost.imageUrl || null, mediaType: editPost.mediaType || "image", prompt: editPost.imagePrompt || "" }));
+    setEditingSocialPostId(editPost.id);
+    setStage("caption");
+    if (onConsumedEditPost) onConsumedEditPost();
+  }, [editPost]);
 
   const [loading, setLoading] = useState(false);
   const [loadMsg, setLoadMsg] = useState("");
@@ -5103,17 +6017,81 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   const [success, setSuccess] = useState("");
   const [savedAt, setSavedAt] = useState(saved?.savedAt || null);
 
+  // Load an idea handed off from Inspiration ("→ Social Pipeline" button) or
+  // from a Blog article ("Send to Social Pipeline") — starts a genuinely
+  // FRESH post rather than merging into whatever was previously being worked
+  // on, which was the real bug behind "carries over the last post I made."
+  useEffect(() => {
+    if (!initialIdea) return;
+    setStage("idea");
+    setCompleted([]);
+    setIdea({ topic: initialIdea.title || "", platforms:["instagram"], type:"photo", inspirationSource: initialIdea.source || null });
+    setCaptions({});
+    setHashtags({ sets:null, selected:"", perPlatform:{} });
+    setImageData({
+      prompt: "",
+      url: initialIdea.headlineImageUrl || null,
+      mediaType: "image",
+      imgProvider: resolveImageProvider(apiKeys),
+    });
+    setSchedule({ date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
+    setEditingSocialPostId(null);
+    clearSocialPipelineDraft();
+    if (onConsumedInitialIdea) onConsumedInitialIdea();
+  }, [initialIdea]);
+
+  // Pull the cloud copy of the in-progress draft on mount — if it's newer
+  // than (or exists when local doesn't) what was loaded synchronously from
+  // localStorage above, hydrate everything from it instead. This is what
+  // actually lets an in-progress social post resume on a different device;
+  // the local-only auto-save (see below) never reached other devices before.
+  // Skipped entirely when an explicit hand-off (initialIdea/editPost) is
+  // present — a fresh start or a specific post to edit should always win
+  // over silently resuming whatever was previously being drafted.
+  useEffect(() => {
+    if (initialIdea || editPost) return;
+    const uid = window.__bbUserId;
+    if (!uid) return;
+    (async () => {
+      const cloud = await cloudGet("social_pipeline_draft", uid);
+      if (!cloud) return;
+      const cloudTime = cloud.savedAt ? new Date(cloud.savedAt).getTime() : 0;
+      const localTime = saved?.savedAt ? new Date(saved.savedAt).getTime() : 0;
+      if (cloudTime <= localTime) return; // local copy is already current or newer
+      let hydrated = cloud;
+      if (hydrated?.idea && !Array.isArray(hydrated.idea.platforms)) {
+        const legacyPlatform = hydrated.idea.platform || "instagram";
+        hydrated = { ...hydrated, idea: { ...hydrated.idea, platforms: [legacyPlatform] } };
+      }
+      setStage(hydrated.stage || "idea");
+      setCompleted(hydrated.completed || []);
+      setIdea(hydrated.idea || { topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
+      setCaptions(hydrated.captions || {});
+      setHashtags(hydrated.hashtags || { sets:null, selected:"", perPlatform:{} });
+      setImageData(d => ({ ...d, ...(hydrated.imageData || {}) }));
+      setSchedule(hydrated.schedule || { date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
+      setEditingSocialPostId(hydrated.editingSocialPostId || null);
+      saveSocialPipelineDraft(hydrated); // keep local copy in sync too
+      setSavedAt(hydrated.savedAt);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
   const btnA = { padding:"10px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 };
   const btnS = { padding:"10px 20px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" };
 
-  // Auto-save draft
+  // Auto-save draft — local immediately, cloud debounced so it can be picked
+  // up on another device (this was localStorage-only before, the real gap
+  // behind "doesn't pick up where I left off" on a different computer).
   useEffect(() => {
     if (!idea.topic && Object.keys(captions).length === 0) return;
-    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url: imageData.url?.startsWith("https://") ? imageData.url : null }, schedule, savedAt:new Date().toISOString() };
+    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url: imageData.url?.startsWith("https://") ? imageData.url : null }, schedule, editingSocialPostId, savedAt:new Date().toISOString() };
     saveSocialPipelineDraft(data);
     setSavedAt(data.savedAt);
-  }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, schedule]);
+    const uid = window.__bbUserId;
+    if (uid) cloudSaveDebounced("social_pipeline_draft", uid, data);
+  }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, schedule, editingSocialPostId]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
   const advance  = (next) => { setStage(next); setError(""); setSuccess(""); };
@@ -5149,23 +6127,29 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
   // ── STAGE 2: CAPTIONS (one per selected platform) ───────────────────────────
 
-  const toneMap = {
-    instagram: "warm, visual storytelling, evocative — Instagram caption style",
-    facebook:  "conversational, community-focused, slightly longer form",
-    tiktok:    "punchy, trend-aware, hook-first, short sentences",
-    twitter:   "concise, witty, under 280 characters",
-  };
+  // Strips any hashtags the AI includes despite instructions not to — hashtags
+  // are handled entirely in the separate Hashtags stage, never in the caption itself.
+  const stripHashtags = (text) => text
+    .replace(/(?:^|\n)\s*#[^\s#]+(?:\s+#[^\s#]+)*\s*$/g, "") // trailing hashtag line(s)
+    .replace(/(?<!\S)#[^\s#]+/g, "") // any inline hashtag token
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  const captionPromptFor = (plat) =>
+    `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${plat.tone || plat.label}. Format: ${plat.format || ""} Keep the caption itself under ${plat.charLimit} characters. Do NOT include any hashtags — hashtags are added separately in a later step, so the caption must have zero # tags.`;
 
   const generateCaptionFor = async (platId) => {
     if (!idea.topic.trim()) return;
-    setLoading(true); setLoadMsg(`Writing ${PLATFORMS.find(p=>p.id===platId)?.label} caption…`); setError("");
+    const plat = PLATFORMS.find(p => p.id === platId);
+    setLoading(true); setLoadMsg(`Writing ${plat?.label} caption…`); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
-        `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${toneMap[platId]}.`,
+        captionPromptFor(plat),
         `Write a ${platId} caption (post type: ${idea.type}) about: ${idea.topic}`,
         apiKeys[activeProvider]
       );
-      setCaptions(c => ({ ...c, [platId]: { text: text.trim() } }));
+      setCaptions(c => ({ ...c, [platId]: { text: stripHashtags(text.trim()) } }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
@@ -5176,11 +6160,11 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       setLoadMsg(`Writing ${plat.label} caption…`);
       try {
         const text = await callAI(activeProvider, activeModel,
-          `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${toneMap[plat.id]}.`,
+          captionPromptFor(plat),
           `Write a ${plat.id} caption (post type: ${idea.type}) about: ${idea.topic}`,
           apiKeys[activeProvider]
         );
-        setCaptions(c => ({ ...c, [plat.id]: { text: text.trim() } }));
+        setCaptions(c => ({ ...c, [plat.id]: { text: stripHashtags(text.trim()) } }));
       } catch(e) { setError(`${plat.label}: ${e.message}`); }
     }
     setLoading(false); setLoadMsg("");
@@ -5192,15 +6176,26 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setLoading(true); setLoadMsg("Optimizing hashtags…"); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
-        `You are a hashtag strategist for Cask & Stream. Return ONLY valid JSON (no fences): {"primary":["#tag1","#tag2"],"niche":["#tag1"],"branded":["#CaskAndStream"],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags.`,
+        `You are a hashtag strategist for Cask & Stream. Return ONLY valid JSON (no fences): {"primary":[{"tag":"#tag1","score":85}],"niche":[{"tag":"#tag1","score":40}],"branded":[{"tag":"#CaskAndStream","score":20}],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags. "score" is your best estimate of reach potential from 1-100 (higher = broader audience but more competition to be seen; lower = smaller but more targeted audience).`,
         `Topic: ${idea.topic}\nPlatforms: ${idea.platforms.join(", ")}`,
         apiKeys[activeProvider]
       );
       const parsed = parseAIJson(text);
+      // Normalize to {tag, score} objects — tolerate the AI occasionally returning plain strings
+      for (const key of ["primary","niche","branded"]) {
+        if (Array.isArray(parsed[key])) {
+          parsed[key] = parsed[key].map(t => typeof t === "string" ? { tag: t, score: null } : { tag: t.tag, score: typeof t.score === "number" ? t.score : null });
+        }
+      }
       setHashtags({ sets: parsed, selected: parsed.full_set || "" });
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
+
+  // Tolerates both the new {tag,score} shape and legacy plain-string entries from
+  // previously-saved in-progress drafts.
+  const tagText = (t) => typeof t === "string" ? t : t?.tag;
+  const scoreColor = (score) => score == null ? "var(--muted)" : score >= 70 ? "#7a9166" : score >= 40 ? "var(--amber)" : "#7c9ce0";
 
   // ── STAGE 4: IMAGE (shared across platforms) ────────────────────────────────
 
@@ -5223,7 +6218,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     try {
       setImageData(d => ({ ...d, prompt: finalPrompt }));
       const url = await generateImage(finalPrompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
-      setImageData(d => ({ ...d, prompt: finalPrompt, url }));
+      setImageData(d => ({ ...d, prompt: finalPrompt, url, mediaType:"image" }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
@@ -5232,7 +6227,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setLoading(true); setLoadMsg("Generating image…"); setError("");
     try {
       const url = await generateImage(imageData.prompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
-      setImageData(d => ({ ...d, url }));
+      setImageData(d => ({ ...d, url, mediaType:"image" }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
@@ -5246,56 +6241,80 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   });
 
   const buildSocialPostRecord = (status, scheduledAt = null) => createSocialPost({
+    id: editingSocialPostId || null,
     platforms: idea.platforms,
     captions,
-    hashtags: hashtags.selected,
+    hashtags: { selected: hashtags.selected, perPlatform: hashtags.perPlatform || {} },
     imageUrl: imageData.url,
     imagePrompt: imageData.prompt,
+    mediaType: imageData.mediaType || "image",
     scheduledAt,
     status,
   });
 
-  const handleSaveAsDraft = () => {
+  const handleSaveAsDraft = async () => {
+    setLoading(true); setError(""); setLoadMsg("Saving draft…");
+
+    // Same fix as handleSchedule() — blob:/data: URLs only exist in this browser
+    // tab and are meaningless once read back later (e.g. from Social Posts, or
+    // if this draft later gets scheduled/published). This was the actual bug
+    // behind "image doesn't stay with the caption" — Save as Draft never
+    // uploaded the image at all, unlike Schedule.
+    let finalImageUrl = imageData.url;
+    let imageWarning = "";
+    if (finalImageUrl?.startsWith("blob:") || finalImageUrl?.startsWith("data:")) {
+      setLoadMsg("Uploading image to cloud…");
+      try {
+        finalImageUrl = await ensurePublicImageUrl(finalImageUrl);
+      } catch(e) {
+        finalImageUrl = null; // don't save an unusable blob:/data: reference
+        imageWarning = ` Note: the image couldn't be uploaded (${e.message}) — this draft was saved without it. Re-add it before scheduling or publishing.`;
+      }
+    }
+
     const post = buildSocialPostRecord("draft");
+    post.imageUrl = finalImageUrl;
     if (onSaveSocialPost) onSaveSocialPost(post);
-    setSuccess("✓ Saved as draft — find it in Social Posts tab.");
+    setSuccess(`✓ Saved as draft — find it in Social Posts tab.${imageWarning}`);
     markDone("publish");
     clearSocialPipelineDraft();
+    setLoading(false); setLoadMsg("");
   };
 
   const handleSchedule = async () => {
     setLoading(true); setError(""); setLoadMsg("Preparing post…");
 
-    // Ensure image is in GCS before scheduling (blob: URLs won't survive the cron)
+    // Ensure image is on a public https:// URL before scheduling — blob:/data:
+    // URLs only exist in this browser tab and are meaningless to the server-side
+    // cron job that actually publishes the post later. Uses the same robust
+    // helper as immediate Facebook/Instagram publishing (handles size limits,
+    // throws real errors instead of silently failing).
     let finalImageUrl = imageData.url;
     if (finalImageUrl?.startsWith("blob:") || finalImageUrl?.startsWith("data:")) {
       setLoadMsg("Uploading image to cloud…");
       try {
-        const userId = window.__bbUserId || "anonymous";
-        let dataUrl  = finalImageUrl;
-        if (finalImageUrl.startsWith("blob:")) {
-          const res  = await fetch(finalImageUrl);
-          const blob = await res.blob();
-          dataUrl = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload  = () => resolve(reader.result);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-          });
-        }
-        const uploadRes  = await fetch("/api/gcs", {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ userId, dataUrl, name:`social-${Date.now()}`, tags:["social","scheduled"], source:"generated" }),
-        });
-        const uploadData = await uploadRes.json();
-        if (uploadData.url) finalImageUrl = uploadData.url;
-      } catch(e) { console.warn("Image GCS upload failed:", e.message); }
+        finalImageUrl = await ensurePublicImageUrl(finalImageUrl);
+      } catch(e) {
+        setError(`Couldn't upload the image, so this post was NOT scheduled (an image-less post would silently fail to attach later): ${e.message}. Try again, or remove the image and schedule without one.`);
+        setLoading(false); setLoadMsg("");
+        return; // STOP — never save a scheduled post referencing an unusable blob:/data: URL
+      }
     }
 
     const post = buildSocialPostRecord("scheduled", scheduleDate);
-    post.imageUrl = finalImageUrl; // use GCS URL
+    post.imageUrl = finalImageUrl; // use public URL
     if (onSaveSocialPost) onSaveSocialPost(post);
+    if (onAddCalEvent && scheduleDate) {
+      const d = new Date(scheduleDate);
+      const platformIcons = selectedPlatforms.map(p => p.icon).join("");
+      onAddCalEvent({
+        title: `${platformIcons} ${(captions[selectedPlatforms[0]?.id]?.text || idea.topic || "Social post").slice(0, 60)}`,
+        type: "scheduled",
+        day: d.getDate(),
+        month: d.getMonth(),
+        year: d.getFullYear(),
+      });
+    }
     setSuccess(`✓ Scheduled for ${new Date(scheduleDate).toLocaleString([], {dateStyle:"medium",timeStyle:"short"})}`);
     markDone("publish");
     clearSocialPipelineDraft();
@@ -5309,60 +6328,40 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
     for (const plat of selectedPlatforms) {
       const captionText = captions[plat.id]?.text || "";
-      const fullMessage = [captionText, hashtags.selected].filter(Boolean).join("\n\n");
+      const fullMessage = [captionText, limitHashtagsForPlatform(getHashtagsForPlatform(hashtags, plat.id), plat.id)].filter(Boolean).join("\n\n");
       setLoadMsg(`Publishing to ${plat.label}…`);
 
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
           const page = metaConfig.pages[0];
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: imageData.url, platforms: ["facebook"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: imageData.url, mediaType: imageData.mediaType, platforms: ["facebook"] });
           if (!res.facebook?.success) throw new Error(res.facebook?.error || "Facebook post failed");
           results[plat.id] = { success: true, message: "✓ Posted to Facebook" };
 
         } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
-          if (!imageData.url) throw new Error("Instagram requires an image");
+          if (!imageData.url) throw new Error("Instagram requires an image or video");
           const page = metaConfig.pages.find(p => p.instagram_id);
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: imageData.url, platforms: ["instagram"] });
+          if (imageData.mediaType === "video") setLoadMsg(`Uploading video to Instagram — this can take a few minutes while Instagram processes it…`);
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: imageData.url, mediaType: imageData.mediaType, platforms: ["instagram"] });
           if (!res.instagram?.success) throw new Error(res.instagram?.error || "Instagram post failed");
           results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
 
         } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
-          // Buffer platforms — image must be a public https:// GCS URL
+          if (!tierConfig.buffer) {
+            throw new Error(`Buffer integration is available on Operative and above — upgrade in Settings → Billing & Plan to post to ${plat.label}.`);
+          }
+          // Buffer platforms — image must be a public https:// URL
           let publicImageUrl = imageData.url;
 
-          // If we have a blob: URL, upload it to GCS first
           if (publicImageUrl?.startsWith("blob:") || publicImageUrl?.startsWith("data:")) {
             setLoadMsg(`Uploading image to cloud for ${plat.label}…`);
-            try {
-              const userId = window.__bbUserId || "anonymous";
-              let dataUrl = publicImageUrl;
-              if (publicImageUrl.startsWith("blob:")) {
-                const res  = await fetch(publicImageUrl);
-                const blob = await res.blob();
-                dataUrl = await new Promise((resolve, reject) => {
-                  const reader = new FileReader();
-                  reader.onload  = () => resolve(reader.result);
-                  reader.onerror = reject;
-                  reader.readAsDataURL(blob);
-                });
-              }
-              const uploadRes = await fetch("/api/gcs", {
-                method:  "POST",
-                headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({ userId, dataUrl, name:`social-${Date.now()}`, tags:["social","generated"], source:"generated" }),
-              });
-              const uploadData = await uploadRes.json();
-              if (uploadData.url) publicImageUrl = uploadData.url;
-            } catch(e) {
-              console.warn("Image upload to GCS failed:", e.message);
-              publicImageUrl = null;
-            }
+            publicImageUrl = await ensurePublicImageUrl(publicImageUrl); // throws on real failure — caught below, surfaced clearly instead of silently posting without the image
           }
 
-          // Ensure we have a valid public URL
-          if (!publicImageUrl?.startsWith("https://")) publicImageUrl = null;
-
           const channelId = bufferCfg.mapping[plat.id];
+          if (plat.id === "pinterest" && !bufferCfg.boardMapping?.[channelId]) {
+            throw new Error("No Pinterest board selected — set one in Settings → Buffer before posting to Pinterest.");
+          }
           setLoadMsg(`Publishing to ${plat.label} via Buffer…`);
           const res = await fetch("/api/buffer-post", {
             method:  "POST",
@@ -5373,7 +6372,10 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               channelId,
               text:      fullMessage,
               imageUrl:  publicImageUrl || "",
+              mediaType: imageData.mediaType || "image",
+              platform:  plat.id,
               scheduledAt: null,
+              pinterestBoardId: plat.id === "pinterest" ? bufferCfg.boardMapping?.[channelId] : undefined,
             }),
           });
           const data = await res.json();
@@ -5390,7 +6392,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     }
 
     const manualPlat = selectedPlatforms.find(p => results[p.id]?.success === "manual");
-    if (manualPlat) navigator.clipboard.writeText(`${captions[manualPlat.id]?.text || ""}\n\n${hashtags.selected}`);
+    if (manualPlat) navigator.clipboard.writeText(`${captions[manualPlat.id]?.text || ""}\n\n${getHashtagsForPlatform(hashtags, manualPlat.id)}`);
 
     const allOk = selectedPlatforms.every(p => results[p.id]?.success === true || results[p.id]?.success === "manual");
     if (allOk) {
@@ -5412,8 +6414,9 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setStage("idea"); setCompleted([]); setError(""); setSuccess(""); setSavedAt(null); setPublishResults({});
     setIdea({ topic:"", platforms:["instagram"], type:"photo", inspirationSource:null });
     setCaptions({});
-    setHashtags({ sets:null, selected:"" });
-    setImageData({ prompt:"", url:null, imgProvider: resolveImageProvider(apiKeys) });
+    setHashtags({ sets:null, selected:"", perPlatform:{} });
+    setImageData({ prompt:"", url:null, mediaType:"image", imgProvider: resolveImageProvider(apiKeys) });
+    setEditingSocialPostId(null);
   };
 
   const allCaptionsReady = selectedPlatforms.length > 0 && selectedPlatforms.every(p => captions[p.id]?.text?.trim());
@@ -5437,7 +6440,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       <SocialPipelineProgress stage={stage} setStage={setStage} completed={completed} />
 
       {error   && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:13 }}>{error}</div>}
-      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", color:"#5cba6c", fontSize:13 }}>{success}</div>}
+      {success && <div style={{ marginBottom:16, padding:"10px 14px", borderRadius:8, background:"#7a916611", border:"1px solid #7a916633", color:"#7a9166", fontSize:13 }}>{success}</div>}
       {loading && (
         <div style={{ marginBottom:16, padding:"12px 16px", borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)44", display:"flex", alignItems:"center", gap:10, fontSize:13, color:"var(--amber)" }}>
           <span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span>
@@ -5458,17 +6461,29 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
                 {PLATFORMS.map(p => {
                   const isSelected = idea.platforms.includes(p.id);
+                  const isLocked   = !tierConfig.socialPlatforms.includes(p.id);
                   return (
-                    <button key={p.id} onClick={() => togglePlatform(p.id)}
-                      style={{ padding:"7px 16px", borderRadius:99, border:isSelected?`1px solid ${p.color}`:"1px solid var(--border)", background:isSelected?p.color+"18":"transparent", color:isSelected?p.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-                      <span style={{ width:14, height:14, borderRadius:4, border:`2px solid ${isSelected?p.color:"var(--border)"}`, background:isSelected?p.color:"transparent", display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:9, color:"#fff" }}>
-                        {isSelected ? "✓" : ""}
-                      </span>
+                    <button key={p.id} onClick={() => !isLocked && togglePlatform(p.id)}
+                      disabled={isLocked}
+                      title={isLocked ? "Available on Operative and above (via Buffer)" : undefined}
+                      style={{ padding:"7px 16px", borderRadius:99, border:isSelected?`1px solid ${p.color}`:"1px solid var(--border)", background:isSelected?p.color+"18":"transparent", color:isLocked?"var(--muted)":(isSelected?p.color:"var(--text-secondary)"), fontSize:12, fontWeight:600, cursor:isLocked?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, opacity:isLocked?0.5:1 }}>
+                      {isLocked ? (
+                        <span style={{ fontSize:11 }}>🔒</span>
+                      ) : (
+                        <span style={{ width:14, height:14, borderRadius:4, border:`2px solid ${isSelected?p.color:"var(--border)"}`, background:isSelected?p.color:"transparent", display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:9, color:"#fff" }}>
+                          {isSelected ? "✓" : ""}
+                        </span>
+                      )}
                       <span>{p.icon}</span>{p.label}
                     </button>
                   );
                 })}
               </div>
+              {!tierConfig.buffer && (
+                <div style={{ fontSize:11, color:"var(--muted)", marginTop:8 }}>
+                  🔒 TikTok, X, Pinterest, and Reddit need Buffer, available on Operative and above.
+                </div>
+              )}
               {idea.platforms.length > 1 && (
                 <div style={{ fontSize:11, color:"var(--amber)", marginTop:8 }}>
                   ✦ {idea.platforms.length} platforms selected — you'll get a tailored caption for each, one shared image, and a one-click multi-publish at the end.
@@ -5553,8 +6568,16 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               </div>
               <textarea value={captions[plat.id]?.text || ""} onChange={e=>setCaptions(c=>({...c,[plat.id]:{text:e.target.value}}))} rows={5}
                 placeholder="Caption will appear here — or write your own…"
-                style={{ ...iS, resize:"vertical", lineHeight:1.7 }} />
-              <div style={{ fontSize:11, color:"var(--muted)", marginTop:6, textAlign:"right" }}>{(captions[plat.id]?.text || "").length} characters</div>
+                style={{ ...iS, resize:"vertical", lineHeight:1.7, borderColor:(captions[plat.id]?.text||"").length > plat.charLimit ? "var(--red)" : undefined }} />
+              {(() => {
+                const len = (captions[plat.id]?.text || "").length;
+                const over = len > plat.charLimit;
+                return (
+                  <div style={{ fontSize:11, color: over ? "var(--red)" : "var(--muted)", marginTop:6, textAlign:"right", fontWeight: over ? 700 : 400 }}>
+                    {over && "⚠ "}{len}{plat.charLimit < 40000 ? ` / ${plat.charLimit}` : ""} characters{over ? ` — over by ${len - plat.charLimit}` : ""}
+                  </div>
+                );
+              })()}
             </div>
           ))}
 
@@ -5588,7 +6611,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               {/* Clickable tag groups */}
               {[
                 { key:"primary", label:"High Volume",  color:"var(--amber)", hint:"Broad reach" },
-                { key:"niche",   label:"Niche",         color:"#5cba6c",      hint:"Targeted audience" },
+                { key:"niche",   label:"Niche",         color:"#7a9166",      hint:"Targeted audience" },
                 { key:"branded", label:"Branded",       color:"#7c3aed",      hint:"Your brand tags" },
               ].map(g => (
                 <div key={g.key}>
@@ -5597,7 +6620,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                     <span style={{ fontSize:10, color:"var(--muted)" }}>— {g.hint} · click to add/remove</span>
                     <button onClick={() => {
                       // Select all in this group
-                      const all = hashtags.sets[g.key] || [];
+                      const all = (hashtags.sets[g.key] || []).map(tagText);
                       const current = hashtags.selected.split(/\s+/).filter(Boolean);
                       const allSelected = all.every(t => current.includes(t));
                       const next = allSelected
@@ -5607,14 +6630,16 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                     }}
                       style={{ marginLeft:"auto", padding:"2px 8px", borderRadius:6, border:`1px solid ${g.color}44`, background:"transparent", color:g.color, fontSize:10, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                       {(() => {
-                        const all = hashtags.sets[g.key] || [];
+                        const all = (hashtags.sets[g.key] || []).map(tagText);
                         const current = hashtags.selected.split(/\s+/).filter(Boolean);
                         return all.every(t => current.includes(t)) ? "Deselect All" : "Select All";
                       })()}
                     </button>
                   </div>
                   <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                    {hashtags.sets[g.key]?.map((tag, i) => {
+                    {hashtags.sets[g.key]?.map((entry, i) => {
+                      const tag = tagText(entry);
+                      const score = typeof entry === "object" ? entry.score : null;
                       const selected = hashtags.selected.split(/\s+/).includes(tag);
                       return (
                         <button key={i} onClick={() => {
@@ -5624,8 +6649,12 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                             : [...current, tag];
                           setHashtags(h => ({...h, selected: next.join(" ")}));
                         }}
-                          style={{ fontSize:12, padding:"5px 12px", borderRadius:99, border:`1px solid ${selected ? g.color : g.color+"33"}`, background:selected ? g.color+"20" : "transparent", color:selected ? g.color : "var(--text-secondary)", cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:selected ? 700 : 400, transition:"all 0.15s" }}>
-                          {selected && <span style={{ marginRight:4, fontSize:10 }}>✓</span>}{tag}
+                          title={score != null ? `Reach score: ${score}/100` : undefined}
+                          style={{ display:"inline-flex", alignItems:"center", gap:5, fontSize:12, padding:"5px 10px 5px 12px", borderRadius:99, border:`1px solid ${selected ? g.color : g.color+"33"}`, background:selected ? g.color+"20" : "transparent", color:selected ? g.color : "var(--text-secondary)", cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:selected ? 700 : 400, transition:"all 0.15s" }}>
+                          {selected && <span style={{ fontSize:10 }}>✓</span>}{tag}
+                          {score != null && (
+                            <span style={{ fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:99, background:scoreColor(score)+"22", color:scoreColor(score) }}>{score}</span>
+                          )}
                         </button>
                       );
                     })}
@@ -5654,7 +6683,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                         const isOver = p.hashtagLimit > 0 && count > p.hashtagLimit;
                         const isNone = p.hashtagLimit === 0;
                         return (
-                          <span key={p.id} style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:isOver?"var(--red)15":isNone?"var(--bg-elevated)":"#5cba6c15", color:isOver?"var(--red)":isNone?"var(--muted)":"#5cba6c", border:`1px solid ${isOver?"var(--red)33":isNone?"var(--border)":"#5cba6c33"}`, fontWeight:600 }}>
+                          <span key={p.id} style={{ fontSize:10, padding:"2px 8px", borderRadius:99, background:isOver?"var(--red)15":isNone?"var(--bg-elevated)":"#7a916615", color:isOver?"var(--red)":isNone?"var(--muted)":"#7a9166", border:`1px solid ${isOver?"var(--red)33":isNone?"var(--border)":"#7a916633"}`, fontWeight:600 }}>
                             {p.icon} {p.label}: {isNone ? "no hashtags" : `${count}/${p.hashtagLimit}`}
                           </span>
                         );
@@ -5674,7 +6703,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   Clear all
                 </button>
                 <button onClick={() => {
-                  const all = [...(hashtags.sets.primary||[]),...(hashtags.sets.niche||[]),...(hashtags.sets.branded||[])];
+                  const all = [...(hashtags.sets.primary||[]),...(hashtags.sets.niche||[]),...(hashtags.sets.branded||[])].map(tagText);
                   setHashtags(h => ({...h, selected: [...new Set(all)].join(" ")}));
                 }}
                   style={{ padding:"3px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--muted)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -5685,10 +6714,50 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               {/* Editable final set */}
               <div>
                 <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-                  Final Set <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0 }}>— editable, added to every caption</span>
+                  Final Set <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0 }}>— editable, added to every caption by default</span>
                 </label>
                 <textarea value={hashtags.selected} onChange={e=>setHashtags(h=>({...h,selected:e.target.value}))} rows={3}
                   style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
+              </div>
+
+              {/* Per-platform overrides — e.g. trim down for Twitter's tighter limit
+                  while keeping the full set for every other platform */}
+              <div>
+                <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>
+                  Customize Per Platform <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0 }}>— optional, overrides the shared set above for just that platform</span>
+                </label>
+                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                  {selectedPlatforms.map(p => {
+                    const isCustom = hashtags.perPlatform?.[p.id] != null;
+                    const value = isCustom ? hashtags.perPlatform[p.id] : hashtags.selected;
+                    const count = value.split(/\s+/).filter(Boolean).length;
+                    const isOver = p.hashtagLimit > 0 && count > p.hashtagLimit;
+                    return (
+                      <div key={p.id} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:`1px solid ${isCustom?"var(--amber)44":"var(--border)"}` }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:isCustom?8:0 }}>
+                          <span style={{ fontSize:12, fontWeight:600, color:p.color }}>{p.icon} {p.label}</span>
+                          <span style={{ fontSize:10, color:isOver?"var(--red)":"var(--muted)" }}>
+                            {p.hashtagLimit === 0 ? "no hashtags" : `${count}/${p.hashtagLimit>0?p.hashtagLimit:"∞"}`}
+                          </span>
+                          <button onClick={() => {
+                            if (isCustom) {
+                              setHashtags(h => { const next = {...h.perPlatform}; delete next[p.id]; return {...h, perPlatform: next}; });
+                            } else {
+                              setHashtags(h => ({...h, perPlatform: {...h.perPlatform, [p.id]: h.selected}}));
+                            }
+                          }}
+                            style={{ marginLeft:"auto", padding:"2px 8px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:10, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            {isCustom ? "↺ Reset to shared" : "✎ Customize"}
+                          </button>
+                        </div>
+                        {isCustom && (
+                          <textarea value={hashtags.perPlatform[p.id]} onChange={e=>setHashtags(h=>({...h, perPlatform:{...h.perPlatform, [p.id]:e.target.value}}))} rows={2}
+                            style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6, borderColor: isOver?"var(--red)":undefined }} />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               <button onClick={generateHashtagsForPost} disabled={loading}
@@ -5728,14 +6797,18 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 </div>
 
                 {/* Library picker */}
-                <LibraryImagePicker onSelect={(url) => setImageData(d=>({...d, url, prompt:"from library"}))} />
+                <LibraryImagePicker onSelect={(url, mediaType) => setImageData(d=>({...d, url, mediaType: mediaType || "image", prompt:"from library"}))} />
               </div>
             )}
 
             {imageData.url && (
               <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
                 <div style={{ position:"relative", borderRadius:10, overflow:"hidden", border:"1px solid var(--border)" }}>
-                  <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
+                  {imageData.mediaType === "video" ? (
+                    <video src={imageData.url} controls style={{ width:"100%", display:"block" }} />
+                  ) : (
+                    <img src={imageData.url} alt="" style={{ width:"100%", display:"block" }} />
+                  )}
                   <div style={{ position:"absolute", bottom:10, right:10, display:"flex", gap:6 }}>
                     <button onClick={()=>{ const a=document.createElement("a"); a.href=imageData.url; a.download=`social-post-${Date.now()}.jpg`; a.click(); }}
                       style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.75)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -5753,7 +6826,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   </div>
                 </div>
                 {/* Allow swapping even with image selected */}
-                <LibraryImagePicker onSelect={(url) => setImageData(d=>({...d, url, prompt:"from library"}))} compact />
+                <LibraryImagePicker onSelect={(url, mediaType) => setImageData(d=>({...d, url, mediaType: mediaType || "image", prompt:"from library"}))} compact />
               </div>
             )}
 
@@ -5795,7 +6868,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       {stage === "publish" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           {success ? (
-            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:40, textAlign:"center" }}>
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #7a916644", borderRadius:12, padding:40, textAlign:"center" }}>
               <div style={{ fontSize:48, marginBottom:16 }}>✓</div>
               <h3 style={{ fontFamily:"var(--font-display)", fontSize:22, fontWeight:700, marginBottom:8 }}>Done!</h3>
               <p style={{ fontSize:14, color:"var(--text-secondary)", marginBottom:20 }}>{success}</p>
@@ -5804,7 +6877,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   <div key={plat.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", textAlign:"left" }}>
                     <span>{plat.icon}</span>
                     <span style={{ fontSize:12, fontWeight:600, flex:1 }}>{plat.label}</span>
-                    <span style={{ fontSize:11, color:publishResults[plat.id].success===true?"#5cba6c":publishResults[plat.id].success==="manual"?"var(--amber)":"var(--red)" }}>
+                    <span style={{ fontSize:11, color:publishResults[plat.id].success===true?"#7a9166":publishResults[plat.id].success==="manual"?"var(--amber)":"var(--red)" }}>
                       {publishResults[plat.id].message}
                     </span>
                   </div>
@@ -5825,25 +6898,60 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                     const isBufferConnected = bufferCfg?.connected && !!bufferCfg?.mapping?.[plat.id];
                     const isConnected = isMetaConnected || isBufferConnected;
                     const connectionLabel = isMetaConnected ? "● Direct" : isBufferConnected ? "● Buffer" : "Manual";
-                    const connectionColor = isMetaConnected ? "#5cba6c" : isBufferConnected ? "#1da1f2" : "var(--muted)";
+                    const connectionColor = isMetaConnected ? "#7a9166" : isBufferConnected ? "#1da1f2" : "var(--muted)";
                     const prevResult = publishResults[plat.id];
+                    const captionText = captions[plat.id]?.text || "";
+                    const hashtagText = getHashtagsForPlatform(hashtags, plat.id);
+                    const hashtagCount = hashtagText.split(/\s+/).filter(Boolean).length;
+                    const charCount = captionText.length + (hashtagText ? hashtagText.length + 2 : 0); // +2 for the blank-line join
+                    const overChar = plat.charLimit > 0 && charCount > plat.charLimit;
+                    const overHashtags = plat.hashtagLimit > 0 && hashtagCount > plat.hashtagLimit;
                     return (
-                      <div key={plat.id} style={{ display:"grid", gridTemplateColumns: imageData.url ? "auto 1fr 120px" : "auto 1fr", gap:14, alignItems:"flex-start", padding:14, borderRadius:10, background:"var(--bg-elevated)", border:`1px solid ${isConnected?"#5cba6c33":"var(--border)"}` }}>
+                      <div key={plat.id} style={{ display:"grid", gridTemplateColumns: imageData.url ? "auto 1fr 120px" : "auto 1fr", gap:14, alignItems:"flex-start", padding:14, borderRadius:10, background:"var(--bg-elevated)", border:`1px solid ${overChar||overHashtags?"var(--red)66":isConnected?"#7a916633":"var(--border)"}` }}>
                         <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4, width:70 }}>
                           <span style={{ fontSize:20 }}>{plat.icon}</span>
                           <span style={{ fontSize:10, fontWeight:700, color:plat.color }}>{plat.label}</span>
                           <span style={{ fontSize:9, color:connectionColor, fontWeight:600 }}>{connectionLabel}</span>
                         </div>
-                        <div style={{ fontSize:12, lineHeight:1.6, whiteSpace:"pre-wrap", color:"var(--text-secondary)" }}>
-                          {captions[plat.id]?.text}
-                          {hashtags.selected && <div style={{ marginTop:6, color:"var(--amber)" }}>{hashtags.selected}</div>}
+                        <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                          <textarea
+                            value={captionText}
+                            onChange={e => setCaptions(c => ({ ...c, [plat.id]: { ...c[plat.id], text: e.target.value } }))}
+                            rows={3}
+                            style={{ width:"100%", padding:"8px 10px", borderRadius:7, border:`1px solid ${overChar?"var(--red)":"var(--border)"}`, background:"var(--bg-surface)", color:"var(--text)", fontSize:12, lineHeight:1.6, fontFamily:"var(--font-body)", resize:"vertical", boxSizing:"border-box" }}
+                          />
+                          <textarea
+                            value={hashtagText}
+                            onChange={e => setHashtags(h => ({ ...h, perPlatform: { ...h.perPlatform, [plat.id]: e.target.value } }))}
+                            rows={1}
+                            placeholder="Hashtags for this platform…"
+                            style={{ width:"100%", padding:"6px 10px", borderRadius:7, border:`1px solid ${overHashtags?"var(--red)":"var(--border)"}`, background:"var(--bg-surface)", color:"var(--amber)", fontSize:12, lineHeight:1.4, fontFamily:"var(--font-body)", resize:"vertical", boxSizing:"border-box" }}
+                          />
+                          <div style={{ display:"flex", gap:14, fontSize:10 }}>
+                            {plat.charLimit > 0 && (
+                              <span style={{ color: overChar ? "var(--red)" : "var(--muted)", fontWeight: overChar ? 700 : 400 }}>
+                                {overChar && "⚠ "}{charCount}/{plat.charLimit} characters
+                              </span>
+                            )}
+                            {plat.hashtagLimit > 0 ? (
+                              <span style={{ color: overHashtags ? "var(--red)" : "var(--muted)", fontWeight: overHashtags ? 700 : 400 }}>
+                                {overHashtags && "⚠ "}{hashtagCount}/{plat.hashtagLimit} hashtags
+                              </span>
+                            ) : plat.hashtagLimit === 0 && hashtagCount > 0 && (
+                              <span style={{ color:"var(--red)", fontWeight:700 }}>⚠ {plat.label} doesn't use hashtags — remove them</span>
+                            )}
+                          </div>
                           {prevResult && (
-                            <div style={{ marginTop:8, fontSize:11, color:prevResult.success===true?"#5cba6c":prevResult.success==="manual"?"var(--amber)":"var(--red)" }}>
+                            <div style={{ fontSize:11, color:prevResult.success===true?"#7a9166":prevResult.success==="manual"?"var(--amber)":"var(--red)" }}>
                               {prevResult.message}
                             </div>
                           )}
                         </div>
-                        {imageData.url && <img src={imageData.url} alt="" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />}
+                        {imageData.url && (imageData.mediaType === "video" ? (
+                          <video src={imageData.url} muted style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
+                        ) : (
+                          <img src={imageData.url} alt="" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
+                        ))}
                       </div>
                     );
                   })}
@@ -5867,15 +6975,39 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   );
                 })()}
 
+                {/* Combined caption + hashtags character limit check */}
+                {(() => {
+                  const overs = selectedPlatforms
+                    .map(p => {
+                      const captionText = captions[p.id]?.text || "";
+                      const combined = [captionText, limitHashtagsForPlatform(getHashtagsForPlatform(hashtags, p.id), p.id)].filter(Boolean).join("\n\n");
+                      return { p, len: combined.length };
+                    })
+                    .filter(({ p, len }) => len > p.charLimit);
+                  if (overs.length === 0) return null;
+                  return (
+                    <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", fontSize:12, color:"var(--red)", fontWeight:600 }}>
+                      ⚠ Caption + hashtags together are over the limit for: {overs.map(({p,len}) => `${p.label} (${len}/${p.charLimit})`).join(", ")}. Trim the caption or select fewer hashtags before posting.
+                    </div>
+                  );
+                })()}
+
                 {/* Best post times */}
-                <div style={{ background:"var(--bg-elevated)", border:"1px solid #5cba6c33", borderRadius:10, padding:14 }}>
-                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>⏰ Best Times to Post</div>
+                <div style={{ background:"var(--bg-elevated)", border:"1px solid #7a916633", borderRadius:10, padding:14 }}>
+                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166", marginBottom:10 }}>⏰ Best Times to Post — click to schedule</div>
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:8 }}>
                     {selectedPlatforms.map(p => (
                       <div key={p.id} style={{ padding:"8px 10px", borderRadius:7, background:"var(--bg-surface)", border:"1px solid var(--border)" }}>
                         <div style={{ fontSize:11, fontWeight:700, color:p.color, marginBottom:3 }}>{p.icon} {p.label}</div>
                         {(p.bestTimes||[]).map((t,i) => (
-                          <div key={i} style={{ fontSize:11, color:"var(--text-secondary)" }}>· {t}</div>
+                          <button key={i} onClick={() => {
+                            const slot = nextBestTimeSlot(t);
+                            if (slot) { setScheduleDate(slot); setScheduleMode("schedule"); }
+                          }} title="Use this time"
+                            style={{ display:"block", width:"100%", textAlign:"left", fontSize:11, color:"var(--text-secondary)", background:"transparent", border:"none", padding:"2px 0", cursor:"pointer", fontFamily:"var(--font-body)" }}
+                            onMouseEnter={e=>e.currentTarget.style.color="#7a9166"} onMouseLeave={e=>e.currentTarget.style.color="var(--text-secondary)"}>
+                            · {t}
+                          </button>
                         ))}
                       </div>
                     ))}
@@ -5889,7 +7021,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:18 }}>
                   <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>When to post?</div>
                   <div style={{ display:"flex", gap:6, marginBottom:14 }}>
-                    {[["now","↑ Publish Now","#5cba6c"],["schedule","⏰ Schedule","var(--amber)"],["draft","📋 Save as Draft","var(--text-secondary)"]].map(([id,label,color]) => (
+                    {[["now","↑ Publish Now","#7a9166"],["schedule","⏰ Schedule","var(--amber)"],["draft","📋 Save as Draft","var(--text-secondary)"]].map(([id,label,color]) => (
                       <button key={id} onClick={() => setScheduleMode(id)}
                         style={{ padding:"7px 16px", borderRadius:8, border:scheduleMode===id?`1px solid ${color}`:"1px solid var(--border)", background:scheduleMode===id?color+"18":"transparent", color:scheduleMode===id?color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                         {label}
@@ -5917,7 +7049,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                   <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
                     {scheduleMode === "now" && (
                       <button onClick={handlePublish} disabled={loading}
-                        style={{ ...btnA, background:loading?"var(--bg-elevated)":"#5cba6c", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
+                        style={{ ...btnA, background:loading?"var(--bg-elevated)":"#7a9166", color:loading?"var(--muted)":"#fff", cursor:loading?"not-allowed":"pointer" }}>
                         {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : `↑ Publish to ${selectedPlatforms.length} Platform${selectedPlatforms.length>1?"s":""}`}
                       </button>
                     )}
@@ -5982,7 +7114,7 @@ function BrandGuidePanel({ onSave }) {
     {
       title:"Voice & Writing Style",
       icon:"✎",
-      color:"#5cba6c",
+      color:"#7a9166",
       fields:[
         { key:"voiceTone",    label:"Voice & Tone",     ph:"e.g. Warm, knowledgeable, poetic. Like a seasoned guide talking to a friend over a pour of bourbon...", rows:3 },
         { key:"writingStyle", label:"Writing Style",    ph:"e.g. Short punchy sentences. Active voice. Evocative nature descriptions. Avoid corporate jargon...", rows:3 },
@@ -6012,7 +7144,7 @@ function BrandGuidePanel({ onSave }) {
           </p>
         </div>
         {hasContent && (
-          <div style={{ fontSize:11, color:"#5cba6c", padding:"4px 10px", borderRadius:99, background:"#5cba6c0a", border:"1px solid #5cba6c33", whiteSpace:"nowrap", marginLeft:16 }}>
+          <div style={{ fontSize:11, color:"#7a9166", padding:"4px 10px", borderRadius:99, background:"#7a91660a", border:"1px solid #7a916633", whiteSpace:"nowrap", marginLeft:16 }}>
             ● Active
           </div>
         )}
@@ -6396,7 +7528,7 @@ long_tail array = 6 keywords. Focus heavily on low-difficulty, high-specificity 
     setSaved(s => ({ ...s, [i]:true }));
   };
 
-  const diffColor = { low:"#5cba6c", medium:"var(--amber)", high:"var(--red)" };
+  const diffColor = { low:"#7a9166", medium:"var(--amber)", high:"var(--red)" };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
@@ -6436,7 +7568,7 @@ long_tail array = 6 keywords. Focus heavily on low-difficulty, high-specificity 
 
           {/* Long-tail keywords */}
           <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
-            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:14 }}>🎯 Long-Tail Keywords (Rankable for Small Blogs)</div>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166", marginBottom:14 }}>🎯 Long-Tail Keywords (Rankable for Small Blogs)</div>
             <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
               {results.long_tail?.map((kw, i) => (
                 <div key={i} style={{ padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", display:"flex", gap:12, alignItems:"flex-start" }}>
@@ -6564,8 +7696,8 @@ My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
       {analysis && (
         <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
           {/* Quick wins */}
-          <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c44", borderRadius:12, padding:20 }}>
-            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:12 }}>⚡ Quick Wins</div>
+          <div style={{ background:"var(--bg-surface)", border:"1px solid #7a916644", borderRadius:12, padding:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166", marginBottom:12 }}>⚡ Quick Wins</div>
             {analysis.quick_wins?.map((win,i) => (
               <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom:"1px solid var(--border)" }}>
                 <span style={{ fontSize:13 }}>{win}</span>
@@ -6599,7 +7731,7 @@ My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
             {[
               { key:"strengths",  label:"Their Strengths",  color:"var(--text-secondary)", icon:"👍" },
-              { key:"weaknesses", label:"Their Weaknesses", color:"#5cba6c",               icon:"🎯" },
+              { key:"weaknesses", label:"Their Weaknesses", color:"#7a9166",               icon:"🎯" },
             ].map(({ key, label, color, icon }) => (
               <div key={key} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
                 <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color, marginBottom:10 }}>{icon} {label}</div>
@@ -6646,52 +7778,86 @@ My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
 
 // ─── SOCIAL POSTS MANAGER ─────────────────────────────────────────────────────
 
-function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) {
+function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, tierConfig = TIER_CONFIG.operative, onEditInPipeline = null }) {
   const [filter,   setFilter]   = useState("all");
   const [expanded, setExpanded] = useState(null);
   const [posting,  setPosting]  = useState({});
   const [postResults, setPostResults] = useState({});
 
-  const PLATFORMS = [
-    { id:"instagram", label:"Instagram", color:"#e1306c", icon:"📸" },
-    { id:"facebook",  label:"Facebook",  color:"#1877f2", icon:"👍" },
-    { id:"tiktok",    label:"TikTok",    color:"#010101", icon:"🎵" },
-    { id:"twitter",   label:"X",         color:"#1da1f2", icon:"🐦" },
-  ];
+  const PLATFORMS = SOCIAL_PLATFORMS.filter(p => ["instagram","facebook","tiktok","twitter","pinterest","reddit"].includes(p.id))
+    .map(p => ({ id:p.id, label:p.name.replace(" (Twitter)",""), color:p.color, icon:p.icon }));
 
   const filtered = filter === "all" ? socialPosts : socialPosts.filter(p => p.status === filter);
   const counts = { all: socialPosts.length, draft: socialPosts.filter(p=>p.status==="draft").length, scheduled: socialPosts.filter(p=>p.status==="scheduled").length, published: socialPosts.filter(p=>p.status==="published").length };
 
-  const statusColor = { draft:"var(--muted)", scheduled:"var(--amber)", published:"#5cba6c" };
+  const statusColor = { draft:"var(--muted)", scheduled:"var(--amber)", published:"#7a9166" };
   const statusIcon  = { draft:"📋", scheduled:"⏰", published:"✓" };
 
   const publishNow = async (post) => {
     setPosting(p => ({ ...p, [post.id]: true }));
     const results = {};
     const selectedPlats = PLATFORMS.filter(p => post.platforms?.includes(p.id));
+    const bufferCfg = loadBufferConfig();
+
+    // Image must be a public https:// URL for Meta/Buffer to fetch it — if this
+    // post was saved before the Save-as-Draft/Schedule image-upload fix, it may
+    // still be null or a stale blob: URL. Try to recover it once, upfront.
+    let publicImageUrl = post.imageUrl;
+    if (publicImageUrl?.startsWith("blob:") || publicImageUrl?.startsWith("data:")) {
+      try { publicImageUrl = await ensurePublicImageUrl(publicImageUrl); }
+      catch { publicImageUrl = null; }
+    }
 
     for (const plat of selectedPlats) {
       const captionRaw = post.captions?.[plat.id]; const captionText = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
-      const fullMessage = `${captionText}\n\n${post.hashtags || ""}`;
+      const fullMessage = `${captionText}\n\n${limitHashtagsForPlatform(getHashtagsForPlatform(post.hashtags, plat.id), plat.id)}`.trim();
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
           const page = metaConfig.pages[0];
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: post.imageUrl, platforms: ["facebook"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: publicImageUrl, mediaType: post.mediaType, platforms: ["facebook"] });
           results[plat.id] = res.facebook?.success ? "✓ Posted" : `Error: ${res.facebook?.error}`;
         } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
           const page = metaConfig.pages.find(p => p.instagram_id);
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: post.imageUrl, platforms: ["instagram"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: publicImageUrl, mediaType: post.mediaType, platforms: ["instagram"] });
           results[plat.id] = res.instagram?.success ? "✓ Posted" : `Error: ${res.instagram?.error}`;
+        } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
+          if (!tierConfig.buffer) {
+            throw new Error(`Buffer integration is available on Operative and above — upgrade in Settings → Billing & Plan to post to ${plat.label}.`);
+          }
+          const channelId = bufferCfg.mapping[plat.id];
+          if (plat.id === "pinterest" && !bufferCfg.boardMapping?.[channelId]) {
+            throw new Error("No Pinterest board selected — set one in Settings → Buffer before posting to Pinterest.");
+          }
+          const res = await fetch("/api/buffer-post", {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify({
+              apiKey:      bufferCfg.apiKey,
+              action:      "createPost",
+              channelId,
+              text:        fullMessage,
+              imageUrl:    publicImageUrl || "",
+              mediaType:   post.mediaType || "image",
+              platform:    plat.id,
+              scheduledAt: null,
+              pinterestBoardId: plat.id === "pinterest" ? bufferCfg.boardMapping?.[channelId] : undefined,
+            }),
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          results[plat.id] = `✓ Sent to Buffer → ${plat.label}`;
         } else {
           navigator.clipboard.writeText(fullMessage);
-          results[plat.id] = "Copied to clipboard";
+          results[plat.id] = "Not connected — copied to clipboard, paste manually";
         }
       } catch(e) { results[plat.id] = `Error: ${e.message}`; }
     }
 
     setPostResults(r => ({ ...r, [post.id]: results }));
-    const allOk = Object.values(results).every(r => r.startsWith("✓") || r === "Copied to clipboard");
-    if (allOk) onSave({ ...post, status:"published", publishedAt: new Date().toISOString(), results });
+    // Only mark as actually published if every platform genuinely posted —
+    // a manual clipboard copy is not a successful post.
+    const allOk = Object.values(results).every(r => r.startsWith("✓"));
+    if (allOk) onSave({ ...post, status:"published", publishedAt: new Date().toISOString(), imageUrl: publicImageUrl, results });
     setPosting(p => ({ ...p, [post.id]: false }));
   };
 
@@ -6751,8 +7917,15 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
                 <div style={{ display:"flex", gap:6, flexShrink:0 }}>
                   {post.status !== "published" && (
                     <button onClick={e=>{ e.stopPropagation(); publishNow(post); }} disabled={posting[post.id]}
-                      style={{ padding:"5px 12px", borderRadius:7, border:"none", background:posting[post.id]?"var(--bg-elevated)":"#5cba6c", color:posting[post.id]?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:posting[post.id]?"not-allowed":"pointer", fontFamily:"var(--font-body)" }}>
+                      style={{ padding:"5px 12px", borderRadius:7, border:"none", background:posting[post.id]?"var(--bg-elevated)":"#7a9166", color:posting[post.id]?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:posting[post.id]?"not-allowed":"pointer", fontFamily:"var(--font-body)" }}>
                       {posting[post.id] ? "◌" : "↑ Post Now"}
+                    </button>
+                  )}
+                  {post.status !== "published" && onEditInPipeline && (
+                    <button onClick={e=>{ e.stopPropagation(); onEditInPipeline(post); }}
+                      title="Open in Social Pipeline to edit captions, hashtags, image, or platforms"
+                      style={{ padding:"5px 12px", borderRadius:7, border:"1px solid var(--amber)", background:"transparent", color:"var(--amber)", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                      ✎ Edit
                     </button>
                   )}
                   <button onClick={e=>{ e.stopPropagation(); onDelete(post.id); }}
@@ -6782,20 +7955,31 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete }) 
                   </div>
 
                   {/* Hashtags */}
-                  {post.hashtags && (
-                    <div style={{ fontSize:12, color:"var(--amber)", lineHeight:1.6 }}>{post.hashtags}</div>
-                  )}
+                  {(() => {
+                    const display = typeof post.hashtags === "string" ? post.hashtags : post.hashtags?.selected;
+                    const hasCustom = typeof post.hashtags === "object" && post.hashtags?.perPlatform && Object.keys(post.hashtags.perPlatform).length > 0;
+                    return display ? (
+                      <div style={{ fontSize:12, color:"var(--amber)", lineHeight:1.6 }}>
+                        {display}
+                        {hasCustom && <span style={{ marginLeft:8, fontSize:10, color:"var(--muted)", fontWeight:600 }}>(customized per platform)</span>}
+                      </div>
+                    ) : null;
+                  })()}
 
                   {/* Image */}
                   {post.imageUrl && (
-                    <img src={post.imageUrl} alt="" style={{ maxWidth:300, borderRadius:8, border:"1px solid var(--border)" }} />
+                    post.mediaType === "video" ? (
+                      <video src={post.imageUrl} controls style={{ maxWidth:300, borderRadius:8, border:"1px solid var(--border)" }} />
+                    ) : (
+                      <img src={post.imageUrl} alt="" style={{ maxWidth:300, borderRadius:8, border:"1px solid var(--border)" }} />
+                    )
                   )}
 
                   {/* Publish results */}
                   {postResults[post.id] && (
                     <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
                       {Object.entries(postResults[post.id]).map(([platId, result]) => (
-                        <div key={platId} style={{ fontSize:11, color:result.startsWith("✓")?"#5cba6c":"var(--red)" }}>
+                        <div key={platId} style={{ fontSize:11, color:result.startsWith("✓")?"#7a9166":"var(--red)" }}>
                           {PLATFORMS.find(p=>p.id===platId)?.icon} {result}
                         </div>
                       ))}
@@ -6877,6 +8061,80 @@ function saveMediaLibraryToStorage(items) {
   saveMediaLibraryCache(items);
 }
 
+// Normalizes arbitrary image bytes (JPEG, WEBP, indexed/palette PNG, CMYK, etc.) into a
+// guaranteed-valid RGBA PNG by round-tripping through a canvas. Fixes OpenAI images/edits
+// rejecting files with "Invalid image file or mode" when the source isn't a true RGBA PNG.
+// Also caps the output size. OpenAI documents a 50MB per-image limit for gpt-image-2, but
+// real-world reports (including OpenAI's own community forum) show intermediate gateways
+// commonly 413 well below that — the vetted safe practice is keeping uploads under ~1.5MB,
+// which is what this targets (with headroom, well under Netlify's own ~4.5MB body cap too).
+function normalizeToPngBase64(base64, maxBytes = 1400000) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const exportAtScale = (scale) => {
+        const canvas = document.createElement("canvas");
+        canvas.width  = Math.max(1, Math.round(img.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const b64 = canvas.toDataURL("image/png").split(",")[1];
+        const approxBytes = b64.length * 0.75; // base64 -> raw bytes
+        if (approxBytes > maxBytes && scale > 0.15) {
+          exportAtScale(scale * 0.8);
+        } else {
+          resolve(b64);
+        }
+      };
+      exportAtScale(1);
+    };
+    img.onerror = () => reject(new Error("Could not decode image for normalization"));
+    img.src = `data:image/*;base64,${base64}`;
+  });
+}
+
+// Starts an AI Restyle background job (image-edit.js) and polls image-edit-status.js
+// until it's done. Background functions get up to 15 minutes of runtime — this
+// replaces the old direct sync-function call that could get cut off mid-response
+// on slow edits, producing a truncated body the client couldn't parse.
+async function runBackgroundImageEdit({ provider, prompt, apiKey, imageBase64, size = "1024x1024", quality = "medium", onWaiting, pollIntervalMs = 3000, maxWaitMs = 180000 }) {
+  const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+  const startRes = await fetch("/api/image-edit", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ jobId, provider, prompt, apiKey, imageBase64, size, quality }),
+  });
+  if (!startRes.ok && startRes.status !== 202) {
+    if (startRes.status === 413) throw new Error("This image is too large to edit even after compression. Try a smaller source image.");
+    throw new Error(`Could not start the image edit (${startRes.status})`);
+  }
+
+  const deadline = Date.now() + maxWaitMs;
+  let firstPoll = true;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, firstPoll ? 2000 : pollIntervalMs));
+    firstPoll = false;
+    if (onWaiting) onWaiting();
+
+    let statusRes;
+    try {
+      statusRes = await fetch(`/api/image-edit-status?jobId=${encodeURIComponent(jobId)}`);
+    } catch {
+      continue; // transient network hiccup — keep polling
+    }
+    if (!statusRes.ok) continue;
+    const text = await statusRes.text();
+    let data;
+    try { data = JSON.parse(text); } catch { continue; }
+
+    if (data.status === "done") return { b64: data.b64, mimeType: data.mimeType || "image/png" };
+    if (data.status === "error") throw new Error(data.error || "The image edit failed");
+    // status === "pending" — keep polling
+  }
+  throw new Error("The image edit is taking longer than expected (3+ minutes). It may still finish — try again shortly, or check Media Library for the result.");
+}
+
 function MediaLibrary({ userId }) {
   const resolvedUserId = userId || window.__bbUserId || "anonymous";
   const [items,     setItems]     = useState([]);
@@ -6890,6 +8148,7 @@ function MediaLibrary({ userId }) {
   // AI restyle state
   const [restylePrompt,  setRestylePrompt]  = useState("");
   const [restyleLoading, setRestyleLoading] = useState(false);
+  const [restyleStatus,  setRestyleStatus]  = useState("");
   const [restyleResult,  setRestyleResult]  = useState(null);
   const [restyleError,   setRestyleError]   = useState("");
   const [restyleOpen,    setRestyleOpen]    = useState(false);
@@ -6947,58 +8206,51 @@ function MediaLibrary({ userId }) {
       }
 
       if (!base64Image) throw new Error("Could not load image data");
-      const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
 
-      if (apiKeys.openai) {
-        // Route through server proxy — handles PNG conversion and multipart properly
-        const res = await fetch("/api/image-generate", {
+      // Normalize to a guaranteed-valid RGBA PNG — fixes providers rejecting
+      // "Invalid image file or mode" when the source isn't a true RGBA PNG,
+      // and caps size to stay well under upload limits.
+      base64Image = await normalizeToPngBase64(base64Image);
+
+      const apiKeys = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
+      const hasOwnKey = !!apiKeys.stability;
+
+      setRestyleStatus("Restyling…");
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 45000); // Stability is fast — this is a generous safety margin, not an expected wait
+      let res;
+      try {
+        res = await fetch("/api/image-generate", {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
           body:    JSON.stringify({
-            provider:     "openai-edit",
-            prompt:       `${restylePrompt}. Keep the same scene, subjects, and composition. Only change the visual style, lighting, color grading, and atmosphere.`,
-            apiKey:       apiKeys.openai,
-            imageBase64:  base64Image,
-            size:         "1024x1024",
+            provider:    hasOwnKey ? "stability-restyle" : "stability-restyle-platform",
+            prompt:      `${restylePrompt}. Keep the same scene, subjects, and composition. Only change the visual style, lighting, color grading, and atmosphere.`,
+            apiKey:      hasOwnKey ? apiKeys.stability : undefined,
+            imageBase64: base64Image,
+            strength:    restyleStrength,
+            userId:      window.__bbUserId || null,
           }),
+          signal: controller.signal,
         });
-        const text = await res.text();
-        if (text.trimStart().startsWith("<")) throw new Error("Server timeout — try again");
-        const data = JSON.parse(text);
-        if (data.error) throw new Error(`OpenAI: ${data.error}`);
-        if (!data.b64) throw new Error("No image data returned");
-        setRestyleResult(`data:image/png;base64,${data.b64}`);
-
-      } else if (apiKeys.gemini) {
-        // Gemini — image editing via inline data
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${apiKeys.gemini}`,
-          {
-            method:  "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  { inline_data: { mime_type: "image/png", data: base64Image } },
-                  { text: `Transform this image in the following style while keeping the same composition and subjects: ${restylePrompt}` },
-                ],
-              }],
-              generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
-            }),
-          }
-        );
-        const data = await res.json();
-        if (data.error) throw new Error(data.error.message);
-        const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-        if (!part) throw new Error("No image returned from Gemini");
-        setRestyleResult(`data:${part.inlineData.mimeType};base64,${part.inlineData.data}`);
-
-      } else {
-        throw new Error("Add an OpenAI or Gemini API key in Settings → API Keys to use AI Restyle.");
+      } catch(fetchErr) {
+        if (fetchErr.name === "AbortError") throw new Error("Restyle took too long and timed out — try again.");
+        throw fetchErr;
+      } finally {
+        clearTimeout(timeoutId);
       }
+      const text = await res.text();
+      if (!text.trim()) throw new Error("The server didn't respond — try again.");
+      let data;
+      try { data = JSON.parse(text); }
+      catch { throw new Error("The server response was cut off — try again."); }
+      if (data.error) throw new Error(data.error);
+      if (!data.b64) throw new Error("No image data returned");
+      setRestyleResult(`data:${data.mimeType || "image/png"};base64,${data.b64}`);
     } catch(e) {
       setRestyleError(e.message);
     }
+    setRestyleStatus("");
     setRestyleLoading(false);
   };
 
@@ -7089,10 +8341,12 @@ function MediaLibrary({ userId }) {
 
     const key = file.name + file.size;
     setUploadProgress(prev => ({ ...prev, [key]: 0 }));
+    console.log(`[upload] starting: ${file.name} (${file.size} bytes)`);
 
     try {
       // Step 1: get a resumable upload session URL from our server
-      const sessionRes = await fetch("/api/gcs-signed-url", {
+      console.log("[upload] step 1: requesting signed URL…");
+      const sessionRes = await fetchWithTimeout("/api/gcs-signed-url", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
@@ -7104,42 +8358,45 @@ function MediaLibrary({ userId }) {
           tags:     isVideo ? ["video","upload"] : ["upload"],
           source:   "upload",
         }),
-      });
+      }, 20000);
       const { uploadUrl, objectId, item, error: sessionErr } = await sessionRes.json();
       if (sessionErr || !uploadUrl) throw new Error(sessionErr || "Failed to get upload URL");
+      console.log("[upload] step 1 done — got signed URL, objectId:", objectId);
 
-      // Step 2: upload directly from browser to GCS with progress tracking
-      await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("PUT", uploadUrl);
-        xhr.setRequestHeader("Content-Type", file.type);
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const pct = Math.round((e.loaded / e.total) * 100);
-            setUploadProgress(prev => ({ ...prev, [key]: pct }));
-          }
-        };
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) resolve();
-          else reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
-        };
-        xhr.onerror = () => reject(new Error("Network error during upload"));
-        xhr.send(file);
+      // Step 2: upload directly from browser to GCS with progress tracking and
+      // automatic retry-with-resume on transient 500/503 (expected/documented
+      // GCS behavior, not a bug — previously a single bare PUT with no retry
+      // meant any transient hiccup was a permanent user-facing failure)
+      console.log("[upload] step 2: uploading to GCS…");
+      await uploadToGCSResumable(uploadUrl, file, (pct) => {
+        console.log(`[upload] progress: ${pct}%`);
+        setUploadProgress(prev => ({ ...prev, [key]: pct }));
       });
+      console.log("[upload] step 2 done — GCS upload confirmed complete");
 
       // Step 3: finalize (make public + update status)
-      await fetch("/api/gcs-finalize", {
+      console.log("[upload] step 3: finalizing…");
+      await fetchWithTimeout("/api/gcs-finalize", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ userId: resolvedUserId, objectId }),
-      });
+      }, 15000);
+      console.log("[upload] step 3 done — finalized");
 
-      // Add to local state
+      // Add to local state immediately (optimistic — instant feedback)
       setItems(prev => [{ ...item, status:"ready" }, ...prev.filter(i => i.id !== objectId)]);
       setUploadProgress(prev => { const next = {...prev}; delete next[key]; return next; });
+      console.log("[upload] DONE — added to local state, confirming with a real server refresh…");
+
+      // Also do a real refresh from the server — the optimistic update above was
+      // being silently lost in practice (required a tab switch/refresh to actually
+      // show up), so this guarantees the UI matches reality without relying on
+      // that alone. Small delay to avoid racing ahead of any brief write-
+      // propagation lag right after gcs-finalize.js writes the record.
+      setTimeout(() => fetchItems(), 800);
 
     } catch(e) {
-      console.error("Upload failed:", e);
+      console.error("[upload] FAILED at some step:", e);
       alert(`Upload failed: ${e.message}`);
       setUploadProgress(prev => { const next = {...prev}; delete next[key]; return next; });
     }
@@ -7185,22 +8442,7 @@ function MediaLibrary({ userId }) {
             {loading ? "Loading…" : `${items.length} image${items.length!==1?"s":""} · synced across all devices`}
           </p>
         </div>
-        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-          {items.length === 0 && !loading && (
-            <button onClick={async () => {
-              setLoading(true);
-              try {
-                const res  = await fetch("/api/gcs-restore", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ userId: resolvedUserId }) });
-                const data = await res.json();
-                if (data.items) { setItems(data.items); saveMediaLibraryCache(data.items); }
-                else alert(data.error || "Restore failed");
-              } catch(e) { alert(e.message); }
-              setLoading(false);
-            }}
-              style={{ padding:"7px 14px", borderRadius:8, border:"1px solid var(--amber)", background:"var(--amber-glow)", color:"var(--amber)", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-              ↻ Scan & Restore Images
-            </button>
-          )}
+        <div style={{ display:"flex", gap:8 }}>
           <button onClick={fetchItems} style={{ padding:"7px 14px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>↻ Refresh</button>
           <button onClick={() => fileInput.current?.click()} style={{ padding:"9px 20px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>+ Upload Images</button>
         </div>
@@ -7350,106 +8592,20 @@ function MediaLibrary({ userId }) {
                     <button onClick={() => download(selected)} style={{ padding:"7px 16px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                       ↓ Download
                     </button>
-                    <button onClick={() => { setRestyleOpen(o=>!o); setOverlayOpen(false); setRestyleResult(null); setRestyleError(""); }}
+                    <button onClick={() => { setRestyleOpen(o=>!o); setRestyleResult(null); setRestyleError(""); }}
                       style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${restyleOpen?"var(--amber)":"var(--border)"}`, background:restyleOpen?"var(--amber-glow)":"transparent", color:restyleOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:restyleOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
                       ✦ AI Restyle
                     </button>
-                    <button onClick={() => { setOverlayOpen(o=>!o); setRestyleOpen(false); }}
+                    <button onClick={() => setOverlayOpen(o=>!o)}
                       style={{ padding:"7px 16px", borderRadius:7, border:`1px solid ${overlayOpen?"var(--amber)":"var(--border)"}`, background:overlayOpen?"var(--amber-glow)":"transparent", color:overlayOpen?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:overlayOpen?700:400, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
-                      ✎ Text Overlay
+                      🎨 Filters &amp; Text
                     </button>
                   </div>
                 </div>
+
               </div>
 
-              {/* AI Restyle Panel */}
-              {restyleOpen && (
-                <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                    <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✦ AI Restyle</span>
-                    <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Transform your photo while keeping its composition</span>
-                  </div>
-
-                  {/* Style presets */}
-                  <div>
-                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Quick Styles</label>
-                    <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                      {STYLE_PRESETS.map(p => (
-                        <button key={p.label} onClick={() => setRestylePrompt(p.prompt)}
-                          style={{ padding:"5px 12px", borderRadius:99, border:restylePrompt===p.prompt?"1px solid var(--amber)":"1px solid var(--border)", background:restylePrompt===p.prompt?"var(--amber-glow)":"transparent", color:restylePrompt===p.prompt?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:restylePrompt===p.prompt?600:400 }}>
-                          {p.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Custom prompt */}
-                  <div>
-                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Style Prompt</label>
-                    <textarea value={restylePrompt} onChange={e=>setRestylePrompt(e.target.value)} rows={2}
-                      placeholder="e.g. cinematic golden hour, oil painting style, professional magazine photo, misty morning fog…"
-                      style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
-                  </div>
-
-                  {/* Restyle strength (Stability only) */}
-                  <div>
-                    <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
-                      Restyle Strength — {Math.round(restyleStrength * 100)}%
-                      <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0, color:"var(--muted)", marginLeft:8 }}>
-                        (lower = closer to original · Stability AI only)
-                      </span>
-                    </label>
-                    <input type="range" min={0.2} max={0.9} step={0.05} value={restyleStrength}
-                      onChange={e => setRestyleStrength(Number(e.target.value))}
-                      style={{ width:"100%", accentColor:"var(--amber)" }} />
-                    <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"var(--muted)", marginTop:3 }}>
-                      <span>Subtle (keep original)</span>
-                      <span>Strong (full restyle)</span>
-                    </div>
-                  </div>
-
-                  {restyleError && (
-                    <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{restyleError}</div>
-                  )}
-
-                  {/* Result */}
-                  {restyleResult ? (
-                    <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
-                        <div>
-                          <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Original</div>
-                          <img src={selected.url || selected.dataUrl} alt="Original" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
-                        </div>
-                        <div>
-                          <div style={{ fontSize:10, fontWeight:700, color:"var(--amber)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>✦ Restyled</div>
-                          <img src={restyleResult} alt="Restyled" style={{ width:"100%", borderRadius:8, border:"1px solid var(--amber)44" }} />
-                        </div>
-                      </div>
-                      <div style={{ display:"flex", gap:8 }}>
-                        <button onClick={saveRestyleResult}
-                          style={{ padding:"8px 20px", borderRadius:8, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                          ✓ Save to Library
-                        </button>
-                        <button onClick={() => { const a=document.createElement("a"); a.href=restyleResult; a.download=`${selected?.name||"image"}-restyled.png`; a.click(); }}
-                          style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                          ↓ Download
-                        </button>
-                        <button onClick={() => { setRestyleResult(null); runRestyle(); }}
-                          style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
-                          ↻ Try again
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <button onClick={runRestyle} disabled={restyleLoading || !restylePrompt.trim()}
-                      style={{ padding:"10px 24px", borderRadius:8, border:"none", background:restyleLoading||!restylePrompt.trim()?"var(--bg-elevated)":"var(--amber)", color:restyleLoading||!restylePrompt.trim()?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:restyleLoading||!restylePrompt.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
-                      {restyleLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Restyling…</> : "✦ Generate Restyle"}
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* ── TEXT OVERLAY EDITOR ── */}
+              {/* Filters & Text Overlay Panel — full width, sibling of the thumbnail+metadata grid rather than nested inside its narrow 220px column */}
               {overlayOpen && selected && (
                 <ImageTextOverlayEditor
                   imageUrl={selected.url || selected.dataUrl}
@@ -7462,7 +8618,107 @@ function MediaLibrary({ userId }) {
                   }}
                 />
               )}
-            </div>
+
+              {/* AI Restyle Panel — also full width for the same reason */}
+              {restyleOpen && (
+                  <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                      <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✦ AI Restyle</span>
+                      <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Transform your photo while keeping its composition — powered by Stability AI</span>
+                    </div>
+
+                    {(() => {
+                      const apiKeysNow = JSON.parse(localStorage.getItem("bb_api_keys") || "{}");
+                      const usingPlatform = !apiKeysNow.stability;
+                      return (
+                        <div style={{ fontSize:11, color:"var(--muted)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                          {usingPlatform
+                            ? "Using Blog Bunker's built-in Stability AI credits — no setup needed. Counts against your monthly image limit."
+                            : "Using your own Stability AI key from Settings → API Keys — doesn't count against your plan's image limit."}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Style presets */}
+                    <div>
+                      <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Quick Styles</label>
+                      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                        {STYLE_PRESETS.map(p => (
+                          <button key={p.label} onClick={() => setRestylePrompt(p.prompt)}
+                            style={{ padding:"5px 12px", borderRadius:99, border:restylePrompt===p.prompt?"1px solid var(--amber)":"1px solid var(--border)", background:restylePrompt===p.prompt?"var(--amber-glow)":"transparent", color:restylePrompt===p.prompt?"var(--amber)":"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)", fontWeight:restylePrompt===p.prompt?600:400 }}>
+                            {p.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Custom prompt */}
+                    <div>
+                      <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Style Prompt</label>
+                      <textarea value={restylePrompt} onChange={e=>setRestylePrompt(e.target.value)} rows={2}
+                        placeholder="e.g. cinematic golden hour, oil painting style, professional magazine photo, misty morning fog…"
+                        style={{ ...iS, resize:"vertical", fontSize:12, lineHeight:1.6 }} />
+                    </div>
+
+                    {/* Restyle strength */}
+                    <div>
+                      <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+                        Restyle Strength — {Math.round(restyleStrength * 100)}%
+                        <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0, color:"var(--muted)", marginLeft:8 }}>
+                          (lower = closer to original)
+                        </span>
+                      </label>
+                      <input type="range" min={0.2} max={0.9} step={0.05} value={restyleStrength}
+                        onChange={e => setRestyleStrength(Number(e.target.value))}
+                        style={{ width:"100%", accentColor:"var(--amber)" }} />
+                      <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"var(--muted)", marginTop:3 }}>
+                        <span>Subtle (keep original)</span>
+                        <span>Strong (full restyle)</span>
+                      </div>
+                    </div>
+
+                    {restyleError && (
+                      <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{restyleError}</div>
+                    )}
+
+                    {/* Result */}
+                    {restyleResult ? (
+                      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                          <div>
+                            <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Original</div>
+                            <img src={selected.url || selected.dataUrl} alt="Original" style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)" }} />
+                          </div>
+                          <div>
+                            <div style={{ fontSize:10, fontWeight:700, color:"var(--amber)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>✦ Restyled</div>
+                            <img src={restyleResult} alt="Restyled" style={{ width:"100%", borderRadius:8, border:"1px solid var(--amber)44" }} />
+                          </div>
+                        </div>
+                        <div style={{ display:"flex", gap:8 }}>
+                          <button onClick={saveRestyleResult}
+                            style={{ padding:"8px 20px", borderRadius:8, border:"none", background:"#7a9166", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            ✓ Save to Library
+                          </button>
+                          <button onClick={() => { const a=document.createElement("a"); a.href=restyleResult; a.download=`${selected?.name||"image"}-restyled.png`; a.click(); }}
+                            style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            ↓ Download
+                          </button>
+                          <button onClick={() => { setRestyleResult(null); runRestyle(); }}
+                            style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                            ↻ Try again
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button onClick={runRestyle} disabled={restyleLoading || !restylePrompt.trim()}
+                        style={{ padding:"10px 24px", borderRadius:8, border:"none", background:restyleLoading||!restylePrompt.trim()?"var(--bg-elevated)":"var(--amber)", color:restyleLoading||!restylePrompt.trim()?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:restyleLoading||!restylePrompt.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8, alignSelf:"flex-start" }}>
+                        {restyleLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{restyleStatus || "Restyling…"}</> : "✦ Generate Restyle"}
+                      </button>
+                    )}
+                  </div>
+                )}
+
+              </div>
           )}
         </>
       )}
@@ -7530,7 +8786,7 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
   return (
     <div style={{ background:"var(--bg-surface)", border:"1px solid var(--amber)44", borderRadius:12, padding:16 }}>
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
-        <div style={{ fontSize:12, fontWeight:700, color:"var(--amber)" }}>🖼 Media Library — {items.length} images</div>
+        <div style={{ fontSize:12, fontWeight:700, color:"var(--amber)" }}>🖼 Media Library — {items.length} items</div>
         <button onClick={() => setOpen(false)} style={{ background:"transparent", border:"none", color:"var(--muted)", fontSize:16, cursor:"pointer", padding:2, lineHeight:1 }}>✕</button>
       </div>
 
@@ -7554,11 +8810,18 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
       ) : (
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(90px,1fr))", gap:8, maxHeight:260, overflow:"auto" }}>
           {filtered.map(item => (
-            <div key={item.id} onClick={() => { onSelect(item.url || item.dataUrl); setOpen(false); }}
+            <div key={item.id} onClick={() => { onSelect(item.url || item.dataUrl, item.mediaType || "image"); setOpen(false); }}
               style={{ position:"relative", borderRadius:8, overflow:"hidden", border:"1px solid var(--border)", cursor:"pointer", aspectRatio:"1" }}
               onMouseEnter={e=>{ e.currentTarget.style.borderColor="var(--amber)"; e.currentTarget.querySelector(".overlay").style.opacity="1"; }}
               onMouseLeave={e=>{ e.currentTarget.style.borderColor="var(--border)"; e.currentTarget.querySelector(".overlay").style.opacity="0"; }}>
-              <img src={item.url || item.dataUrl} alt={item.name} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+              {item.mediaType === "video" ? (
+                <video src={item.url || item.dataUrl} muted style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+              ) : (
+                <img src={item.url || item.dataUrl} alt={item.name} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+              )}
+              {item.mediaType === "video" && (
+                <div style={{ position:"absolute", top:4, right:4, fontSize:9, fontWeight:700, color:"#fff", background:"rgba(0,0,0,0.6)", padding:"2px 5px", borderRadius:4 }}>▶ VIDEO</div>
+              )}
               <div className="overlay" style={{ position:"absolute", inset:0, background:"rgba(196,124,43,0.8)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"#0e0f11", opacity:0, transition:"opacity 0.15s" }}>
                 Use This
               </div>
@@ -7568,7 +8831,7 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
       )}
 
       <div style={{ fontSize:10, color:"var(--muted)", marginTop:10, lineHeight:1.5 }}>
-        Click any image to use it. Add more in Marketing → Media Library.
+        Click any item to use it. Add more in Marketing → Media Library.
       </div>
     </div>
   );
@@ -7779,7 +9042,7 @@ function VideoPlanningStudio({ activeProvider, activeModel, apiKeys, posts, user
                     ⎘ Copy
                   </button>
                   <button onClick={savePlan}
-                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    style={{ padding:"6px 14px", borderRadius:7, border:"none", background:"#7a9166", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                     ✓ Save Plan
                   </button>
                   <button onClick={generate}
@@ -7831,7 +9094,7 @@ function VideoPlanningStudio({ activeProvider, activeModel, apiKeys, posts, user
 
 // ─── INSPIRATION BOARD ───────────────────────────────────────────────────────
 
-function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, btnS, btnP }) {
+function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, btnS, btnP, toDraftLabel = "→ Draft" }) {
   const [inspFilter, setInspFilter] = useState("all");
   const [inspSearch, setInspSearch] = useState("");
 
@@ -7861,9 +9124,9 @@ function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, bt
     pinterest:{icon:"📌",color:"#e60023"},
     youtube:{icon:"▶",color:"var(--red)"},
     podcast:{icon:"🎙",color:"#a78bfa"},
-    email:{icon:"✉",color:"#5cba6c"},
+    email:{icon:"✉",color:"#7a9166"},
     visual:{icon:"🖼",color:"#7c8abf"},
-    thread:{icon:"💬",color:"#5cba6c"},
+    thread:{icon:"💬",color:"#7a9166"},
     keyword:{icon:"◎",color:"#7c3aed"},
     video:{icon:"🎬",color:"var(--red)"},
   };
@@ -7922,7 +9185,7 @@ function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, bt
                     {item.notes&&<div style={{fontSize:12,color:"var(--text-secondary)",fontStyle:"italic"}}>💡 {item.notes}</div>}
                   </div>
                   <div style={{display:"flex",gap:6,flexShrink:0}}>
-                    <button onClick={()=>onToDraft(item)} style={{...btnS,fontSize:11,padding:"5px 10px"}}>→ Draft</button>
+                    <button onClick={()=>onToDraft(item)} style={{...btnS,fontSize:11,padding:"5px 10px"}}>{toDraftLabel}</button>
                     <button onClick={()=>onDelete(item.id)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14,padding:"5px"}} title="Remove">✕</button>
                   </div>
                 </div>
@@ -7948,7 +9211,111 @@ function InspirationBoard({ inspiration, onAddNew, onDelete, onToDraft, card, bt
 
 // ─── ANALYTICS DASHBOARD ─────────────────────────────────────────────────────
 
-function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onConnectMeta, activeProvider, activeModel, apiKeys }) {
+// ─── BLOG HEALTH SCORE ───────────────────────────────────────────────────────
+// Deliberately built entirely on data Blog Bunker already reliably has —
+// posts, social posts, and which channels are connected. No dependency on
+// GSC or Meta Insights, both of which have proven repeatedly unreliable
+// (deprecated metrics, expired API versions, missing OAuth scopes, silent
+// permission errors). A composite score is only useful if it's always there.
+function computeBlogHealthScore(posts, socialPosts, metaConfig) {
+  const now = Date.now();
+  const publishedPosts = posts.filter(p => p.status === "published");
+  const recentPosts = publishedPosts.filter(p => now - new Date(p.date).getTime() < 90*24*60*60*1000);
+
+  // ── Posting Consistency ──────────────────────────────────────────────────
+  let consistencyScore = 0;
+  if (recentPosts.length >= 2) {
+    const dates = recentPosts.map(p => new Date(p.date).getTime()).sort((a,b)=>a-b);
+    const gaps  = dates.slice(1).map((d,i) => (d - dates[i]) / (24*60*60*1000));
+    const avgGapDays = gaps.reduce((a,b)=>a+b,0) / gaps.length;
+    consistencyScore = avgGapDays <= 7 ? 100 : avgGapDays <= 14 ? 75 : avgGapDays <= 30 ? 45 : 15;
+  } else if (recentPosts.length === 1) {
+    consistencyScore = 30; // one post is a start, but not yet a pattern
+  }
+
+  // ── Content Optimization ─────────────────────────────────────────────────
+  const checkPosts = publishedPosts.slice(0, 10);
+  let optimizationScore = 0;
+  if (checkPosts.length > 0) {
+    const totalChecks = checkPosts.length * 5;
+    let passed = 0;
+    checkPosts.forEach(p => {
+      if (p.metaTitle)       passed++;
+      if (p.metaDescription) passed++;
+      if (p.primaryKeyword)  passed++;
+      if ((p.body || "").split(" ").filter(Boolean).length >= 300) passed++;
+      if (/\[([^\]]+)\]\(([^)]+)\)/.test(p.body || "")) passed++;
+    });
+    optimizationScore = Math.round((passed / totalChecks) * 100);
+  }
+
+  // ── Social Amplification ─────────────────────────────────────────────────
+  const wpConnected = loadWordPressConfig().connected;
+  const bufferConnected = loadBufferConfig().connected;
+  const metaConnected = !!metaConfig?.connected;
+  const connectionScore = (metaConnected?30:0) + (bufferConnected?20:0) + (wpConnected?20:0);
+  const recentSocial = (socialPosts || []).filter(p => p.status === "published" && now - new Date(p.date || p.scheduledAt || 0).getTime() < 30*24*60*60*1000);
+  const activityScore = Math.min(30, recentSocial.length * 8);
+  const amplificationScore = connectionScore + activityScore;
+
+  const overall = Math.round(consistencyScore*0.4 + optimizationScore*0.3 + amplificationScore*0.3);
+
+  return {
+    overall,
+    consistency: Math.round(consistencyScore),
+    optimization: Math.round(optimizationScore),
+    amplification: Math.round(amplificationScore),
+    wpConnected, bufferConnected, metaConnected,
+    recentPostCount: recentPosts.length,
+  };
+}
+
+function BlogHealthScore({ posts, socialPosts, metaConfig, dark }) {
+  const score = computeBlogHealthScore(posts, socialPosts, metaConfig);
+
+  const label = score.overall >= 80 ? "Thriving" : score.overall >= 60 ? "Healthy" : score.overall >= 40 ? "Needs Attention" : "Just Getting Started";
+  const color = score.overall >= 80 ? "#7a9166" : score.overall >= 60 ? "var(--amber)" : score.overall >= 40 ? "#e08a3c" : "var(--muted)";
+
+  // The single most impactful thing to work on — whichever component is weakest
+  const components = [
+    { key:"consistency",   label:"Posting Consistency",   value:score.consistency,   tip:"Try to publish at least once a week — steady posting is the single biggest factor here." },
+    { key:"optimization",  label:"Content Optimization",  value:score.optimization,  tip:"Add a meta title, description, primary keyword, and a few links to your recent posts." },
+    { key:"amplification", label:"Social Amplification",  value:score.amplification, tip: !score.metaConnected && !score.bufferConnected ? "Connect Facebook/Instagram or Buffer in Settings to start sharing your posts." : "Send more of your recent articles to the Social Pipeline to multiply their reach." },
+  ];
+  const weakest = [...components].sort((a,b)=>a.value-b.value)[0];
+
+  return (
+    <div style={{ background:"var(--bg-surface)", border:`1px solid ${color}44`, borderRadius:14, padding:24 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:24, flexWrap:"wrap" }}>
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", minWidth:120 }}>
+          <div style={{ fontFamily:"var(--font-display)", fontSize:48, fontWeight:700, color, lineHeight:1 }}>{score.overall}</div>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color, marginTop:4 }}>{label}</div>
+          <div style={{ fontSize:10, color:"var(--muted)", marginTop:2 }}>Blog Health Score</div>
+        </div>
+
+        <div style={{ flex:1, minWidth:240, display:"flex", flexDirection:"column", gap:10 }}>
+          {components.map(c => (
+            <div key={c.key}>
+              <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>
+                <span>{c.label}</span>
+                <span style={{ fontWeight:700, color:"var(--text)" }}>{c.value}</span>
+              </div>
+              <div style={{ height:6, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
+                <div style={{ height:"100%", width:`${c.value}%`, background:color, borderRadius:99 }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginTop:18, paddingTop:16, borderTop:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
+        💡 <strong style={{ color:"var(--text)" }}>Biggest opportunity:</strong> {weakest.tip}
+      </div>
+    </div>
+  );
+}
+
+function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onGSCDataLoaded, onConnectMeta, activeProvider, activeModel, apiKeys }) {
   const [tab, setTab] = useState("overview");
   const [socialInsights, setSocialInsights] = useState(null);
   const [loadingInsights, setLoadingInsights] = useState(false);
@@ -7974,65 +9341,39 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
       const igId   = page.instagram_id;
       const results = {};
 
-      // Facebook Page insights — use separate calls per metric with correct periods
-      const fbMetrics = [
-        { metric: "page_fans",             period: "lifetime" },
-        { metric: "page_impressions",      period: "week"     },
-        { metric: "page_post_engagements", period: "week"     },
-        { metric: "page_views_total",      period: "week"     },
-      ];
-
+      // Deliberately NOT calling the Insights API (page_post_engagements,
+      // page_views_total, IG views/reach/profile_views) — that endpoint needs
+      // special Insights permissions that have been unreliable (deprecated
+      // metrics, missing OAuth scopes, expired API versions across several
+      // rounds of fixes). Simple field fetches below (fan_count,
+      // followers_count) use basic Page/account read access instead, which is
+      // much more reliable, at the cost of not showing deeper engagement
+      // metrics — a deliberate simplification.
       results.facebook = {};
-      await Promise.all(fbMetrics.map(async ({ metric, period }) => {
-        try {
-          const res  = await fetch(
-            `https://graph.facebook.com/v19.0/${pageId}/insights?metric=${metric}&period=${period}&access_token=${token}`
-          );
-          const data = await res.json();
-          if (!data.error && data.data?.length) {
-            const vals = data.data[0]?.values;
-            results.facebook[metric] = vals?.[vals.length - 1]?.value ?? null;
-          }
-        } catch {}
-      }));
-
-      // Also get page fan count directly (more reliable)
       try {
-        const fanRes  = await fetch(`https://graph.facebook.com/v19.0/${pageId}?fields=fan_count,followers_count&access_token=${token}`);
+        const fanRes  = await fetch(`https://graph.facebook.com/v25.0/${pageId}?fields=fan_count,followers_count&access_token=${token}`);
         const fanData = await fanRes.json();
-        if (!fanData.error) {
+        if (fanData.error) {
+          console.error("[fetchSocialInsights] Facebook fan_count fetch failed:", fanData.error.message || fanData.error);
+        } else {
           if (fanData.fan_count       != null) results.facebook.page_fans      = fanData.fan_count;
           if (fanData.followers_count != null) results.facebook.followers_count = fanData.followers_count;
         }
-      } catch {}
+      } catch(e) { console.error("[fetchSocialInsights] Facebook fan_count fetch threw:", e.message); }
 
-      // Instagram — get follower count from account endpoint, insights from insights
+      // Instagram — follower count only, same reasoning as above
       if (igId) {
         results.instagram = {};
-
-        // Follower count from IG account directly
         try {
-          const igAccRes  = await fetch(`https://graph.facebook.com/v19.0/${igId}?fields=followers_count,media_count,name,username&access_token=${token}`);
+          const igAccRes  = await fetch(`https://graph.facebook.com/v25.0/${igId}?fields=followers_count,media_count,name,username&access_token=${token}`);
           const igAccData = await igAccRes.json();
-          if (!igAccData.error) {
+          if (igAccData.error) {
+            console.error("[fetchSocialInsights] Instagram account fetch failed:", igAccData.error.message || igAccData.error);
+          } else {
             if (igAccData.followers_count != null) results.instagram.follower_count = igAccData.followers_count;
             if (igAccData.media_count     != null) results.instagram.media_count    = igAccData.media_count;
           }
-        } catch {}
-
-        // IG insights
-        try {
-          const igRes  = await fetch(
-            `https://graph.facebook.com/v19.0/${igId}/insights?metric=impressions,reach,profile_views&period=week&access_token=${token}`
-          );
-          const igData = await igRes.json();
-          if (!igData.error) {
-            (igData.data || []).forEach(m => {
-              const vals = m.values;
-              results.instagram[m.name] = vals?.[vals.length - 1]?.value ?? null;
-            });
-          }
-        } catch {}
+        } catch(e) { console.error("[fetchSocialInsights] Instagram account fetch threw:", e.message); }
       }
 
       // Only set insights if we got some data
@@ -8040,7 +9381,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
       const hasIGData = Object.values(results.instagram || {}).some(v => v != null);
 
       if (!hasFBData && !hasIGData) {
-        setInsightError("No data returned — your Facebook Page may need 'Insights' permission or have insufficient activity. Make sure you're connected as a Page Admin.");
+        setInsightError("No data returned from Meta — check the browser console for the specific API error (could be a permissions issue, an expired token, or a Graph API metric/version change). Try reconnecting in Settings → Meta if reconnecting doesn't help.");
       } else {
         setSocialInsights(results);
       }
@@ -8096,7 +9437,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
           <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Search performance, social reach, and content insights in one place.</p>
         </div>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-          {gscData && <span style={{ fontSize:11, color:"#5cba6c", padding:"3px 10px", borderRadius:99, background:"#5cba6c11", border:"1px solid #5cba6c33" }}>● GSC Connected</span>}
+          {gscData && <span style={{ fontSize:11, color:"#7a9166", padding:"3px 10px", borderRadius:99, background:"#7a916611", border:"1px solid #7a916633" }}>● GSC Connected</span>}
           {metaConfig?.connected && <span style={{ fontSize:11, color:"#1877f2", padding:"3px 10px", borderRadius:99, background:"#1877f211", border:"1px solid #1877f233" }}>● Meta Connected</span>}
         </div>
       </div>
@@ -8117,11 +9458,11 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:0 }}>Fetch Analytics Data</h3>
           <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0, lineHeight:1.7 }}>
-            Fetch fresh data from Google Search Console without going to Settings. You can also configure your GSC connection here.
+            Fetch fresh data from Google Search Console right here, without leaving this tab. Use Settings → Search Console only if you need to change or reconnect the account.
           </p>
           <GSCPanel onDataLoaded={(data) => {
-            // Bubble up to parent — triggers re-render with fresh gscData
-            if (onConnectGSC) onConnectGSC(data);
+            // Save directly and stay on this tab — do NOT navigate to Settings
+            if (onGSCDataLoaded) onGSCDataLoaded(data);
           }} />
         </div>
       )}
@@ -8141,6 +9482,8 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
       {/* ── OVERVIEW ── */}
       {tab === "overview" && (
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <BlogHealthScore posts={posts} socialPosts={socialPosts} metaConfig={metaConfig} dark={dark} />
+
           {/* Key numbers */}
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12 }}>
             <StatCard label="Blog Posts Published" value={publishedPosts} sub={`${draftPosts} drafts`} icon="📄" />
@@ -8194,7 +9537,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                     return (
                       <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:12 }}>
                         <span style={{ color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"70%" }}>{text.slice(0,50)}…</span>
-                        <span style={{ fontSize:10, color:"#5cba6c", flexShrink:0, marginLeft:8 }}>✓ Published</span>
+                        <span style={{ fontSize:10, color:"#7a9166", flexShrink:0, marginLeft:8 }}>✓ Published</span>
                       </div>
                     );
                   })}
@@ -8219,7 +9562,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                     <div key={post.id} style={{ padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                       <div style={{ fontSize:12, fontWeight:600, marginBottom:6, lineHeight:1.4 }}>{post.title}</div>
                       <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-                        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-surface)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                        <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#7a916615":"var(--bg-surface)", color:post.status==="published"?"#7a9166":"var(--muted)", border:`1px solid ${post.status==="published"?"#7a916633":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
                         {gscPage && <span style={{ fontSize:11, color:"var(--amber)" }}>◎ {gscPage.clicks} clicks</span>}
                         <span style={{ fontSize:10, color:"var(--muted)", marginLeft:"auto" }}>{post.date || post.createdAt?.slice(0,10)}</span>
                       </div>
@@ -8249,7 +9592,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
               <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12 }}>
                 <StatCard label="Total Clicks"      value={gscData.totalClicks.toLocaleString()}       sub={`Last ${gscData.days} days`} />
                 <StatCard label="Impressions"        value={gscData.totalImpressions.toLocaleString()} sub="Search appearances" />
-                <StatCard label="Avg CTR"            value={`${(gscData.totalClicks/Math.max(gscData.totalImpressions,1)*100).toFixed(1)}%`} sub="Click-through rate" color="#5cba6c" />
+                <StatCard label="Avg CTR"            value={`${(gscData.totalClicks/Math.max(gscData.totalImpressions,1)*100).toFixed(1)}%`} sub="Click-through rate" color="#7a9166" />
                 <StatCard label="Avg Position"       value={avgPosition} sub="Google rank" color="#7c3aed" />
               </div>
 
@@ -8272,7 +9615,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                           <td style={{ padding:"7px 8px", fontSize:12, fontWeight:700, color:"var(--amber)" }}>{k.clicks}</td>
                           <td style={{ padding:"7px 8px", fontSize:11, color:"var(--text-secondary)" }}>{k.impressions}</td>
                           <td style={{ padding:"7px 8px", fontSize:11, color:"var(--text-secondary)" }}>#{k.position.toFixed(1)}</td>
-                          <td style={{ padding:"7px 8px", fontSize:11, color:"#5cba6c" }}>{k.impressions>0?(k.clicks/k.impressions*100).toFixed(1):0}%</td>
+                          <td style={{ padding:"7px 8px", fontSize:11, color:"#7a9166" }}>{k.impressions>0?(k.clicks/k.impressions*100).toFixed(1):0}%</td>
                         </tr>
                       ))}
                     </tbody>
@@ -8363,10 +9706,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                         </div>
                         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
                           {[
-                            { key:"page_fans",             label:"Fans",         icon:"❤" },
-                            { key:"page_impressions",      label:"Impressions",   icon:"👁" },
-                            { key:"page_post_engagements", label:"Engagements",   icon:"💬" },
-                            { key:"page_views_total",      label:"Page Views",    icon:"🔗" },
+                            { key:"page_fans", label:"Fans", icon:"❤" },
                           ].map(({ key, label, icon }) => socialInsights.facebook[key] != null && (
                             <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                               <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:3 }}>{icon} {label}</div>
@@ -8384,10 +9724,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                         </div>
                         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
                           {[
-                            { key:"follower_count", label:"Followers",     icon:"👤" },
-                            { key:"impressions",    label:"Impressions",   icon:"👁" },
-                            { key:"reach",          label:"Reach",         icon:"📡" },
-                            { key:"profile_views",  label:"Profile Views", icon:"🔗" },
+                            { key:"follower_count", label:"Followers", icon:"👤" },
                           ].map(({ key, label, icon }) => socialInsights.instagram[key] != null && (
                             <div key={key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                               <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:3 }}>{icon} {label}</div>
@@ -8398,26 +9735,6 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                       </div>
                     )}
                   </div>
-
-                  {/* Engagement rate */}
-                  {socialInsights.facebook && (
-                    <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
-                      <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>📈 Engagement Breakdown</div>
-                      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))", gap:10 }}>
-                        {[
-                          { key:"page_actions_post_reactions_like_total", label:"Likes",    color:"#1877f2" },
-                          { key:"page_actions_post_reactions_love_total", label:"Love",     color:"#e05555" },
-                          { key:"page_posts_impressions",                 label:"Post Reach",color:"#5cba6c" },
-                          { key:"page_fans_online_per_day",               label:"Online Now",color:"var(--amber)" },
-                        ].filter(m => socialInsights.facebook[m.key] != null).map(m => (
-                          <div key={m.key} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", textAlign:"center" }}>
-                            <div style={{ fontSize:9, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>{m.label}</div>
-                            <div style={{ fontSize:18, fontWeight:700, color:m.color }}>{socialInsights.facebook[m.key]?.toLocaleString?.() ?? socialInsights.facebook[m.key]}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </>
               )}
 
@@ -8458,7 +9775,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                                 {post.publishedAt ? new Date(post.publishedAt).toLocaleDateString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}) : ""}
                               </span>
                               {post.results && Object.values(post.results).some(r=>r.success) && (
-                                <span style={{ fontSize:10, color:"#5cba6c", fontWeight:600 }}>✓ Published</span>
+                                <span style={{ fontSize:10, color:"#7a9166", fontWeight:600 }}>✓ Published</span>
                               )}
                             </div>
                           </div>
@@ -8499,7 +9816,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
                       <tr key={post.id} style={{ borderBottom:"1px solid var(--border)11" }}>
                         <td style={{ padding:"10px 10px", fontSize:12, fontWeight:500, maxWidth:240, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{post.title}</td>
                         <td style={{ padding:"10px 10px" }}>
-                          <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-elevated)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                          <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:post.status==="published"?"#7a916615":"var(--bg-elevated)", color:post.status==="published"?"#7a9166":"var(--muted)", border:`1px solid ${post.status==="published"?"#7a916633":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
                         </td>
                         <td style={{ padding:"10px 10px", fontSize:11, color:"var(--text-secondary)" }}>{post.date || post.createdAt?.slice(0,10) || "—"}</td>
                         <td style={{ padding:"10px 10px", fontSize:12, fontWeight:700, color:gscPage?"var(--amber)":"var(--muted)" }}>{gscPage ? gscPage.clicks : "—"}</td>
@@ -8666,9 +9983,9 @@ Page clicks: ${gscPage?.clicks || 0}`,
     setAnalyzingPost(null);
   };
 
-  const scoreColor = (s) => s >= 80 ? "#5cba6c" : s >= 60 ? "var(--amber)" : "var(--red)";
-  const impactColor = { High:"#5cba6c", Medium:"var(--amber)", Low:"var(--text-secondary)" };
-  const effortColor = { Easy:"#5cba6c", Medium:"var(--amber)", Hard:"var(--red)" };
+  const scoreColor = (s) => s >= 80 ? "#7a9166" : s >= 60 ? "var(--amber)" : "var(--red)";
+  const impactColor = { High:"#7a9166", Medium:"var(--amber)", Low:"var(--text-secondary)" };
+  const effortColor = { Easy:"#7a9166", Medium:"var(--amber)", Hard:"var(--red)" };
 
   if (!gscData) return (
     <div style={{ textAlign:"center", padding:"60px 20px", background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12 }}>
@@ -8746,7 +10063,7 @@ Page clicks: ${gscPage?.clicks || 0}`,
                 {analysis.title_rewrites?.map((t, i) => (
                   <div key={i} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                     <div style={{ fontSize:11, color:"var(--red)", marginBottom:4, textDecoration:"line-through", opacity:0.7 }}>{t.current}</div>
-                    <div style={{ fontSize:12, fontWeight:600, color:"#5cba6c", marginBottom:4 }}>→ {t.suggested}</div>
+                    <div style={{ fontSize:12, fontWeight:600, color:"#7a9166", marginBottom:4 }}>→ {t.suggested}</div>
                     <div style={{ fontSize:11, color:"var(--muted)" }}>{t.reason}</div>
                   </div>
                 ))}
@@ -8791,9 +10108,9 @@ Page clicks: ${gscPage?.clicks || 0}`,
 
           {/* Low-hanging fruit */}
           {opportunities.lowHanging.length > 0 && (
-            <div style={{ background:"var(--bg-surface)", border:"1px solid #5cba6c33", borderRadius:12, padding:20 }}>
+            <div style={{ background:"var(--bg-surface)", border:"1px solid #7a916633", borderRadius:12, padding:20 }}>
               <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c" }}>🎯 Low-Hanging Fruit</div>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166" }}>🎯 Low-Hanging Fruit</div>
                 <div style={{ fontSize:11, color:"var(--text-secondary)" }}>— Ranking positions 5-20, one good update away from page 1</div>
               </div>
               <table style={{ width:"100%", borderCollapse:"collapse" }}>
@@ -8811,7 +10128,7 @@ Page clicks: ${gscPage?.clicks || 0}`,
                       <td style={{ padding:"8px 8px", fontSize:13, fontWeight:700, color:"var(--amber)" }}>#{k.position.toFixed(0)}</td>
                       <td style={{ padding:"8px 8px", fontSize:12, color:"var(--text-secondary)" }}>{k.impressions}</td>
                       <td style={{ padding:"8px 8px", fontSize:12 }}>{k.clicks}</td>
-                      <td style={{ padding:"8px 8px", fontSize:11, color:"#5cba6c" }}>Update &amp; expand post</td>
+                      <td style={{ padding:"8px 8px", fontSize:11, color:"#7a9166" }}>Update &amp; expand post</td>
                     </tr>
                   ))}
                 </tbody>
@@ -8845,12 +10162,12 @@ Page clicks: ${gscPage?.clicks || 0}`,
             {/* Winning keywords */}
             {opportunities.winning.length > 0 && (
               <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#5cba6c", marginBottom:10 }}>✓ Already Winning</div>
+                <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"#7a9166", marginBottom:10 }}>✓ Already Winning</div>
                 {opportunities.winning.map((k, i) => (
                   <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:"1px solid var(--border)11", fontSize:12 }}>
                     <span style={{ color:"var(--text-secondary)" }}>{k.query}</span>
                     <div style={{ display:"flex", gap:8 }}>
-                      <span style={{ fontWeight:700, color:"#5cba6c" }}>#{k.position.toFixed(0)}</span>
+                      <span style={{ fontWeight:700, color:"#7a9166" }}>#{k.position.toFixed(0)}</span>
                       <span style={{ color:"var(--muted)" }}>{k.clicks} clicks</span>
                     </div>
                   </div>
@@ -8891,7 +10208,7 @@ Page clicks: ${gscPage?.clicks || 0}`,
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ fontSize:13, fontWeight:600, marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{post.title}</div>
                       <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-                        <span style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:post.status==="published"?"#5cba6c15":"var(--bg-surface)", color:post.status==="published"?"#5cba6c":"var(--muted)", border:`1px solid ${post.status==="published"?"#5cba6c33":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
+                        <span style={{ fontSize:10, padding:"1px 6px", borderRadius:99, background:post.status==="published"?"#7a916615":"var(--bg-surface)", color:post.status==="published"?"#7a9166":"var(--muted)", border:`1px solid ${post.status==="published"?"#7a916633":"var(--border)"}`, textTransform:"capitalize" }}>{post.status}</span>
                         {pa && <span style={{ fontSize:11, color:scoreColor(pa.seo_score), fontWeight:700 }}>SEO: {pa.seo_score}/100</span>}
                       </div>
                     </div>
@@ -8924,7 +10241,7 @@ Page clicks: ${gscPage?.clicks || 0}`,
                       <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--amber)22" }}>
                         <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Title Feedback</div>
                         <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:6 }}>{pa.title_feedback}</div>
-                        <div style={{ fontSize:12, fontWeight:600, color:"#5cba6c" }}>→ {pa.suggested_title}</div>
+                        <div style={{ fontSize:12, fontWeight:600, color:"#7a9166" }}>→ {pa.suggested_title}</div>
                       </div>
 
                       <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)" }}>
@@ -8988,6 +10305,18 @@ const MOBILE_CSS = `
     [style*="grid-template-columns: 1fr 1fr"] {
       grid-template-columns: 1fr !important;
     }
+    /* Card grids using auto-fit/minmax (used extensively for plan cards,
+       competitor cards, etc.) — the 160-280px floors used throughout the app
+       are comfortable on tablets but can force a card wider than a narrow
+       phone screen, causing the whole grid (and page) to overflow
+       horizontally. Force single-column below 767px instead. */
+    [style*="auto-fit,minmax(160px"], [style*="auto-fit, minmax(160px"],
+    [style*="auto-fit,minmax(120px"], [style*="auto-fit, minmax(120px"],
+    [style*="auto-fit,minmax(220px"], [style*="auto-fit, minmax(220px"],
+    [style*="auto-fit,minmax(240px"], [style*="auto-fit, minmax(240px"],
+    [style*="auto-fit,minmax(280px"], [style*="auto-fit, minmax(280px"] {
+      grid-template-columns: 1fr !important;
+    }
     /* Horizontal tab bars — allow wrap */
     [style*="display:\"flex\""][style*="gap:4"] {
       flex-wrap: wrap;
@@ -8996,6 +10325,12 @@ const MOBILE_CSS = `
     .ProseMirror { min-height: 200px !important; }
     /* Stage progress text smaller */
     .stage-label { font-size: 9px !important; }
+    /* Data tables (competitor tracking, etc.) — scroll the table itself
+       rather than letting it force the whole page wider. This is the
+       standard, correct pattern for wide tables on narrow screens. */
+    table { display: block; overflow-x: auto; white-space: nowrap; max-width: 100%; -webkit-overflow-scrolling: touch; }
+    /* Safety net — nothing should be able to force horizontal page scroll */
+    img, video, canvas { max-width: 100%; height: auto; }
   }
 
   /* ── MOBILE NAV BAR (bottom) ── */
@@ -9038,10 +10373,111 @@ const MOBILE_CSS = `
   @media (max-width: 767px) {
     .bb-mobile-nav { display: flex; }
     .bb-sidebar { display: none !important; }
-    .bb-main-content { padding: 16px 14px 72px !important; }
+    .bb-main-content { padding: 16px 14px 72px !important; overflow-x: hidden !important; max-width: 100vw !important; }
     .bb-root { flex-direction: column !important; }
+    .bb-ai-switcher { bottom: 72px !important; right: 12px !important; } /* clear the 56px mobile nav — was overlapping the Settings tab */
   }
 `;
+
+// ─── WORDPRESS SETTINGS ──────────────────────────────────────────────────────
+
+const WORDPRESS_STORAGE = "bb_wordpress_config";
+function loadWordPressConfig() { try { return JSON.parse(localStorage.getItem(WORDPRESS_STORAGE) || "{}"); } catch { return {}; } }
+function saveWordPressConfig(d) {
+  try { localStorage.setItem(WORDPRESS_STORAGE, JSON.stringify(d)); } catch {}
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("wordpress_config", uid, d);
+}
+
+function WordPressSettings() {
+  const [config,      setConfig]      = useState(loadWordPressConfig);
+  const [siteUrl,     setSiteUrl]     = useState(() => loadWordPressConfig().siteUrl || "");
+  const [username,    setUsername]    = useState(() => loadWordPressConfig().username || "");
+  const [appPassword, setAppPassword] = useState(() => loadWordPressConfig().appPassword || "");
+  const [testing,     setTesting]     = useState(false);
+  const [testResult,  setTestResult]  = useState(null); // { success, message }
+  const [saved,       setSaved]       = useState(false);
+
+  const testConnection = async () => {
+    if (!siteUrl.trim() || !username.trim() || !appPassword.trim()) {
+      setTestResult({ success:false, message:"Fill in your site URL, username, and application password first." });
+      return;
+    }
+    setTesting(true); setTestResult(null);
+    try {
+      const res  = await fetch("/api/wordpress-post", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ action:"testConnection", siteUrl: siteUrl.trim(), username: username.trim(), appPassword: appPassword.trim() }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setTestResult({ success:true, message:`✓ Connected as ${data.name}` });
+    } catch(e) {
+      setTestResult({ success:false, message: e.message });
+    }
+    setTesting(false);
+  };
+
+  const save = () => {
+    const cfg = { siteUrl: siteUrl.trim(), username: username.trim(), appPassword: appPassword.trim(), connected: testResult?.success || config.connected };
+    saveWordPressConfig(cfg);
+    setConfig(cfg);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
+
+  return (
+    <div>
+      <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 8px" }}>WordPress</h3>
+      <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 20px", lineHeight:1.6 }}>
+        Publish directly to your own WordPress site (self-hosted or WordPress.com Business) right from the Article Pipeline — no copy-paste needed.
+      </p>
+
+      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16, marginBottom:20, fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
+        <strong style={{ color:"var(--text)" }}>You'll need an Application Password</strong> — a feature built into WordPress itself since version 5.6, no plugin required. In your WordPress admin, go to <strong>Users → Profile</strong>, scroll to <strong>Application Passwords</strong>, give it a name like "Blog Bunker", and click Add. Use the generated password below — <em>not</em> your regular login password.
+      </div>
+
+      <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Site URL</label>
+          <input style={iS} placeholder="yourblog.com" value={siteUrl} onChange={e=>setSiteUrl(e.target.value)} />
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>WordPress Username</label>
+          <input style={iS} placeholder="your-username" value={username} onChange={e=>setUsername(e.target.value)} />
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Application Password</label>
+          <input style={iS} type="password" placeholder="xxxx xxxx xxxx xxxx xxxx xxxx" value={appPassword} onChange={e=>setAppPassword(e.target.value)} />
+        </div>
+
+        {testResult && (
+          <div style={{ padding:"10px 14px", borderRadius:8, fontSize:12, background: testResult.success ? "#7a916611" : "var(--red)11", border: `1px solid ${testResult.success ? "#7a916633" : "var(--red)33"}`, color: testResult.success ? "#7a9166" : "var(--red)" }}>
+            {testResult.message}
+          </div>
+        )}
+
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={testConnection} disabled={testing}
+            style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor: testing ? "not-allowed" : "pointer", fontFamily:"'DM Sans',sans-serif" }}>
+            {testing ? "Testing…" : "Test Connection"}
+          </button>
+          <button onClick={save}
+            style={{ padding:"9px 24px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+            {saved ? "✓ Saved" : "Save"}
+          </button>
+        </div>
+
+        {config.connected && (
+          <div style={{ fontSize:12, color:"#7a9166" }}>✓ WordPress is connected — a "🌐 Publish to WordPress" option is now available in the Article Pipeline's Publish stage.</div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // ─── BUFFER SETTINGS ─────────────────────────────────────────────────────────
 
@@ -9061,6 +10497,28 @@ function BufferSettings() {
   const [saved,    setSaved]    = useState(false);
   const [error,    setError]    = useState("");
   const [mapping,  setMapping]  = useState(() => loadBufferConfig().mapping || {});
+  const [boardMapping, setBoardMapping] = useState(() => loadBufferConfig().boardMapping || {});
+  const [pinterestBoards, setPinterestBoards] = useState({}); // { channelId: [{serviceId,name}] }
+  const [loadingBoards, setLoadingBoards] = useState({}); // { channelId: bool }
+
+  const loadBoardsFor = async (channelId) => {
+    setLoadingBoards(b => ({ ...b, [channelId]: true }));
+    try {
+      const res = await fetch("/api/buffer-post", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ apiKey: apiKey.trim(), action: "getPinterestBoards", channelId }),
+      });
+      const data = await res.json();
+      if (!data.error) setPinterestBoards(p => ({ ...p, [channelId]: data.boards || [] }));
+    } catch {}
+    setLoadingBoards(b => ({ ...b, [channelId]: false }));
+  };
+
+  useEffect(() => {
+    const pinterestChannelId = mapping.pinterest;
+    if (pinterestChannelId && apiKey.trim() && !pinterestBoards[pinterestChannelId]) loadBoardsFor(pinterestChannelId);
+  }, [mapping.pinterest]);
 
   const PLATFORM_NAMES = {
     twitter: "X (Twitter)", tiktok: "TikTok", pinterest: "Pinterest",
@@ -9091,7 +10549,7 @@ function BufferSettings() {
   };
 
   const save = () => {
-    const cfg = { apiKey: apiKey.trim(), channels, mapping, orgId, account, connected: !!apiKey.trim() && channels.length > 0 };
+    const cfg = { apiKey: apiKey.trim(), channels, mapping, boardMapping, orgId, account, connected: !!apiKey.trim() && channels.length > 0 };
     saveBufferConfig(cfg);
     setConfig(cfg);
     setSaved(true);
@@ -9108,7 +10566,7 @@ function BufferSettings() {
         <span style={{ fontSize:28 }}>🟦</span>
         <div>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 2px" }}>Buffer — Extended Reach</h3>
-          <div style={{ fontSize:11, color: config.connected ? "#5cba6c" : "var(--muted)", fontWeight: config.connected ? 600 : 400 }}>
+          <div style={{ fontSize:11, color: config.connected ? "#7a9166" : "var(--muted)", fontWeight: config.connected ? 600 : 400 }}>
             {config.connected ? `● Connected · ${channels.length} channels` : "○ Optional · not connected"}
           </div>
         </div>
@@ -9130,8 +10588,8 @@ function BufferSettings() {
           What each connection covers
         </div>
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-          <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-surface)", border:"1px solid #5cba6c33" }}>
-            <div style={{ fontSize:11, fontWeight:700, color:"#5cba6c", marginBottom:6 }}>✓ Built-in (no Buffer needed)</div>
+          <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--bg-surface)", border:"1px solid #7a916633" }}>
+            <div style={{ fontSize:11, fontWeight:700, color:"#7a9166", marginBottom:6 }}>✓ Built-in (no Buffer needed)</div>
             <div style={{ fontSize:12, color:"var(--text-secondary)", display:"flex", flexDirection:"column", gap:3 }}>
               <span>📸 Instagram</span>
               <span>👍 Facebook</span>
@@ -9191,7 +10649,7 @@ function BufferSettings() {
       {error && <div style={{ padding:"10px 14px", borderRadius:8, background:"var(--red)11", border:"1px solid var(--red)33", color:"var(--red)", fontSize:12 }}>{error}</div>}
 
       {account && !error && (
-        <div style={{ padding:"10px 14px", borderRadius:8, background:"#5cba6c11", border:"1px solid #5cba6c33", fontSize:12, color:"#5cba6c", display:"flex", alignItems:"center", gap:8 }}>
+        <div style={{ padding:"10px 14px", borderRadius:8, background:"#7a916611", border:"1px solid #7a916633", fontSize:12, color:"#7a9166", display:"flex", alignItems:"center", gap:8 }}>
           ✓ Connected as <strong style={{marginLeft:4}}>{account.name || account.email}</strong> · {channels.length} channel{channels.length !== 1 ? "s" : ""} found
         </div>
       )}
@@ -9201,20 +10659,24 @@ function BufferSettings() {
             Map your Buffer channels
           </div>
           <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-            {channels.map(ch => (
-              <div key={ch.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+            {channels.map(ch => {
+              const mappedPlatform = Object.entries(mapping).find(([,v]) => v === ch.id)?.[0] || "";
+              return (
+              <div key={ch.id} style={{ display:"flex", flexDirection:"column", gap:8, padding:"10px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
                 <span style={{ fontSize:18 }}>{SERVICE_ICONS[ch.service?.toLowerCase()] || "📱"}</span>
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ch.name}</div>
                   <div style={{ fontSize:11, color:"var(--text-secondary)", textTransform:"capitalize" }}>{ch.service} · {ch.serviceId}</div>
                 </div>
                 <select
-                  value={Object.entries(mapping).find(([,v]) => v === ch.id)?.[0] || ""}
+                  value={mappedPlatform}
                   onChange={e => {
                     const platform = e.target.value;
                     const next = Object.fromEntries(Object.entries(mapping).filter(([,v]) => v !== ch.id));
                     if (platform) next[platform] = ch.id;
                     setMapping(next);
+                    if (platform === "pinterest" && !pinterestBoards[ch.id]) loadBoardsFor(ch.id);
                   }}
                   style={{ ...iS, width:"auto", minWidth:150, cursor:"pointer" }}>
                   <option value="">— not mapped —</option>
@@ -9222,8 +10684,34 @@ function BufferSettings() {
                     <option key={id} value={id}>{name}</option>
                   ))}
                 </select>
+                </div>
+                {mappedPlatform === "pinterest" && (
+                  <div style={{ display:"flex", alignItems:"center", gap:8, paddingLeft:30 }}>
+                    <span style={{ fontSize:11, color:"var(--muted)", whiteSpace:"nowrap" }}>📌 Board:</span>
+                    {loadingBoards[ch.id] ? (
+                      <span style={{ fontSize:11, color:"var(--muted)" }}>Loading boards…</span>
+                    ) : (
+                      <select
+                        value={boardMapping[ch.id] || ""}
+                        onChange={e => setBoardMapping(b => ({ ...b, [ch.id]: e.target.value }))}
+                        style={{ ...iS, width:"auto", minWidth:180, cursor:"pointer", padding:"6px 10px", fontSize:12 }}>
+                        <option value="">— select a board (required) —</option>
+                        {(pinterestBoards[ch.id] || []).map(b => (
+                          <option key={b.serviceId} value={b.serviceId}>{b.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    {!loadingBoards[ch.id] && (pinterestBoards[ch.id]?.length === 0) && (
+                      <span style={{ fontSize:11, color:"var(--red)" }}>No boards found — create one on Pinterest first</span>
+                    )}
+                    {!boardMapping[ch.id] && !loadingBoards[ch.id] && (
+                      <span style={{ fontSize:11, color:"var(--amber)" }}>⚠ Required — Pinterest posts fail without a board</span>
+                    )}
+                  </div>
+                )}
               </div>
-            ))}
+              );
+            })}
           </div>
           <p style={{ fontSize:11, color:"var(--muted)", marginTop:10, lineHeight:1.6 }}>
             Map each Buffer channel to the platform it represents. When you schedule a post to X in Blog Bunker, it sends to whichever Buffer channel is mapped to X.
@@ -9243,7 +10731,7 @@ function BufferSettings() {
             Disconnect Buffer
           </button>
         )}
-        {saved && <span style={{ fontSize:12, color:"#5cba6c" }}>✓ Saved</span>}
+        {saved && <span style={{ fontSize:12, color:"#7a9166" }}>✓ Saved</span>}
       </div>
     </div>
   );
@@ -9276,6 +10764,7 @@ function SocialPlatformSettings() {
 
 function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
   const [canvasEl, setCanvasEl] = useState(null); // callback ref — know when canvas is mounted
+  const wrapperRef = useRef(null); // measure this to size the canvas explicitly in JS
   const canvasRef = useCallback(node => { if (node) setCanvasEl(node); }, []);
   const [dataUrl,  setDataUrl]  = useState(null);
   const [layers,   setLayers]   = useState([{
@@ -9286,6 +10775,23 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
   const [sel,      setSel]      = useState(0);
   const [saving,   setSaving]   = useState(false);
   const [loadErr,  setLoadErr]  = useState("");
+  const [filterId, setFilterId] = useState("none");
+
+  // Deterministic, instant, free — no AI round-trip or quality variance. Applied
+  // via the canvas 2D context's native CSS filter support before drawing the
+  // base image, then reset before drawing text layers so text stays crisp.
+  const FILTER_PRESETS = [
+    { id:"none",     label:"None",       css:"none" },
+    { id:"warm",      label:"Warm",       css:"sepia(20%) saturate(140%) hue-rotate(-10deg) brightness(105%)" },
+    { id:"cool",      label:"Cool",       css:"saturate(120%) hue-rotate(15deg) brightness(102%) contrast(105%)" },
+    { id:"bw",        label:"B&W",        css:"grayscale(100%) contrast(112%)" },
+    { id:"vintage",   label:"Vintage",    css:"sepia(35%) contrast(90%) brightness(95%) saturate(85%)" },
+    { id:"vivid",     label:"Vivid",      css:"saturate(150%) contrast(115%) brightness(105%)" },
+    { id:"faded",     label:"Faded",      css:"saturate(70%) brightness(112%) contrast(88%)" },
+    { id:"dramatic",  label:"Dramatic",   css:"contrast(132%) brightness(90%) saturate(110%)" },
+    { id:"golden",    label:"Golden Hour",css:"sepia(25%) saturate(140%) brightness(108%) hue-rotate(-8deg)" },
+  ];
+  const activeFilterCss = FILTER_PRESETS.find(f => f.id === filterId)?.css || "none";
 
   const FONTS = [
     { label:"Georgia (Serif)",  value:"Georgia, serif"           },
@@ -9310,8 +10816,9 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
           const blob = await res.blob();
           const reader = new FileReader();
           reader.onload = e => setDataUrl(e.target.result);
+          reader.onerror = () => setLoadErr("Could not read the fetched image data.");
           reader.readAsDataURL(blob);
-        } catch {
+        } catch(fetchErr) {
           // Fetch failed (CORS) — load via Image element instead
           // Canvas will be tainted but we can still display it
           const img = new Image();
@@ -9323,7 +10830,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
             try {
               canvas.getContext("2d").drawImage(img, 0, 0);
               setDataUrl(canvas.toDataURL("image/png"));
-            } catch {
+            } catch(taintErr) {
               // Canvas tainted — just use the URL directly for display
               setDataUrl(imageUrl);
             }
@@ -9335,15 +10842,29 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
     })();
   }, [imageUrl]);
 
-  // Draw whenever dataUrl, layers, or canvas element changes
+  // Draw whenever dataUrl, layers, filter, or canvas element changes
   useEffect(() => {
     if (!dataUrl || !canvasEl) return;
     const img = new Image();
     img.onload = () => {
       const ctx = canvasEl.getContext("2d");
-      canvasEl.width  = img.width;
-      canvasEl.height = img.height;
-      ctx.drawImage(img, 0, 0);
+
+      // Cap the canvas's actual rendering resolution — no reason to keep a
+      // multi-megapixel bitmap in memory for on-screen display, and very
+      // large canvases are a known class of silent rendering failure on some
+      // browsers/GPUs.
+      const MAX_DIM = 1600;
+      let targetW = img.width, targetH = img.height;
+      if (targetW > MAX_DIM || targetH > MAX_DIM) {
+        const scale = MAX_DIM / Math.max(targetW, targetH);
+        targetW = Math.round(targetW * scale);
+        targetH = Math.round(targetH * scale);
+      }
+      canvasEl.width  = targetW;
+      canvasEl.height = targetH;
+      ctx.filter = activeFilterCss;
+      ctx.drawImage(img, 0, 0, targetW, targetH);
+      ctx.filter = "none"; // never let the image filter bleed into the text layers
 
       for (const l of layers) {
         if (!l.text.trim()) continue;
@@ -9369,9 +10890,22 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
         ctx.shadowColor = "transparent"; ctx.shadowBlur = 0;
         ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
       }
+
+      // Explicitly size the canvas's DISPLAY box in pixels, measured from the
+      // wrapper's actual rendered width (now the full panel width, since the
+      // panel was restructured to no longer be squeezed into a narrow column).
+      const wrapperWidth = wrapperRef.current?.getBoundingClientRect().width || 700;
+      const aspect = img.height / img.width;
+      const maxH = window.innerHeight * 0.8;
+      let displayW = wrapperWidth;
+      let displayH = displayW * aspect;
+      if (displayH > maxH) { displayH = maxH; displayW = displayH / aspect; }
+      canvasEl.style.width  = `${displayW}px`;
+      canvasEl.style.height = `${displayH}px`;
     };
+    img.onerror = () => setLoadErr("The image data couldn't be drawn — try re-selecting the image or downloading and re-uploading it.");
     img.src = dataUrl;
-  }, [dataUrl, layers, canvasEl]);
+  }, [dataUrl, layers, canvasEl, activeFilterCss]);
 
   const layer = layers[sel] || layers[0];
   const upd   = (patch) => setLayers(p => p.map((l,i) => i===sel ? {...l,...patch} : l));
@@ -9396,7 +10930,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
   return (
     <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>✎ Text Overlay Editor</span>
+        <span style={{ fontSize:14, fontWeight:700, color:"var(--amber)" }}>🎨 Filters &amp; Text Overlay</span>
         <span style={{ fontSize:11, color:"var(--text-secondary)" }}>Click image to reposition selected text</span>
       </div>
 
@@ -9409,19 +10943,32 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
       )}
 
       {dataUrl && (
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 280px", gap:14 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 280px", gap:14, minWidth:0 }}>
           {/* Canvas preview */}
-          <div>
+          <div ref={wrapperRef} style={{ width:"100%", minWidth:0, overflow:"hidden" }}>
             <canvas ref={canvasRef}
               onClick={e => {
                 const r = e.currentTarget.getBoundingClientRect();
                 upd({ x: Math.round((e.clientX-r.left)/r.width*100), y: Math.round((e.clientY-r.top)/r.height*100) });
               }}
-              style={{ width:"100%", borderRadius:8, border:"1px solid var(--border)", cursor:"crosshair", display:"block" }} />
+              style={{ borderRadius:8, border:"1px solid var(--border)", background:"#3a3a3a", cursor:"crosshair", display:"block" }} />
           </div>
 
           {/* Controls */}
           <div style={{ display:"flex", flexDirection:"column", gap:10, maxHeight:520, overflow:"auto" }}>
+            {/* Filters */}
+            <div>
+              <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Filter</div>
+              <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+                {FILTER_PRESETS.map(f => (
+                  <button key={f.id} onClick={() => setFilterId(f.id)}
+                    style={{ padding:"5px 10px", borderRadius:99, border:filterId===f.id?"1px solid var(--amber)":"1px solid var(--border)", background:filterId===f.id?"var(--amber-glow)":"transparent", color:filterId===f.id?"var(--amber)":"var(--text-secondary)", fontSize:11, fontWeight:filterId===f.id?600:400, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Layers */}
             <div>
               <div style={{ fontSize:10, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:5 }}>Layers</div>
@@ -9513,7 +11060,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
             </div>
 
             <div style={{ display:"flex", flexDirection:"column", gap:5, paddingTop:6, borderTop:"1px solid var(--border)" }}>
-              <button onClick={save} disabled={saving} style={{ padding:"9px", borderRadius:8, border:"none", background:saving?"var(--bg-elevated)":"#5cba6c", color:saving?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:saving?"not-allowed":"pointer" }}>
+              <button onClick={save} disabled={saving} style={{ padding:"9px", borderRadius:8, border:"none", background:saving?"var(--bg-elevated)":"#7a9166", color:saving?"var(--muted)":"#fff", fontSize:12, fontWeight:700, cursor:saving?"not-allowed":"pointer" }}>
                 {saving ? "Saving…" : "✓ Save to Library"}
               </button>
               <button onClick={()=>{ if(!canvasEl) return; const a=document.createElement("a"); a.href=canvasEl.toDataURL("image/png"); a.download=`${imageName||"image"}-overlay.png`; a.click(); }} style={{ padding:"9px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer" }}>
@@ -9557,9 +11104,9 @@ const HEADLINE_IMAGE_SPEC = {
   style: "cinematic editorial photography, moody atmospheric, fly fishing and whiskey lifestyle, amber and teal tones, wide landscape",
 };
 
-function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys, onImageSaved }) {
-  const [imageUrl,    setImageUrl]    = useState(null);
-  const [cloudUrl,    setCloudUrl]    = useState(null); // permanent GCS URL
+function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys, onImageSaved, existingImageUrl = null }) {
+  const [imageUrl,    setImageUrl]    = useState(existingImageUrl);
+  const [cloudUrl,    setCloudUrl]    = useState(existingImageUrl); // permanent GCS URL
   const [prompt,      setPrompt]      = useState("");
   const [loading,     setLoading]     = useState(false);
   const [uploading,   setUploading]   = useState(false);
@@ -9572,8 +11119,13 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
 
   const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
   const provider = imgProvider;
-  const providerLabel = getImageProviderLabel(provider);
+  const providerLabel = getImageProviderLabel(provider, apiKeys);
   const handleImgProviderChange = (id) => { setImgProvider(id); saveImageProviderPref(id); };
+
+  useEffect(() => {
+    setImageUrl(existingImageUrl);
+    setCloudUrl(existingImageUrl);
+  }, [existingImageUrl]);
 
   // Convert any image URL to a JPEG data URL via canvas before saving
   const toJpegDataUrl = (url) => new Promise((resolve, reject) => {
@@ -9777,7 +11329,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
             )}
           </div>
           {cloudUrl && (
-            <div style={{ position:"absolute", top:8, left:8, fontSize:10, padding:"3px 8px", borderRadius:99, background:"rgba(0,0,0,0.65)", color:"#5cba6c", fontWeight:600 }}>
+            <div style={{ position:"absolute", top:8, left:8, fontSize:10, padding:"3px 8px", borderRadius:99, background:"rgba(0,0,0,0.65)", color:"#7a9166", fontWeight:600 }}>
               ☁ Synced to GCS
             </div>
           )}
@@ -10053,7 +11605,7 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
               </div>
               <div style={{ display:"flex", gap:8 }}>
                 <button onClick={applyRewrite}
-                  style={{ padding:"7px 18px", borderRadius:7, border:"none", background:"#5cba6c", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                  style={{ padding:"7px 18px", borderRadius:7, border:"none", background:"#7a9166", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
                   ✓ Apply
                 </button>
                 <button onClick={() => { setAiResult(""); }}
@@ -10205,6 +11757,8 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
     category: post?.category || "Culture",
     status:   post?.status   || "draft",
     date:     post?.date     || new Date().toISOString().split("T")[0],
+    url:      post?.url      || "",
+    headlineImageUrl: post?.headlineImageUrl || "",
   });
   const [saved,        setSaved]        = useState(false);
   const [saveStatus,   setSaveStatus]   = useState(""); // "saving" | "saved" | ""
@@ -10278,7 +11832,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
             </span>
           )}
           {saveStatus === "saved" && (
-            <span style={{ fontSize:11, color:"#5cba6c" }}>✓ Autosaved</span>
+            <span style={{ fontSize:11, color:"#7a9166" }}>✓ Autosaved</span>
           )}
           {!saveStatus && lastSaved && (
             <span style={{ fontSize:11, color:"var(--muted)" }}>
@@ -10310,6 +11864,15 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
         </div>
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+            Published URL <span style={{textTransform:"none", fontWeight:400, color:"var(--text-secondary)"}}>— optional, once this post is live somewhere</span>
+          </label>
+          <input style={iS} placeholder="https://caskandstream.com/blog/your-post-slug" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} />
+          <div style={{ fontSize:11, color:"var(--muted)", marginTop:5, lineHeight:1.5 }}>
+            Recording this lets other posts link to this one when you use Find Internal Links in the Pipeline.
+          </div>
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
             Body
           </label>
           <RichTextEditor value={form.body} onChange={(md)=>setForm(f=>({...f,body:md}))} placeholder="Write your post here…" minHeight={300} activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys} />
@@ -10323,33 +11886,22 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           activeModel={activeModel || "claude-sonnet-4-6"}
           apiKeys={apiKeys || {}}
           onImageSaved={(url) => setForm(f => ({ ...f, headlineImageUrl: url }))}
+          existingImageUrl={form.headlineImageUrl || null}
         />
 
-        {/* Copy to Wix */}
+        {/* Copy for blog host */}
         <div style={{ padding:"14px 16px", borderRadius:10, border:"1px solid var(--border)", background:"var(--bg-elevated)" }}>
           <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>
-            📋 Copy to Wix Blog
+            📋 Copy for Your Blog
           </div>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-            <button onClick={() => {
-              const plainText = `${form.title}\n\n${(form.body || "")
-                .replace(/^#{1,3}\s+/gm, "")
-                .replace(/\*\*(.*?)\*\*/g, "$1")
-                .replace(/\*(.*?)\*/g, "$1")
-                .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-                .trim()}`;
-              navigator.clipboard.writeText(plainText);
-            }}
+            <button onClick={() => copyPostWithLinks(form.title, form.body, form.headlineImageUrl)}
               style={{ padding:"8px 16px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
               📋 Copy Post Text
             </button>
-            <button onClick={() => window.open("https://manage.wix.com/dashboard/964b56e4-5e8e-48a6-bd1f-2e5dfd11c4c3/blog/create-post", "_blank")}
-              style={{ padding:"8px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
-              ↗ Open Wix Blog
-            </button>
           </div>
           <p style={{ fontSize:11, color:"var(--text-secondary)", margin:"8px 0 0", lineHeight:1.5 }}>
-            Copy plain text → Open Wix Blog → paste into the editor. Wix handles formatting automatically.
+            Copies with formatting and links intact — paste into your blog host's editor when you're ready to publish.
           </p>
         </div>
 
@@ -10378,8 +11930,70 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
 
 // ─── ADD COMPETITOR MODAL ─────────────────────────────────────────────────────
 
+// ─── ADD SOCIAL COMPETITOR MODAL ──────────────────────────────────────────────
+
+function AddSocialCompetitorModal({ onSave, onClose, dark }) {
+  const [form, setForm] = useState({ name:"", handle:"", platform:"Instagram", followers:"", posts:"", engagement:"", threat:"medium" });
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
+  const valid = form.name.trim() && form.handle.trim();
+  return (
+    <Modal title="Add Social Competitor" onClose={onClose}>
+      <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Account Name *</label>
+            <input style={iS} placeholder="Hatch Magazine" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} autoFocus />
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Handle *</label>
+            <input style={iS} placeholder="@hatchmag" value={form.handle} onChange={e=>setForm(f=>({...f,handle:e.target.value}))} />
+          </div>
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Platform</label>
+          <select style={{ ...iS, cursor:"pointer" }} value={form.platform} onChange={e=>setForm(f=>({...f,platform:e.target.value}))}>
+            {["Instagram","Facebook","TikTok","X","Pinterest","Reddit","YouTube"].map(p=><option key={p} value={p}>{p}</option>)}
+          </select>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Followers</label>
+            <input style={iS} placeholder="45K" value={form.followers} onChange={e=>setForm(f=>({...f,followers:e.target.value}))} />
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Post Freq</label>
+            <input style={iS} placeholder="5/wk" value={form.posts} onChange={e=>setForm(f=>({...f,posts:e.target.value}))} />
+          </div>
+          <div>
+            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Engagement</label>
+            <input style={iS} placeholder="3.2%" value={form.engagement} onChange={e=>setForm(f=>({...f,engagement:e.target.value}))} />
+          </div>
+        </div>
+        <div>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Threat Level</label>
+          <div style={{ display:"flex", gap:8 }}>
+            {["low","medium","high"].map(t => (
+              <button key={t} onClick={()=>setForm(f=>({...f,threat:t}))}
+                style={{ flex:1, padding:"8px", borderRadius:8, border:form.threat===t?`1px solid ${t==="high"?"var(--red)":t==="medium"?"var(--amber)":"var(--green)"}`:"1px solid var(--border)", background:form.threat===t?(t==="high"?"var(--red)":t==="medium"?"var(--amber)":"var(--green)")+"18":"var(--bg-elevated)", color:form.threat===t?(t==="high"?"var(--red)":t==="medium"?"var(--amber)":"var(--green)"):"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textTransform:"capitalize" }}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginTop:4 }}>
+          <button onClick={onClose} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Cancel</button>
+          <button onClick={()=>{ if(valid){ onSave({...form, id:Date.now()}); onClose(); }}} disabled={!valid}
+            style={{ padding:"9px 24px", borderRadius:8, border:"none", background:valid?"var(--amber)":"var(--bg-elevated)", color:valid?(dark?"#0e0f11":"#fff"):"var(--muted)", fontSize:13, fontWeight:700, cursor:valid?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif" }}>
+            Add Competitor
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function AddCompetitorModal({ onSave, onClose }) {
-  const [form, setForm] = useState({ name:"", url:"", da:"", posts:"", traffic:"", strengths:"", threat:"medium" });
+  const [form, setForm] = useState({ name:"", url:"", posts:"", traffic:"", strengths:"", threat:"medium" });
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" };
   const valid = form.name.trim() && form.url.trim();
   const normalizeUrl = (u) => {
@@ -10400,11 +12014,7 @@ function AddCompetitorModal({ onSave, onClose }) {
             <input style={iS} placeholder="hatchmag.com" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} />
           </div>
         </div>
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
-          <div>
-            <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Domain Authority</label>
-            <input style={iS} type="number" placeholder="45" value={form.da} onChange={e=>setForm(f=>({...f,da:e.target.value}))} />
-          </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
           <div>
             <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Post Freq</label>
             <input style={iS} placeholder="3/wk" value={form.posts} onChange={e=>setForm(f=>({...f,posts:e.target.value}))} />
@@ -10431,7 +12041,7 @@ function AddCompetitorModal({ onSave, onClose }) {
         </div>
         <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginTop:4 }}>
           <button onClick={onClose} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Cancel</button>
-          <button onClick={()=>{ if(valid){ onSave({...form, url: normalizeUrl(form.url), da:Number(form.da)||0, id:Date.now()}); onClose(); }}} disabled={!valid}
+          <button onClick={()=>{ if(valid){ onSave({...form, url: normalizeUrl(form.url), id:Date.now()}); onClose(); }}} disabled={!valid}
             style={{ padding:"9px 24px", borderRadius:8, border:"none", background:valid?"var(--amber)":"var(--bg-elevated)", color:valid?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:valid?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif" }}>
             Add Competitor
           </button>
@@ -10524,7 +12134,7 @@ function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
         <div>
           <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Type</label>
           <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-            {[{id:"scheduled",color:"var(--amber)"},{id:"newsletter",color:"#5cba6c"},{id:"draft",color:"var(--muted)"},{id:"idea",color:"var(--text-secondary)"}].map(t=>(
+            {[{id:"scheduled",color:"var(--amber)"},{id:"newsletter",color:"#7a9166"},{id:"draft",color:"var(--muted)"},{id:"idea",color:"var(--text-secondary)"}].map(t=>(
               <button key={t.id} onClick={()=>setForm(f=>({...f,type:t.id}))}
                 style={{ padding:"6px 14px", borderRadius:99, border:form.type===t.id?`1px solid ${t.color}`:"1px solid var(--border)", background:form.type===t.id?t.color+"22":"transparent", color:form.type===t.id?t.color:"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textTransform:"capitalize" }}>
                 {t.id}
@@ -10551,8 +12161,15 @@ export default function Dashboard({ user, workspace }) {
   const isMobile = useIsMobile();
   const [dark,            setDark]           = useState(true);
   const [activeTab,       setActiveTab]      = useState("posts");
+  // Scroll to top on every top-level tab switch — without this, if the user
+  // was scrolled down on one tab, switching to a shorter/differently-laid-out
+  // tab (e.g. Marketing) could leave them stranded mid-page, below the nav.
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, [activeTab]);
   const [postFilter,      setPostFilter]     = useState("all");
   const [researchTab,     setResearchTab]    = useState("competitors");
+  const [blogTab,         setBlogTab]        = useState("pipeline");
   const [aiTool,          setAiTool]         = useState("writer");
   const [settingsSection, setSettingsSection]= useState("general");
   const [showUpgrade,     setShowUpgrade]    = useState(false);
@@ -10563,7 +12180,9 @@ export default function Dashboard({ user, workspace }) {
   // ── Persistent state (localStorage)
   const [posts,       setPosts]       = useState(() => { try { const s = localStorage.getItem("bb_posts"); return s ? JSON.parse(s) : DEFAULT_POSTS; } catch { return DEFAULT_POSTS; } });
   const [competitors, setCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_competitors"); return s ? JSON.parse(s) : COMPETITORS; } catch { return COMPETITORS; } });
+  const [socialCompetitors, setSocialCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_social_competitors"); return s ? JSON.parse(s) : []; } catch { return []; } });
   const [inspiration, setInspiration] = useState(() => { try { const s = localStorage.getItem("bb_inspiration"); return s ? JSON.parse(s) : INSPIRATION; } catch { return INSPIRATION; } });
+  const [socialInspiration, setSocialInspiration] = useState(() => { try { const s = localStorage.getItem("bb_social_inspiration"); return s ? JSON.parse(s) : []; } catch { return []; } });
   const [calEvents,   setCalEvents]   = useState(() => { try { const s = localStorage.getItem("bb_cal_events"); return s ? JSON.parse(s) : CALENDAR_EVENTS; } catch { return CALENDAR_EVENTS; } });
   const [wsSettings,  setWsSettings]  = useState(() => { try { const s = localStorage.getItem("bb_ws_settings"); return s ? JSON.parse(s) : null; } catch { return null; } });
 
@@ -10622,6 +12241,50 @@ export default function Dashboard({ user, workspace }) {
       if (cloudBuffer && typeof cloudBuffer === "object" && cloudBuffer.apiKey) {
         saveBufferConfig(cloudBuffer);
       }
+      // Pull WordPress config
+      const cloudWordPress = await cloudGet("wordpress_config", userId);
+      if (cloudWordPress && typeof cloudWordPress === "object" && cloudWordPress.connected) {
+        saveWordPressConfig(cloudWordPress);
+      }
+      // Pull workspace logo
+      const cloudLogo = await cloudGet("workspace_logo", userId);
+      console.log("[logo] pulled from cloud:", cloudLogo ? `string, length ${cloudLogo.length}` : cloudLogo);
+      if (cloudLogo && typeof cloudLogo === "string") {
+        try { localStorage.setItem(LOGO_STORAGE, cloudLogo); } catch {}
+        window.dispatchEvent(new CustomEvent("bb-logo-updated", { detail: cloudLogo }));
+      }
+      // Pull user tier
+      const cloudTier = await cloudGet("user_tier", userId);
+      if (cloudTier && typeof cloudTier === "string" && cloudTier !== userTier) {
+        setUserTier(cloudTier);
+        saveUserTier(cloudTier);
+      }
+      // Pull trial start — use whichever is EARLIER, not newest, since a
+      // trial's start date should never move forward by opening the app on
+      // a device that hadn't seen the cloud value yet.
+      const cloudTrialStart = await cloudGet("trial_start", userId);
+      if (cloudTrialStart) {
+        const cloudTime = parseInt(cloudTrialStart, 10);
+        if (!isNaN(cloudTime) && cloudTime < trialStart) {
+          setTrialStart(cloudTime);
+          try { localStorage.setItem(TRIAL_STORAGE, String(cloudTime)); } catch {}
+        } else if (cloudTime > trialStart) {
+          cloudSet("trial_start", userId, String(trialStart));
+        }
+      }
+      // Pull social platform connection settings
+      const cloudSocialPlatforms = await cloudGet("social_platforms", userId);
+      if (cloudSocialPlatforms && typeof cloudSocialPlatforms === "object") {
+        try { localStorage.setItem(SOCIAL_PLATFORM_STORAGE, JSON.stringify(cloudSocialPlatforms)); } catch {}
+      }
+      // Pull calendar events — had zero cloud sync before, use whichever has
+      // more entries as a simple heuristic since events don't have a single
+      // shared "last modified" timestamp to compare directly.
+      const cloudCalEvents = await cloudGet("cal_events", userId);
+      if (Array.isArray(cloudCalEvents) && cloudCalEvents.length > calEvents.length) {
+        setCalEvents(cloudCalEvents);
+        try { localStorage.setItem("bb_cal_events", JSON.stringify(cloudCalEvents)); } catch {}
+      }
       setCloudSynced(true);
     })();
   }, []);
@@ -10667,11 +12330,39 @@ export default function Dashboard({ user, workspace }) {
   useEffect(() => { try { localStorage.setItem("bb_posts",       JSON.stringify(posts));       } catch {} }, [posts]);
   useEffect(() => { try { localStorage.setItem("bb_competitors", JSON.stringify(competitors)); } catch {} }, [competitors]);
   useEffect(() => { try { localStorage.setItem("bb_inspiration", JSON.stringify(inspiration)); } catch {} }, [inspiration]);
-  useEffect(() => { try { localStorage.setItem("bb_cal_events",  JSON.stringify(calEvents));  } catch {} }, [calEvents]);
+  useEffect(() => { try { localStorage.setItem("bb_social_inspiration", JSON.stringify(socialInspiration)); } catch {} }, [socialInspiration]);
+  useEffect(() => { try { localStorage.setItem("bb_social_competitors", JSON.stringify(socialCompetitors)); } catch {} }, [socialCompetitors]);
+  useEffect(() => {
+    try { localStorage.setItem("bb_cal_events", JSON.stringify(calEvents)); } catch {}
+    const uid = window.__bbUserId;
+    if (uid) cloudSaveDebounced("cal_events", uid, calEvents);
+  }, [calEvents]);
 
   // ── Modal state
   const [postEditorOpen,    setPostEditorOpen]    = useState(false);
   const [editingPost,       setEditingPost]       = useState(null);
+  const [pipelineInitialPost, setPipelineInitialPost] = useState(null);
+  const sendPostToPipeline = (post) => { setPipelineInitialPost(post); setActiveTab("blog"); setBlogTab("pipeline"); };
+
+  // One-time hand-off: if onboarding generated a personalized first post idea,
+  // load it straight into the Article Pipeline the moment they land here —
+  // this is the actual payoff moment, not just a static "you're all set" screen.
+  useEffect(() => {
+    if (workspace?.firstIdea?.title) {
+      sendPostToPipeline({
+        id: Date.now(),
+        title: workspace.firstIdea.title,
+        body: "",
+        category: "Culture",
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [socialPipelineHandoff, setSocialPipelineHandoff] = useState(null);
+  const sendArticleToSocialPipeline = (article) => {
+    setSocialPipelineHandoff({ title: article.title, source: "Blog article", headlineImageUrl: article.headlineImageUrl || null });
+    setActiveTab("social");
+  };
   const [addCompetitorOpen, setAddCompetitorOpen] = useState(false);
   const [addInspirationOpen,setAddInspirationOpen]= useState(false);
   const [calModalDay,       setCalModalDay]       = useState(null);
@@ -10688,18 +12379,24 @@ export default function Dashboard({ user, workspace }) {
 
   const saveCompetitor = (c) => setCompetitors(all => [...all, c]);
   const deleteCompetitor = (name) => setCompetitors(all => all.filter(c => c.name !== name));
+  const saveSocialCompetitor = (item) => setSocialCompetitors(all => [item, ...all]);
+  const deleteSocialCompetitor = (name) => setSocialCompetitors(all => all.filter(c => c.name !== name));
 
   const saveInspiration = (item) => setInspiration(all => [item, ...all]);
   const deleteInspiration = (id) => setInspiration(all => all.filter(i => i.id !== id));
+  const saveSocialInspiration = (item) => setSocialInspiration(all => [item, ...all]);
+  const deleteSocialInspiration = (id) => setSocialInspiration(all => all.filter(i => i.id !== id));
   const inspirationToDraft = (item) => {
     const newPost = { id:Date.now(), title:item.title, body:`Source: ${item.source}\n\nNotes: ${item.notes}\n\n`, category:"Culture", status:"draft", date:new Date().toISOString().split("T")[0], views:0 };
     setPosts(all => [newPost, ...all]);
     setEditingPost(newPost);
     setPostEditorOpen(true);
-    setActiveTab("posts");
+    setActiveTab("blog");
+    setBlogTab("posts");
   };
 
   const saveCalEvent = (ev) => setCalEvents(all => [...all, ev]);
+  const navigateToPosts = () => { setActiveTab("blog"); setBlogTab("posts"); };
   const deleteCalEvent = (idx) => setCalEvents(all => all.filter((_, i) => i !== idx));
 
   const [gscData,     setGscData]     = useState(loadGSCData);
@@ -10781,29 +12478,40 @@ export default function Dashboard({ user, workspace }) {
   const wsTagline = wsSettings?.tagline   || "Cast at Dawn. Sip at Dusk.";
   const connected = workspace?.connected  || false;
   const plan      = "operative";
-  const planLabel = "Operative";
+  const [userTier, setUserTier] = useState(loadUserTier);
+  const [trialStart, setTrialStart] = useState(getOrStartTrial);
+  const trialDaysRemaining = trialDaysLeft(trialStart);
+  const inTrial = trialDaysRemaining > 0;
+  // The free trial IS Scout access (scout is already the default tier for a
+  // new signup) — no functional tier elevation, this is purely a messaging +
+  // post-trial-gate concern, not a tier override. If someone has manually
+  // switched to Operative via the dev toggle, that stays respected regardless
+  // of trial status.
+  const tierConfig = TIER_CONFIG[userTier] || TIER_CONFIG.scout;
+  const planLabel = TIER_CONFIG[userTier]?.label || "Scout";
+  const changeTier = (tier) => { setUserTier(tier); saveUserTier(tier); };
   const isScout   = false;
-  const fixedGreen= "#5cba6c";
+  const fixedGreen= "#7a9166";
 
   const filteredPosts = posts.filter(p => postFilter==="all" ? true : p.status===postFilter);
 
   const theme = dark ? {
-    "--bg":"#0e0f11","--bg-surface":"#16171b","--bg-elevated":"#1c1d22","--bg-hover":"#22232a",
-    "--border":"#2a2b33","--text":"#e8e6e1","--text-secondary":"#8a8880",
-    "--amber":"#d4a054","--amber-glow":"rgba(212,160,84,0.12)",
-    "--green":"#5cba6c","--red":"#c75454","--muted":"#5c5b56",
-    "--sidebar-bg":"#111215",
+    "--bg":"#2b2620","--bg-surface":"#3a332a","--bg-elevated":"#443c30","--bg-hover":"#4d4436",
+    "--border":"#4a4234","--text":"#e8dfc9","--text-secondary":"#a89a80",
+    "--amber":"#a67c52","--amber-glow":"rgba(166,124,82,0.14)",
+    "--green":"#7a9166","--red":"#b3543a","--muted":"#6b5f4d",
+    "--sidebar-bg":"#221e19",
     "--font-display":"'Fraunces',serif","--font-body":"'DM Sans',sans-serif",
   } : {
-    "--bg":"#f5f2ec","--bg-surface":"#ffffff","--bg-elevated":"#faf8f4","--bg-hover":"#eeeae2",
-    "--border":"#ddd8ce","--text":"#1a1915","--text-secondary":"#6b6860",
-    "--amber":"#b8862e","--amber-glow":"rgba(184,134,46,0.1)",
-    "--green":"#3d8a4e","--red":"#b84040","--muted":"#9a9590",
-    "--sidebar-bg":"#eae6dc",
+    "--bg":"#f2ecdc","--bg-surface":"#faf6ea","--bg-elevated":"#efe8d4","--bg-hover":"#e6ddc4",
+    "--border":"#d8cca8","--text":"#2b2620","--text-secondary":"#6b5f4d",
+    "--amber":"#8a6a3d","--amber-glow":"rgba(138,106,61,0.1)",
+    "--green":"#5c7449","--red":"#963e28","--muted":"#9a8f75",
+    "--sidebar-bg":"#e6ddc4",
     "--font-display":"'Fraunces',serif","--font-body":"'DM Sans',sans-serif",
   };
 
-  const card    = { background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:24 };
+  const card    = { background:"var(--bg-surface)", backgroundImage: dark ? "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Cfilter id='n2'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n2)' opacity='0.1'/%3E%3C/svg%3E\")" : "none", border:"1px solid var(--border)", borderRadius:12, padding:24 };
   const btnP    = { padding:"8px 18px", border:"none", borderRadius:8, background:"var(--amber)", color:dark?"#0e0f11":"#fff", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" };
   const btnS    = { padding:"8px 16px", border:"1px solid var(--border)", borderRadius:8, background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" };
   const inputSt = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
@@ -10812,13 +12520,10 @@ export default function Dashboard({ user, workspace }) {
   const connectedSocial    = SOCIAL_PLATFORMS.filter(p => loadSocialConnections()[p.id]?.enabled).length;
 
   const TABS = [
-    { id:"pipeline",  label:"Pipeline",   icon:"◈", highlight:true },
-    { id:"posts",     label:"Posts",      icon:"▤" },
+    { id:"blog",      label:"Blog",       icon:"◈", highlight:true },
+    { id:"social",    label:"Marketing",  icon:"▣" },
     { id:"analytics", label:"Analytics",  icon:"◔" },
     { id:"calendar",  label:"Calendar",   icon:"▦" },
-    { id:"research",  label:"Research",   icon:"◎" },
-    { id:"ai",        label:"AI Tools",   icon:"✦" },
-    { id:"social",    label:"Marketing",  icon:"▣" },
     { id:"settings",  label:"Settings",   icon:"⚙" },
   ];
 
@@ -10828,15 +12533,16 @@ export default function Dashboard({ user, workspace }) {
     { id:"apikeys",    label:"API Keys"             },
     { id:"gsc",        label:"Search Console"       },
     { id:"meta",       label:"Facebook & Instagram" },
+    { id:"wordpress",  label:"WordPress"            },
     { id:"buffer",     label:"Buffer (Social)"      },
     { id:"social",     label:"Social Media"         },
-    { id:"wix",        label:"Wix Integration"      },
+    { id:"publish",    label:"Publishing"           },
     { id:"billing",    label:"Billing & Plan"       },
     { id:"account",    label:"Account"              },
   ];
 
   return (
-    <div className="bb-root" style={{...theme,fontFamily:"var(--font-body)",color:"var(--text)",background:"var(--bg)",minHeight:"100vh",display:"flex",fontSize:14,lineHeight:1.5}}>
+    <div className="bb-root" style={{...theme,fontFamily:"var(--font-body)",color:"var(--text)",background:"var(--bg)",backgroundImage: dark ? "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.1'/%3E%3C/svg%3E\")" : "none",minHeight:"100vh",display:"flex",fontSize:14,lineHeight:1.5}}>
       <style>{MOBILE_CSS}</style>
       <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;700;900&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
@@ -10908,11 +12614,7 @@ export default function Dashboard({ user, workspace }) {
           <div style={{fontSize:13,fontWeight:700,marginBottom:2}}>{wsName}</div>
           <div style={{fontSize:10,color:"var(--amber)",fontWeight:700,letterSpacing:"0.08em",textTransform:"uppercase"}}>{planLabel}</div>
           {wsUrl&&<div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{wsUrl}</div>}
-          <div style={{fontSize:10,marginTop:6,color:wixConnected?fixedGreen:"var(--muted)"}}>
-            <span style={{width:6,height:6,borderRadius:99,background:wixConnected?fixedGreen:"var(--muted)",display:"inline-block",marginRight:4}}/>
-            {wixConnected?"Wix Connected":"Wix Not Connected"}
-          </div>
-          <div style={{fontSize:10,marginTop:4,color:"var(--text-secondary)"}}>
+          <div style={{fontSize:10,marginTop:6,color:"var(--text-secondary)"}}>
             <span style={{color:fixedGreen}}>◈</span> {connectedProviders} AI · {connectedSocial} social
           </div>
           <div style={{fontSize:10,marginTop:4,color:cloudSynced?fixedGreen:"var(--muted)"}}>
@@ -10966,9 +12668,6 @@ export default function Dashboard({ user, workspace }) {
             </div>
           </div>
           <div style={{display:"flex",gap:8}}>
-            {wixConnected && (
-              <button style={btnS} onClick={()=>{setActiveTab("settings");setSettingsSection("wix");}}>↓ Sync Wix</button>
-            )}
             <button style={btnS} onClick={()=>{ const input = document.createElement("input"); input.type="file"; input.accept=".md,.txt,.html"; input.onchange = e => { const file = e.target.files[0]; if(!file) return; const reader = new FileReader(); reader.onload = ev => { const newPost = { id:Date.now(), title:file.name.replace(/\.[^/.]+$/,""), body:ev.target.result, category:"Culture", status:"draft", date:new Date().toISOString().split("T")[0], views:0 }; savePost(newPost); setEditingPost(newPost); setPostEditorOpen(true); }; reader.readAsText(file); }; input.click(); }}>Import</button>
             <button style={btnP} onClick={openNewPost}>+ New Post</button>
           </div>
@@ -10977,10 +12676,10 @@ export default function Dashboard({ user, workspace }) {
         {/* ── MOBILE BOTTOM NAV ── */}
         <nav className="bb-mobile-nav">
           {[
-            { id:"pipeline",  icon:"◈", label:"Pipeline" },
-            { id:"posts",     icon:"▤", label:"Posts"    },
+            { id:"blog",      icon:"◈", label:"Blog"    },
             { id:"social",    icon:"▣", label:"Market"   },
             { id:"analytics", icon:"◔", label:"Analytics"},
+            { id:"calendar",  icon:"▦", label:"Calendar" },
             { id:"settings",  icon:"⚙", label:"Settings" },
           ].map(t => (
             <button key={t.id} className={activeTab===t.id?"active":""} onClick={() => setActiveTab(t.id)}>
@@ -10990,11 +12689,21 @@ export default function Dashboard({ user, workspace }) {
           ))}
         </nav>
 
-        <div className="bb-main-content" style={{flex:1,overflow:"auto",padding:28}}>
+        <div className="bb-main-content" style={{flex:1,padding:28}}>
 
-          {/* ══ PIPELINE ══ */}
-          {activeTab==="pipeline"&&(
-            <ContentPipeline
+          {/* ══ BLOG ══ */}
+          {activeTab==="blog"&&(
+            <div>
+              <div style={{display:"flex",gap:4,marginBottom:24,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content"}}>
+                {[{id:"pipeline",label:"Article Pipeline",icon:"◈",highlight:true},{id:"posts",label:"Posts",icon:"▤"},{id:"research",label:"Research",icon:"◎"}].map(t=>(
+                  <button key={t.id} onClick={()=>setBlogTab(t.id)} style={{padding:"8px 16px",borderRadius:8,border:"none",background:blogTab===t.id?"var(--amber)":"transparent",color:blogTab===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:6}}>
+                    <span>{t.icon}</span>{t.label}
+                  </button>
+                ))}
+              </div>
+
+              {blogTab==="pipeline"&&(
+                <ContentPipeline
               posts={posts}
               inspiration={inspiration}
               competitors={competitors}
@@ -11011,12 +12720,16 @@ export default function Dashboard({ user, workspace }) {
               onProviderChange={handleProviderChange}
               onModelChange={handleModelChange}
               brandGuide={brandGuide}
+              initialPost={pipelineInitialPost}
+              onConsumedInitialPost={() => setPipelineInitialPost(null)}
+              onSendToSocialPipeline={sendArticleToSocialPipeline}
+              onNavigateToTab={setActiveTab}
+              onNavigateToPosts={navigateToPosts}
             />
-          )}
+              )}
 
-          {/* ══ POSTS ══ */}
-          {activeTab==="posts"&&(
-            <PostsTab
+              {blogTab==="posts"&&(
+                <PostsTab
               posts={posts}
               filteredPosts={filteredPosts}
               postFilter={postFilter}
@@ -11024,43 +12737,13 @@ export default function Dashboard({ user, workspace }) {
               setPosts={setPosts}
               savePost={savePost}
               openEditPost={openEditPost}
+              onSendToPipeline={sendPostToPipeline}
               card={card}
               btnP={btnP}
             />
-          )}
+              )}
 
-          {/* ══ ANALYTICS ══ */}
-          {activeTab==="analytics"&&(
-            <AnalyticsDashboard
-              posts={posts}
-              gscData={gscData}
-              metaConfig={metaConfig}
-              socialPosts={socialPosts}
-              dark={dark}
-              userId={userId}
-              onConnectGSC={()=>{ setActiveTab("settings"); setSettingsSection("gsc"); }}
-              onConnectMeta={()=>{ setActiveTab("settings"); setSettingsSection("meta"); }}
-              activeProvider={activeProvider}
-              activeModel={activeModel}
-              apiKeys={apiKeys}
-            />
-          )}
-
-          {/* ══ CALENDAR ══ */}
-          {activeTab==="calendar"&&(
-            <CalendarTab
-              calEvents={calEvents}
-              deleteCalEvent={deleteCalEvent}
-              setCalModalDay={setCalModalDay}
-              setCalModalOpen={setCalModalOpen}
-              btnP={btnP}
-              fixedGreen={fixedGreen}
-              dark={dark}
-            />
-          )}
-
-          {/* ══ RESEARCH ══ */}
-          {activeTab==="research"&&(
+              {blogTab==="research"&&(
             <div>
               <div style={{display:"flex",gap:4,marginBottom:24,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content"}}>
                 {[{id:"competitors",label:"Competitors",icon:"⊞"},{id:"tracker",label:"Post Tracker",icon:"◉"},{id:"inspiration",label:"Inspiration",icon:"◐"},{id:"ideas",label:"AI Ideas",icon:"✦"}].map(t=>(
@@ -11081,7 +12764,7 @@ export default function Dashboard({ user, workspace }) {
                   <div style={{...card,padding:0,overflow:"hidden"}}>
                     <table style={{width:"100%",borderCollapse:"collapse"}}>
                       <thead><tr style={{borderBottom:"1px solid var(--border)"}}>
-                        {["Competitor","DA","Frequency","Est. Traffic","Strengths","Threat"].map(h=>(
+                        {["Competitor","Frequency","Est. Traffic","Strengths","Threat"].map(h=>(
                           <th key={h} style={{textAlign:"left",padding:"12px 16px",fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)"}}>{h}</th>
                         ))}
                       </tr></thead>
@@ -11089,7 +12772,6 @@ export default function Dashboard({ user, workspace }) {
                         {competitors.map(c=>(
                           <tr key={c.name||c.id} style={{borderBottom:"1px solid var(--border)",cursor:"pointer"}} onMouseEnter={e=>e.currentTarget.style.background="var(--bg-hover)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                             <td style={{padding:"14px 16px"}}><div style={{fontWeight:600,fontSize:13}}>{c.name}</div><div style={{fontSize:11,color:"var(--text-secondary)"}}>{c.url}</div></td>
-                            <td style={{padding:"14px 16px",fontWeight:700,fontSize:14,color:"var(--amber)"}}>{c.da}</td>
                             <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{c.posts}</td>
                             <td style={{padding:"14px 16px",fontSize:12,fontWeight:600}}>{c.traffic}</td>
                             <td style={{padding:"14px 16px",fontSize:12,color:"var(--text-secondary)"}}>{c.strengths}</td>
@@ -11152,29 +12834,39 @@ export default function Dashboard({ user, workspace }) {
                 />
               )}
             </div>
+              )}
+            </div>
           )}
 
-          {/* ══ AI TOOLS ══ */}
-          {activeTab==="ai"&&(
-            <div>
-              <ProviderPicker
-                activeProvider={activeProvider}
-                activeModel={activeModel}
-                onProviderChange={handleProviderChange}
-                onModelChange={handleModelChange}
-                keys={apiKeys}
-              />
-              <div style={{display:"flex",gap:4,marginBottom:24,background:"var(--bg-surface)",borderRadius:10,padding:4,border:"1px solid var(--border)",width:"fit-content"}}>
-                {[{id:"writer",label:"Blog Writer",icon:"✍"},{id:"headline",label:"Headlines",icon:"✦"},{id:"seo",label:"SEO Optimizer",icon:"◉"}].map(t=>(
-                  <button key={t.id} onClick={()=>setAiTool(t.id)} style={{padding:"8px 16px",borderRadius:8,border:"none",background:aiTool===t.id?"var(--amber)":"transparent",color:aiTool===t.id?(dark?"#0e0f11":"#fff"):"var(--text-secondary)",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",gap:6}}>
-                    <span>{t.icon}</span>{t.label}
-                  </button>
-                ))}
-              </div>
-              {aiTool==="writer"  &&<AIWriter   wsName={wsName} activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys}/>}
-              {aiTool==="headline"&&<HeadlineGenerator          activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys}/>}
-              {aiTool==="seo"     &&<SEOOptimizer               activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys}/>}
-            </div>
+          {/* ══ ANALYTICS ══ */}
+          {activeTab==="analytics"&&(
+            <AnalyticsDashboard
+              posts={posts}
+              gscData={gscData}
+              metaConfig={metaConfig}
+              socialPosts={socialPosts}
+              dark={dark}
+              userId={userId}
+              onConnectGSC={()=>{ setActiveTab("settings"); setSettingsSection("gsc"); }}
+              onGSCDataLoaded={(data)=>{ setGscData(data); saveGSCData(data); }}
+              onConnectMeta={()=>{ setActiveTab("settings"); setSettingsSection("meta"); }}
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              apiKeys={apiKeys}
+            />
+          )}
+
+          {/* ══ CALENDAR ══ */}
+          {activeTab==="calendar"&&(
+            <CalendarTab
+              calEvents={calEvents}
+              deleteCalEvent={deleteCalEvent}
+              setCalModalDay={setCalModalDay}
+              setCalModalOpen={setCalModalOpen}
+              btnP={btnP}
+              fixedGreen={fixedGreen}
+              dark={dark}
+            />
           )}
 
           {/* ══ SOCIAL ══ */}
@@ -11197,6 +12889,16 @@ export default function Dashboard({ user, workspace }) {
                 onSaveSocialPost={saveSocialPost}
                 onDeleteSocialPost={deleteSocialPost}
                 userId={userId}
+                socialInspiration={socialInspiration}
+                onAddSocialInspiration={saveSocialInspiration}
+                onDeleteSocialInspiration={deleteSocialInspiration}
+                socialCompetitors={socialCompetitors}
+                onAddSocialCompetitor={saveSocialCompetitor}
+                onDeleteSocialCompetitor={deleteSocialCompetitor}
+                externalInitialIdea={socialPipelineHandoff}
+                onConsumedExternalInitialIdea={() => setSocialPipelineHandoff(null)}
+                tierConfig={tierConfig}
+                onAddCalEvent={saveCalEvent}
               />
             </MarketingErrorBoundary>
           )}
@@ -11231,7 +12933,7 @@ export default function Dashboard({ user, workspace }) {
                 )}
 
                 {settingsSection==="apikeys"&&(
-                  <APIKeysSettings apiKeys={apiKeys} onSave={setApiKeys}/>
+                  <APIKeysSettings apiKeys={apiKeys} onSave={setApiKeys} byokEnabled={tierConfig.byok}/>
                 )}
 
                 {settingsSection==="brand"&&(
@@ -11252,42 +12954,83 @@ export default function Dashboard({ user, workspace }) {
                   </div>
                 )}
 
-                {settingsSection==="buffer"&&(
-                  <BufferSettings />
+                {settingsSection==="wordpress"&&(
+                  <WordPressSettings />
                 )}
 
-                {settingsSection==="tiktok"&&( <BufferSettings /> )}
-                {settingsSection==="pinterest"&&( <BufferSettings /> )}
-                {settingsSection==="twitter"&&( <BufferSettings /> )}
-                {settingsSection==="reddit"&&( <BufferSettings /> )}
+                {settingsSection==="buffer"&&(
+                  tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="Buffer integration" />
+                )}
+
+                {settingsSection==="tiktok"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="TikTok posting (via Buffer)" /> )}
+                {settingsSection==="pinterest"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="Pinterest posting (via Buffer)" /> )}
+                {settingsSection==="twitter"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="X posting (via Buffer)" /> )}
+                {settingsSection==="reddit"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="Reddit posting (via Buffer)" /> )}
 
                 {settingsSection==="social"&&(
                   <SocialSettings/>
                 )}
 
-                {settingsSection==="wix"&&(
-                  <WixSyncPanel
-                    onSync={handleWixSync}
-                    onDisconnect={handleWixDisconnect}
-                    onConnect={() => setWixConnected(true)}
-                    currentPostCount={posts.length}
-                  />
+                {settingsSection==="publish"&&(
+                  <div>
+                    <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Publishing</h3>
+                    <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 20px", lineHeight:1.6 }}>
+                      Blog Bunker doesn't publish directly to a blog host yet. Write and finish your article in the Pipeline, then copy it and paste it into whichever blog host you use — WordPress, Wix, Squarespace, Ghost, or anywhere else — when you're ready to go live.
+                    </p>
+                    <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                      ✦ Direct social publishing to Facebook, Instagram, and other platforms via Buffer is already live — see <strong style={{color:"var(--text)"}}>Facebook & Instagram</strong> and <strong style={{color:"var(--text)"}}>Buffer (Social)</strong> in this menu. Direct blog-host publishing is still on the roadmap.
+                    </div>
+                  </div>
                 )}
 
                 {settingsSection==="billing"&&(
                   <div>
                     <h3 style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700,margin:"0 0 8px"}}>Billing & Plan</h3>
-                    <p style={{fontSize:13,color:"var(--text-secondary)",margin:"0 0 20px"}}>Current plan: <span style={{color:"var(--amber)",fontWeight:700}}>Operative</span></p>
-                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12}}>
-                      {PLANS.map(p=>(
-                        <div key={p.name} style={{padding:20,borderRadius:10,border:planLabel===p.name?"2px solid var(--amber)":"1px solid var(--border)",background:planLabel===p.name?"var(--amber-glow)":"var(--bg-elevated)",textAlign:"center"}}>
-                          <div style={{fontFamily:"var(--font-display)",fontSize:16,fontWeight:700,marginBottom:4}}>{p.name}</div>
-                          <div style={{fontSize:22,fontWeight:700,color:"var(--amber)",fontFamily:"var(--font-display)",marginBottom:12}}>{p.price}</div>
-                          {p.features.map((f,i)=><div key={i} style={{fontSize:12,color:"var(--text-secondary)",padding:"3px 0"}}>{f}</div>)}
-                          <button style={{...(planLabel===p.name?btnP:btnS),marginTop:14,width:"100%"}}>{planLabel===p.name?"Current Plan":"Upgrade"}</button>
+                    <p style={{fontSize:13,color:"var(--text-secondary)",margin:"0 0 12px"}}>Your plan: <span style={{color:"var(--amber)",fontWeight:700}}>{TIER_CONFIG[userTier]?.label || "Scout"}</span></p>
+
+                    {inTrial ? (
+                      <div style={{ padding:"14px 16px", borderRadius:10, background:"linear-gradient(135deg, var(--amber-glow), transparent)", border:"1px solid var(--amber)44", marginBottom:16 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:"var(--amber)", marginBottom:4 }}>🎉 Your first month is free</div>
+                        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
+                          Full Scout access, no credit card required — <strong style={{color:"var(--text)"}}>{trialDaysRemaining} day{trialDaysRemaining===1?"":"s"} left</strong>. You'll be asked to add payment before your trial ends to keep going.
                         </div>
-                      ))}
+                      </div>
+                    ) : (
+                      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--red)11", border:"1px solid var(--red)33", marginBottom:16 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:"var(--red)", marginBottom:4 }}>Your free month has ended</div>
+                        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
+                          Choose a plan below to keep going. (Real payment collection isn't live yet — for now, picking a plan just confirms your choice; we'll follow up before anything is ever charged.)
+                        </div>
+                      </div>
+                    )}
+
+                    <div style={{fontSize:11,color:"var(--muted)",padding:"8px 12px",borderRadius:6,background:"var(--bg-elevated)",border:"1px solid var(--border)",marginBottom:16}}>
+                      No payment processor is wired up yet — this switches your plan directly for testing. Once billing is built, this will be driven by your actual subscription instead.
                     </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12,marginBottom:24}}>
+                      {PLANS.map(p=>{
+                        const isCurrentSelection = (TIER_CONFIG[userTier]?.label || "Scout") === p.name;
+                        const tierKey = p.name.toLowerCase();
+                        const byokUnlocked = TIER_CONFIG[tierKey]?.byok;
+                        return (
+                        <div key={p.name} style={{padding:20,borderRadius:10,border:isCurrentSelection?"2px solid var(--amber)":"1px solid var(--border)",background:isCurrentSelection?"var(--amber-glow)":"var(--bg-elevated)",textAlign:"center"}}>
+                          <div style={{fontFamily:"var(--font-display)",fontSize:16,fontWeight:700,marginBottom:4}}>{p.name}</div>
+                          <div style={{fontSize:22,fontWeight:700,color:"var(--amber)",fontFamily:"var(--font-display)"}}>{p.price}</div>
+                          {p.byokPrice && (
+                            byokUnlocked ? (
+                              <div style={{fontSize:11,color:"#7a9166",marginBottom:12}}>or {p.byokPrice} with your own AI key</div>
+                            ) : (
+                              <div style={{fontSize:11,color:"var(--muted)",marginBottom:12}}>{p.byokPrice} with your own key — Operative and above</div>
+                            )
+                          )}
+                          {!p.byokPrice && <div style={{marginBottom:12}} />}
+                          {p.features.map((f,i)=><div key={i} style={{fontSize:12,color:"var(--text-secondary)",padding:"3px 0"}}>{f}</div>)}
+                          <button onClick={()=>changeTier(p.name.toLowerCase())} style={{...(isCurrentSelection?btnP:btnS),marginTop:14,width:"100%"}}>{isCurrentSelection?"Current Plan":`Switch to ${p.name}`}</button>
+                        </div>
+                        );
+                      })}
+                    </div>
+                    <UsagePanel tierConfig={tierConfig} userId={userId} />
                   </div>
                 )}
 
