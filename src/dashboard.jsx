@@ -3135,9 +3135,39 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       setSavedAt(data.savedAt);
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus(""), 2500);
+      const uid = window.__bbUserId;
+      if (uid) cloudSaveDebounced("pipeline_draft", uid, data);
     }, 1500);
     return () => clearTimeout(autosaveTimer.current);
   }, [stage, completed, brief, draft, enhance, social.posts, schedule, pipelinePostId]);
+
+  // Pull the cloud copy of the in-progress article draft on mount — lets
+  // work-in-progress resume on a different device. Skipped when an explicit
+  // hand-off (initialPost) is present — that should always win over silently
+  // resuming an old draft.
+  useEffect(() => {
+    if (initialPost) return;
+    const uid = window.__bbUserId;
+    if (!uid) return;
+    (async () => {
+      const cloud = await cloudGet("pipeline_draft", uid);
+      if (!cloud) return;
+      const cloudTime = cloud.savedAt ? new Date(cloud.savedAt).getTime() : 0;
+      const localTime = saved?.savedAt ? new Date(saved.savedAt).getTime() : 0;
+      if (cloudTime <= localTime) return; // local copy is already current or newer
+      setStage(cloud.stage || "brief");
+      setCompleted(cloud.completed || []);
+      setPipelinePostId(cloud.pipelinePostId || null);
+      setBrief(cloud.brief || { topic:"", angle:"", audience:"fly fishing and whiskey enthusiasts", keywords:"", inspiration:null });
+      setDraft(cloud.draft || { title:"", body:"", category:"Culture", tone:"literary" });
+      setEnhance(cloud.enhance || { metaTitle:"", metaDescription:"", primaryKeyword:"", suggestions:[], headlines:[], improved:"" });
+      setSocial(cloud.social || { posts:{}, images:{} });
+      setSchedule(cloud.schedule || { publishDate:new Date(Date.now()+86400000).toISOString().split("T")[0], publishTime:"09:00", publishToWix:wixConnected, addToCalendar:true, status:"scheduled" });
+      savePipelineDraft(cloud); // keep local copy in sync too
+      setSavedAt(cloud.savedAt);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load an article handed off from the Posts tab ("→ Pipeline" button) — skips
   // straight to the Enhance stage since the brief/draft are already written.
@@ -3881,7 +3911,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                   For hashtags, per-platform character checks, best-posting-times, and scheduling/publishing, send this article to the full Social Pipeline. The quick generator below is still here for a fast one-off caption.
                 </p>
               </div>
-              <button onClick={() => onSendToSocialPipeline && onSendToSocialPipeline({ title: draft.title, body: draft.body, headlineImageUrl: draft.headlineImageUrl })}
+              <button onClick={() => onSendToSocialPipeline && onSendToSocialPipeline({ title: draft.title, body: draft.body, metaDescription: enhance.metaDescription, headlineImageUrl: draft.headlineImageUrl })}
                 disabled={!draft.title.trim()}
                 style={{ padding:"10px 20px", borderRadius:8, border:"none", background:"var(--amber)", color:"#0e0f11", fontSize:13, fontWeight:700, cursor:draft.title.trim()?"pointer":"not-allowed", fontFamily:"var(--font-body)", whiteSpace:"nowrap", opacity:draft.title.trim()?1:0.5 }}>
                 → Send to Social Pipeline
@@ -5995,7 +6025,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     if (!initialIdea) return;
     setStage("idea");
     setCompleted([]);
-    setIdea({ topic: initialIdea.title || "", platforms:["instagram"], type:"photo", inspirationSource: initialIdea.source || null });
+    setIdea({ topic: initialIdea.concept || initialIdea.title || "", platforms:["instagram"], type:"photo", inspirationSource: initialIdea.source || null });
     setCaptions({});
     setHashtags({ sets:null, selected:"", perPlatform:{} });
     setImageData({
@@ -12223,6 +12253,38 @@ export default function Dashboard({ user, workspace }) {
         try { localStorage.setItem(LOGO_STORAGE, cloudLogo); } catch {}
         window.dispatchEvent(new CustomEvent("bb-logo-updated", { detail: cloudLogo }));
       }
+      // Pull user tier
+      const cloudTier = await cloudGet("user_tier", userId);
+      if (cloudTier && typeof cloudTier === "string" && cloudTier !== userTier) {
+        setUserTier(cloudTier);
+        saveUserTier(cloudTier);
+      }
+      // Pull trial start — use whichever is EARLIER, not newest, since a
+      // trial's start date should never move forward by opening the app on
+      // a device that hadn't seen the cloud value yet.
+      const cloudTrialStart = await cloudGet("trial_start", userId);
+      if (cloudTrialStart) {
+        const cloudTime = parseInt(cloudTrialStart, 10);
+        if (!isNaN(cloudTime) && cloudTime < trialStart) {
+          setTrialStart(cloudTime);
+          try { localStorage.setItem(TRIAL_STORAGE, String(cloudTime)); } catch {}
+        } else if (cloudTime > trialStart) {
+          cloudSet("trial_start", userId, String(trialStart));
+        }
+      }
+      // Pull social platform connection settings
+      const cloudSocialPlatforms = await cloudGet("social_platforms", userId);
+      if (cloudSocialPlatforms && typeof cloudSocialPlatforms === "object") {
+        try { localStorage.setItem(SOCIAL_PLATFORM_STORAGE, JSON.stringify(cloudSocialPlatforms)); } catch {}
+      }
+      // Pull calendar events — had zero cloud sync before, use whichever has
+      // more entries as a simple heuristic since events don't have a single
+      // shared "last modified" timestamp to compare directly.
+      const cloudCalEvents = await cloudGet("cal_events", userId);
+      if (Array.isArray(cloudCalEvents) && cloudCalEvents.length > calEvents.length) {
+        setCalEvents(cloudCalEvents);
+        try { localStorage.setItem("bb_cal_events", JSON.stringify(cloudCalEvents)); } catch {}
+      }
       setCloudSynced(true);
     })();
   }, []);
@@ -12270,7 +12332,11 @@ export default function Dashboard({ user, workspace }) {
   useEffect(() => { try { localStorage.setItem("bb_inspiration", JSON.stringify(inspiration)); } catch {} }, [inspiration]);
   useEffect(() => { try { localStorage.setItem("bb_social_inspiration", JSON.stringify(socialInspiration)); } catch {} }, [socialInspiration]);
   useEffect(() => { try { localStorage.setItem("bb_social_competitors", JSON.stringify(socialCompetitors)); } catch {} }, [socialCompetitors]);
-  useEffect(() => { try { localStorage.setItem("bb_cal_events",  JSON.stringify(calEvents));  } catch {} }, [calEvents]);
+  useEffect(() => {
+    try { localStorage.setItem("bb_cal_events", JSON.stringify(calEvents)); } catch {}
+    const uid = window.__bbUserId;
+    if (uid) cloudSaveDebounced("cal_events", uid, calEvents);
+  }, [calEvents]);
 
   // ── Modal state
   const [postEditorOpen,    setPostEditorOpen]    = useState(false);
@@ -12294,7 +12360,14 @@ export default function Dashboard({ user, workspace }) {
   }, []);
   const [socialPipelineHandoff, setSocialPipelineHandoff] = useState(null);
   const sendArticleToSocialPipeline = (article) => {
-    setSocialPipelineHandoff({ title: article.title, source: "Blog article", headlineImageUrl: article.headlineImageUrl || null });
+    // Build a real "concept" for the topic field, not just the bare title —
+    // prefer the SEO meta description (already a concise, well-crafted
+    // summary from the Enhance stage), fall back to a short excerpt of the
+    // body, then the title alone as a last resort.
+    const bodyExcerpt = (article.body || "").replace(/[#*_>`]/g, "").trim().split(/\s+/).slice(0, 30).join(" ");
+    const concept = article.metaDescription?.trim()
+      || (bodyExcerpt ? `${article.title} — ${bodyExcerpt}${bodyExcerpt.length < (article.body||"").length ? "…" : ""}` : article.title);
+    setSocialPipelineHandoff({ title: article.title, concept, source: "Blog article", headlineImageUrl: article.headlineImageUrl || null });
     setActiveTab("social");
   };
   const [addCompetitorOpen, setAddCompetitorOpen] = useState(false);
@@ -12413,7 +12486,7 @@ export default function Dashboard({ user, workspace }) {
   const connected = workspace?.connected  || false;
   const plan      = "operative";
   const [userTier, setUserTier] = useState(loadUserTier);
-  const [trialStart] = useState(getOrStartTrial);
+  const [trialStart, setTrialStart] = useState(getOrStartTrial);
   const trialDaysRemaining = trialDaysLeft(trialStart);
   const inTrial = trialDaysRemaining > 0;
   // The free trial IS Scout access (scout is already the default tier for a
