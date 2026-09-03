@@ -662,12 +662,9 @@ const TIER_CONFIG = {
   operative: { label:"Operative", wordsPerMonth:60000, imagesPerMonth:100, byok:true,  buffer:true,  socialPlatforms:["facebook","instagram","tiktok","twitter","pinterest","reddit"] },
 };
 const TIER_STORAGE = "bb_user_tier";
-function loadUserTier() { try { return localStorage.getItem(TIER_STORAGE) || "scout"; } catch { return "scout"; } }
-function saveUserTier(tier) {
-  try { localStorage.setItem(TIER_STORAGE, tier); } catch {}
-  const uid = window.__bbUserId;
-  if (uid) cloudSet("user_tier", uid, tier);
-}
+const userTierStore = createPersistedStore(TIER_STORAGE, "user_tier", "scout");
+function loadUserTier() { return userTierStore.load(); }
+function saveUserTier(tier) { userTierStore.save(tier, { debounce: false }); }
 
 // ─── FREE TRIAL (first 30 days) ───────────────────────────────────────────────
 // New users get full Operative-tier access for their first month, regardless
@@ -678,14 +675,16 @@ function saveUserTier(tier) {
 // integration can plug into rather than something to rebuild from scratch.
 const TRIAL_STORAGE = "bb_trial_start";
 const TRIAL_DAYS = 30;
+// "earliest-wins": a trial's start date should never move forward — opening
+// the app on a device that hadn't yet seen the cloud value must never reset
+// or extend the trial by creating a later start date.
+const trialStartStore = createPersistedStore(TRIAL_STORAGE, "trial_start", null, { strategy: "earliest-wins" });
 function getOrStartTrial() {
   try {
-    let start = localStorage.getItem(TRIAL_STORAGE);
+    let start = trialStartStore.load();
     if (!start) {
       start = String(Date.now());
-      localStorage.setItem(TRIAL_STORAGE, start);
-      const uid = window.__bbUserId;
-      if (uid) cloudSet("trial_start", uid, start);
+      trialStartStore.save(start, { debounce: false });
     }
     return parseInt(start, 10);
   } catch { return Date.now(); }
@@ -3172,6 +3171,8 @@ function savePipelineDraft(data) {
 }
 function clearPipelineDraft() {
   try { localStorage.removeItem(PIPELINE_STORAGE); } catch {}
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("pipeline_draft", uid, null);
 }
 
 function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null, initialPost = null, onConsumedInitialPost = null, onSendToSocialPipeline = null, onNavigateToTab = null, onNavigateToPosts = null }) {
@@ -3547,8 +3548,8 @@ Titles and descriptions MUST be under their character limits. Score each on: key
 
       // Add to calendar
       if (schedule.addToCalendar) {
-        const day = new Date(schedule.publishDate).getDate();
-        onAddCalEvent({ title: finalPost.title, type: schedule.status === "published" ? "scheduled" : "draft", day });
+        const pubDate = new Date(schedule.publishDate);
+        onAddCalEvent({ title: finalPost.title, type: schedule.status === "published" ? "published" : schedule.status === "scheduled" ? "scheduled" : "draft", day: pubDate.getDate(), month: pubDate.getMonth(), year: pubDate.getFullYear() });
       }
 
       // Push to Wix via Velo HTTP function
@@ -4182,10 +4183,11 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                         };
                         onSavePost(finalPost);
                         if (schedule.addToCalendar) {
-                          const day = new Date(finalPost.date).getDate();
-                          onAddCalEvent({ title: finalPost.title, type: finalPost.status, day });
+                          const pubDate = new Date(finalPost.date);
+                          onAddCalEvent({ title: finalPost.title, type: finalPost.status, day: pubDate.getDate(), month: pubDate.getMonth(), year: pubDate.getFullYear() });
                         }
                         markDone("publish");
+                        clearPipelineDraft();
                         // Copy with links preserved — rich HTML for editors that accept
                         // it (real clickable hyperlinks), plain text with visible (url)
                         // fallback otherwise. Previously this stripped links to bare text,
@@ -4268,10 +4270,11 @@ Titles and descriptions MUST be under their character limits. Score each on: key
                                 };
                                 onSavePost(finalPost);
                                 if (schedule.addToCalendar) {
-                                  const day = new Date(finalPost.date).getDate();
-                                  onAddCalEvent({ title: finalPost.title, type: finalPost.status, day });
+                                  const pubDate = new Date(finalPost.date);
+                                  onAddCalEvent({ title: finalPost.title, type: finalPost.status, day: pubDate.getDate(), month: pubDate.getMonth(), year: pubDate.getFullYear() });
                                 }
                                 markDone("publish");
+                                clearPipelineDraft();
                                 setSuccess(`✓ ${existingWpPostId ? "Updated" : "Published"} on WordPress — ${data.url}`);
                               } catch(e) {
                                 setError(`WordPress: ${e.message}`);
@@ -4343,7 +4346,7 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
     e.day === day && (e.month === undefined || (e.month === calMonth && e.year === calYear))
   );
 
-  const tc = { scheduled:"var(--amber)", newsletter:fixedGreen, draft:"var(--muted)", idea:"var(--text-secondary)" };
+  const tc = { scheduled:"var(--amber)", published:fixedGreen, newsletter:"#4a7ba6", draft:"var(--muted)", idea:"var(--text-secondary)" };
 
   return (
     <div>
@@ -4355,7 +4358,7 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
           <button onClick={goToday} style={{padding:"5px 12px",borderRadius:6,border:"1px solid var(--border)",background:"transparent",color:"var(--text-secondary)",fontSize:11,cursor:"pointer",fontFamily:"'DM Sans',sans-serif"}}>Today</button>
         </div>
         <div style={{display:"flex",gap:12,alignItems:"center"}}>
-          {[{color:"var(--amber)",l:"Scheduled"},{color:fixedGreen,l:"Newsletter"},{color:"var(--muted)",l:"Draft"},{color:"var(--text-secondary)",l:"Idea"}].map(x=>(
+          {[{color:"var(--amber)",l:"Scheduled"},{color:fixedGreen,l:"Published"},{color:"#4a7ba6",l:"Newsletter"},{color:"var(--muted)",l:"Draft"},{color:"var(--text-secondary)",l:"Idea"}].map(x=>(
             <div key={x.l} style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"var(--text-secondary)"}}>
               <span style={{width:8,height:8,borderRadius:99,background:x.color,display:"inline-block"}}/>{x.l}
             </div>
@@ -5979,7 +5982,11 @@ Mix platforms across instagram, tiktok, facebook, twitter. Be concise — brevit
 const SOCIAL_PIPELINE_STORAGE = "bb_social_pipeline_draft";
 function loadSocialPipelineDraft() { try { return JSON.parse(localStorage.getItem(SOCIAL_PIPELINE_STORAGE) || "null"); } catch { return null; } }
 function saveSocialPipelineDraft(d) { try { localStorage.setItem(SOCIAL_PIPELINE_STORAGE, JSON.stringify(d)); } catch {} }
-function clearSocialPipelineDraft() { try { localStorage.removeItem(SOCIAL_PIPELINE_STORAGE); } catch {} }
+function clearSocialPipelineDraft() {
+  try { localStorage.removeItem(SOCIAL_PIPELINE_STORAGE); } catch {}
+  const uid = window.__bbUserId;
+  if (uid) cloudSet("social_pipeline_draft", uid, null);
+}
 
 // ─── SOCIAL POSTS STORE ───────────────────────────────────────────────────────
 const SOCIAL_POSTS_STORAGE = "bb_social_posts";
@@ -10472,12 +10479,9 @@ const MOBILE_CSS = `
 // ─── WORDPRESS SETTINGS ──────────────────────────────────────────────────────
 
 const WORDPRESS_STORAGE = "bb_wordpress_config";
-function loadWordPressConfig() { try { return JSON.parse(localStorage.getItem(WORDPRESS_STORAGE) || "{}"); } catch { return {}; } }
-function saveWordPressConfig(d) {
-  try { localStorage.setItem(WORDPRESS_STORAGE, JSON.stringify(d)); } catch {}
-  const uid = window.__bbUserId;
-  if (uid) cloudSet("wordpress_config", uid, d);
-}
+const wordPressStore = createPersistedStore(WORDPRESS_STORAGE, "wordpress_config", {});
+function loadWordPressConfig() { return wordPressStore.load(); }
+function saveWordPressConfig(d) { wordPressStore.save(d, { debounce: false }); }
 
 function WordPressSettings() {
   const [config,      setConfig]      = useState(loadWordPressConfig);
@@ -10572,12 +10576,9 @@ function WordPressSettings() {
 // ─── BUFFER SETTINGS ─────────────────────────────────────────────────────────
 
 const BUFFER_STORAGE = "bb_buffer_config";
-function loadBufferConfig() { try { return JSON.parse(localStorage.getItem(BUFFER_STORAGE) || "{}"); } catch { return {}; } }
-function saveBufferConfig(d) {
-  try { localStorage.setItem(BUFFER_STORAGE, JSON.stringify(d)); } catch {}
-  const uid = window.__bbUserId;
-  if (uid) cloudSet("buffer_config", uid, d);
-}
+const bufferStore = createPersistedStore(BUFFER_STORAGE, "buffer_config", {});
+function loadBufferConfig() { return bufferStore.load(); }
+function saveBufferConfig(d) { bufferStore.save(d, { debounce: false }); }
 
 function BufferSettings() {
   const [config,   setConfig]   = useState(loadBufferConfig);
@@ -10829,12 +10830,9 @@ function BufferSettings() {
 
 // Keep old SocialPlatformSettings as a thin wrapper that redirects to Buffer
 const SOCIAL_PLATFORM_STORAGE = "bb_social_platforms";
-function loadSocialPlatforms() { try { return JSON.parse(localStorage.getItem(SOCIAL_PLATFORM_STORAGE) || "{}"); } catch { return {}; } }
-function saveSocialPlatforms(d) {
-  try { localStorage.setItem(SOCIAL_PLATFORM_STORAGE, JSON.stringify(d)); } catch {}
-  const uid = window.__bbUserId;
-  if (uid) cloudSet("social_platforms", uid, d);
-}
+const socialPlatformsStore = createPersistedStore(SOCIAL_PLATFORM_STORAGE, "social_platforms", {});
+function loadSocialPlatforms() { return socialPlatformsStore.load(); }
+function saveSocialPlatforms(d) { socialPlatformsStore.save(d, { debounce: false }); }
 
 function SocialPlatformSettings() {
   return (
@@ -12327,46 +12325,34 @@ export default function Dashboard({ user, workspace }) {
         setMetaConfig(cloudMeta);
       }
       // Pull Buffer config
-      const cloudBuffer = await cloudGet("buffer_config", userId);
-      if (cloudBuffer && typeof cloudBuffer === "object" && cloudBuffer.apiKey) {
-        saveBufferConfig(cloudBuffer);
-      }
+      const cloudBuffer = await bufferStore.pullFromCloud(userId, loadBufferConfig());
+      if (cloudBuffer?.apiKey) { /* already saved locally by pullFromCloud */ }
       // Pull WordPress config
-      const cloudWordPress = await cloudGet("wordpress_config", userId);
-      if (cloudWordPress && typeof cloudWordPress === "object" && cloudWordPress.connected) {
-        saveWordPressConfig(cloudWordPress);
-      }
+      const cloudWordPress = await wordPressStore.pullFromCloud(userId, loadWordPressConfig());
+      if (cloudWordPress?.connected) { /* already saved locally by pullFromCloud */ }
       // Pull workspace logo
-      const cloudLogo = await cloudGet("workspace_logo", userId);
+      const cloudLogo = await logoStore.pullFromCloud(userId, loadLogo());
       console.log("[logo] pulled from cloud:", cloudLogo ? `string, length ${cloudLogo.length}` : cloudLogo);
       if (cloudLogo && typeof cloudLogo === "string") {
-        try { localStorage.setItem(LOGO_STORAGE, cloudLogo); } catch {}
         window.dispatchEvent(new CustomEvent("bb-logo-updated", { detail: cloudLogo }));
       }
       // Pull user tier
-      const cloudTier = await cloudGet("user_tier", userId);
-      if (cloudTier && typeof cloudTier === "string" && cloudTier !== userTier) {
-        setUserTier(cloudTier);
-        saveUserTier(cloudTier);
-      }
-      // Pull trial start — use whichever is EARLIER, not newest, since a
-      // trial's start date should never move forward by opening the app on
-      // a device that hadn't seen the cloud value yet.
-      const cloudTrialStart = await cloudGet("trial_start", userId);
+      const cloudTier = await userTierStore.pullFromCloud(userId, userTier);
+      if (cloudTier && cloudTier !== userTier) setUserTier(cloudTier);
+      // Pull trial start — earliest-wins strategy lives in the store itself
+      const cloudTrialStart = await trialStartStore.pullFromCloud(userId, String(trialStart));
       if (cloudTrialStart) {
-        const cloudTime = parseInt(cloudTrialStart, 10);
-        if (!isNaN(cloudTime) && cloudTime < trialStart) {
-          setTrialStart(cloudTime);
-          try { localStorage.setItem(TRIAL_STORAGE, String(cloudTime)); } catch {}
-        } else if (cloudTime > trialStart) {
+        setTrialStart(parseInt(cloudTrialStart, 10));
+      } else {
+        // Local was earlier than cloud (or cloud didn't win) — make sure the
+        // cloud value matches what we're actually using, same as before.
+        const rawCloudTrial = await cloudGet("trial_start", userId);
+        if (rawCloudTrial && parseInt(rawCloudTrial, 10) > trialStart) {
           cloudSet("trial_start", userId, String(trialStart));
         }
       }
       // Pull social platform connection settings
-      const cloudSocialPlatforms = await cloudGet("social_platforms", userId);
-      if (cloudSocialPlatforms && typeof cloudSocialPlatforms === "object") {
-        try { localStorage.setItem(SOCIAL_PLATFORM_STORAGE, JSON.stringify(cloudSocialPlatforms)); } catch {}
-      }
+      await socialPlatformsStore.pullFromCloud(userId, loadSocialPlatforms());
       // Pull calendar events — had zero cloud sync before, use whichever has
       // more entries as a simple heuristic since events don't have a single
       // shared "last modified" timestamp to compare directly.
