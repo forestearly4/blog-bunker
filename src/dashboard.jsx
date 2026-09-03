@@ -3215,8 +3215,15 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const [saveStatus, setSaveStatus] = useState(""); // "saving" | "saved" | ""
   const autosaveTimer = useRef(null);
 
-  // Debounced auto-save — waits 1.5s after last change before writing
+  // Debounced auto-save — waits 1.5s after last change before writing.
+  // Skips entirely once the post has been published — otherwise, marking
+  // "publish" as complete changes `completed` (a dependency below), which
+  // re-triggers this very effect right after clearPipelineDraft() just wiped
+  // storage, silently re-saving the still-populated state and undoing the
+  // clear every single time. This was the real bug behind "pipeline doesn't
+  // start fresh" — the clear was correct, but got immediately overwritten.
   useEffect(() => {
+    if (completed.includes("publish")) return;
     if (!brief.topic && !draft.title && !draft.body) return;
     setSaveStatus("saving");
     clearTimeout(autosaveTimer.current);
@@ -6181,7 +6188,12 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   // Auto-save draft — local immediately, cloud debounced so it can be picked
   // up on another device (this was localStorage-only before, the real gap
   // behind "doesn't pick up where I left off" on a different computer).
+  // Skips once published — otherwise marking "publish" complete changes
+  // `completed` (a dependency below), re-triggering this effect right after
+  // clearSocialPipelineDraft() just wiped storage, silently undoing the
+  // clear by re-saving the still-populated state every time.
   useEffect(() => {
+    if (completed.includes("publish")) return;
     if (!idea.topic && Object.keys(captions).length === 0) return;
     const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url: imageData.url?.startsWith("https://") ? imageData.url : null }, schedule, editingSocialPostId, savedAt:new Date().toISOString() };
     saveSocialPipelineDraft(data);
