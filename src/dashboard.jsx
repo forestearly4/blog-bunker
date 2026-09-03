@@ -90,6 +90,102 @@ async function cloudSet(key, userId, value) {
   }
 }
 
+// ─── CENTRALIZED SETTINGS STORE ──────────────────────────────────────────────
+// One factory replaces the old pattern of ~21 individually hand-written
+// load/save function pairs — the exact inconsistency that repeatedly caused
+// real bugs (a working save with no pull, or no cloud sync at all, going
+// unnoticed until a user reported a device not matching). Every setting
+// built with this factory gets local storage, debounced cloud sync, and a
+// cloud-pull-on-mount in the SAME, tested way — impossible to accidentally
+// build one without the other, since there's only one path to define a store.
+//
+// Usage for a plain settings object (most cases):
+//   const wpStore = createPersistedStore("wp_config", "wordpress_config", {});
+//   wpStore.load()              // synchronous local read, for initial state
+//   wpStore.save(newValue)      // writes local immediately + cloud debounced
+//   await wpStore.pullFromCloud(userId, currentLocalValue)
+//     // returns the cloud value if it should win (see `strategy` below),
+//     // or null if the local value should be kept as-is
+//
+// `strategy` controls how a cloud pull is reconciled against the local value:
+//   "cloud-wins"    (default) — cloud value always overrides local if present.
+//                    Right for simple settings with no meaningful conflict
+//                    (a saved config either exists or doesn't).
+//   "newest-wins"   — compares a `savedAt` ISO timestamp field on both
+//                    values, keeps whichever is newer. Right for drafts.
+//   "earliest-wins" — keeps whichever came first (e.g. trial_start), so
+//                    opening the app on a new device can never accidentally
+//                    move a date that should only ever be set once.
+//   (value, key) => boolean — custom: return true if the cloud value should
+//                    replace local.
+function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cloud-wins" } = {}) {
+  const load = () => {
+    try {
+      const raw = localStorage.getItem(localKey);
+      if (raw == null) return defaultValue;
+      try { return JSON.parse(raw); }
+      catch { return raw; } // pre-existing raw (non-JSON) value from before migration to this store
+    } catch { return defaultValue; }
+  };
+  const saveLocal = (value) => {
+    try { localStorage.setItem(localKey, JSON.stringify(value)); } catch {}
+  };
+  const save = (value, { debounce = true } = {}) => {
+    saveLocal(value);
+    const uid = window.__bbUserId;
+    if (!uid) return;
+    if (debounce) cloudSaveDebounced(cloudKey, uid, value);
+    else cloudSet(cloudKey, uid, value);
+  };
+  const shouldCloudWin = (cloudValue, localValue) => {
+    if (cloudValue == null) return false;
+    if (typeof strategy === "function") return strategy(cloudValue, localValue);
+    if (strategy === "newest-wins") {
+      const cloudTime = cloudValue?.savedAt ? new Date(cloudValue.savedAt).getTime() : 0;
+      const localTime = localValue?.savedAt ? new Date(localValue.savedAt).getTime() : 0;
+      return cloudTime > localTime;
+    }
+    if (strategy === "earliest-wins") {
+      const cloudTime = typeof cloudValue === "number" ? cloudValue : parseInt(cloudValue, 10);
+      const localTime = typeof localValue === "number" ? localValue : parseInt(localValue, 10);
+      if (isNaN(cloudTime)) return false;
+      return isNaN(localTime) || cloudTime < localTime;
+    }
+    return true; // "cloud-wins"
+  };
+  const pullFromCloud = async (userId, localValue) => {
+    if (!userId) return null;
+    const cloudValue = await cloudGet(cloudKey, userId);
+    if (!shouldCloudWin(cloudValue, localValue)) return null;
+    saveLocal(cloudValue);
+    return cloudValue;
+  };
+  return { load, save, pullFromCloud, localKey, cloudKey };
+}
+
+// React hook wrapper — for a component that wants live, auto-syncing state
+// instead of manually managing load/save/pull. Handles the initial local
+// read, the effect that debounce-saves on every change, and the mount-time
+// cloud pull, all consistently. `skipCloudPull` lets an explicit hand-off
+// (e.g. loading a specific existing post to edit) take priority over
+// resuming a previously-saved draft — pass a value that's truthy when such
+// a hand-off is in progress.
+function usePersistedState(store, { skipCloudPull = false } = {}) {
+  const [value, setValue] = useState(store.load);
+  useEffect(() => { store.save(value); }, [value]);
+  useEffect(() => {
+    if (skipCloudPull) return;
+    const uid = window.__bbUserId;
+    if (!uid) return;
+    (async () => {
+      const cloudValue = await store.pullFromCloud(uid, store.load());
+      if (cloudValue != null) setValue(cloudValue);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return [value, setValue];
+}
+
 // Debounced cloud save — avoids hammering the API on every keystroke
 const cloudSaveTimers = {};
 function cloudSaveDebounced(key, userId, value, delay = 1500) {
@@ -2527,17 +2623,11 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
 // ─── SETTINGS: GENERAL ───────────────────────────────────────────────────────
 
 const LOGO_STORAGE = "bb_workspace_logo";
-function loadLogo() { try { return localStorage.getItem(LOGO_STORAGE) || null; } catch { return null; } }
+const logoStore = createPersistedStore(LOGO_STORAGE, "workspace_logo", null);
+function loadLogo() { return logoStore.load(); }
 async function saveLogo(data) {
-  try { localStorage.setItem(LOGO_STORAGE, data); } catch {}
-  const uid = window.__bbUserId;
-  console.log("[logo] saveLogo called, userId:", uid, "data length:", data?.length);
-  if (uid) {
-    const ok = await cloudSet("workspace_logo", uid, data);
-    console.log("[logo] cloudSet result:", ok);
-  } else {
-    console.log("[logo] NOT saved to cloud — window.__bbUserId was not set at save time");
-  }
+  console.log("[logo] saveLogo called, userId:", window.__bbUserId, "data length:", data?.length);
+  logoStore.save(data, { debounce: false });
 }
 
 function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
