@@ -3177,7 +3177,8 @@ function clearPipelineDraft() {
 
 function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null, initialPost = null, onConsumedInitialPost = null, onSendToSocialPipeline = null, onNavigateToTab = null, onNavigateToPosts = null }) {
   const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
-  const saved = loadPipelineDraft();
+  let saved = loadPipelineDraft();
+  if (saved?.completed?.includes("publish")) saved = null; // never resume an already-published draft
   const [stage,     setStage]    = useState(saved?.stage     || "brief");
   const [completed, setCompleted]= useState(saved?.completed || []);
   const [pipelinePostId, setPipelinePostId] = useState(saved?.pipelinePostId || null); // tracks the original post id when editing an existing article, so re-publishing updates it instead of creating a duplicate
@@ -3250,6 +3251,14 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     (async () => {
       const cloud = await cloudGet("pipeline_draft", uid);
       if (!cloud) return;
+      // A published draft should NEVER be resurrected, no matter what —
+      // this guards against a real race where clearPipelineDraft()'s cloud
+      // clear (fire-and-forget, not awaited) hasn't finished processing on
+      // the server yet by the time this pull runs, which would otherwise
+      // silently bring back the exact "completed" post this was supposed to
+      // clear. Checking the actual content is robust regardless of timing;
+      // waiting for the clear request to "probably" finish in time is not.
+      if (cloud.completed?.includes("publish")) return;
       const cloudTime = cloud.savedAt ? new Date(cloud.savedAt).getTime() : 0;
       const localTime = saved?.savedAt ? new Date(saved.savedAt).getTime() : 0;
       if (cloudTime <= localTime) return; // local copy is already current or newer
@@ -6063,6 +6072,7 @@ function SocialPipelineProgress({ stage, setStage, completed }) {
 
 function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null, editPost = null, onConsumedEditPost = null }) {
   let saved = loadSocialPipelineDraft();
+  if (saved?.completed?.includes("publish")) saved = null; // never resume an already-published draft
 
   // Migrate old single-platform draft schema (idea.platform: string) to new multi-platform (idea.platforms: array)
   if (saved?.idea && !Array.isArray(saved.idea.platforms)) {
@@ -6159,6 +6169,10 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     (async () => {
       const cloud = await cloudGet("social_pipeline_draft", uid);
       if (!cloud) return;
+      // A published post should NEVER be resurrected — see the identical
+      // guard and reasoning in ContentPipeline's cloud-pull effect. Robust
+      // against the clear's cloud write (fire-and-forget) racing this pull.
+      if (cloud.completed?.includes("publish")) return;
       const cloudTime = cloud.savedAt ? new Date(cloud.savedAt).getTime() : 0;
       const localTime = saved?.savedAt ? new Date(saved.savedAt).getTime() : 0;
       if (cloudTime <= localTime) return; // local copy is already current or newer
