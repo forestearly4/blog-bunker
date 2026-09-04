@@ -4345,7 +4345,7 @@ Titles and descriptions MUST be under their character limits. Score each on: key
 
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpen, btnP, fixedGreen }) {
+function CalendarTab({ calEvents, posts = [], deleteCalEvent, cleanUpCalendar, setCalModalDay, setCalModalOpen, btnP, fixedGreen }) {
   const today = new Date();
   const [calYear,  setCalYear]  = useState(today.getFullYear());
   const [calMonth, setCalMonth] = useState(today.getMonth());
@@ -4380,6 +4380,14 @@ function CalendarTab({ calEvents, deleteCalEvent, setCalModalDay, setCalModalOpe
             </div>
           ))}
           <button onClick={()=>{setCalModalDay(null);setCalModalOpen(true);}} style={{...btnP,padding:"6px 14px",fontSize:12}}>+ Add Event</button>
+          {cleanUpCalendar && (
+            <button
+              onClick={()=>{ if (window.confirm("This corrects any calendar entry whose status is out of date (e.g. still shown as \"Scheduled\" after actually being published) and removes duplicate entries for the same post, keeping only the most current one. Continue?")) cleanUpCalendar(); }}
+              title="Fix stale statuses and remove duplicate entries"
+              style={{padding:"6px 12px",borderRadius:6,border:"1px solid var(--border)",background:"transparent",color:"var(--text-secondary)",fontSize:11,cursor:"pointer",fontFamily:"'DM Sans',sans-serif"}}>
+              🧹 Clean Up
+            </button>
+          )}
         </div>
       </div>
 
@@ -9438,7 +9446,7 @@ function BlogHealthScore({ posts, socialPosts, metaConfig, dark }) {
   );
 }
 
-function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onGSCDataLoaded, onConnectMeta, activeProvider, activeModel, apiKeys }) {
+function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onGSCDataLoaded, onConnectMeta, activeProvider, activeModel, apiKeys, onAddInspiration = null }) {
   const [tab, setTab] = useState("overview");
   const [socialInsights, setSocialInsights] = useState(null);
   const [loadingInsights, setLoadingInsights] = useState(false);
@@ -10042,13 +10050,13 @@ function SEODashboard({ posts, gscData, activeProvider, activeModel, apiKeys, on
   "health_score": 0-100,
   "health_label": "one word: Excellent/Good/Fair/Needs Work",
   "summary": "2-3 sentence overall assessment",
-  "quick_wins": [{"action":"specific action","impact":"High/Medium/Low","effort":"Easy/Medium/Hard","detail":"why this works"}],
+  "quick_wins": [{"action":"specific action","impact":"High/Medium/Low","effort":"Easy/Medium/Hard","detail":"why this works","how_to":"concrete step-by-step on actually doing this — where relevant, reference the actual Blog Bunker feature to use (e.g. Article Pipeline's Enhance stage, Link Finder, Media Library)"}],
   "title_rewrites": [{"current":"...","suggested":"...","reason":"..."}],
   "content_gaps": [{"topic":"...","why":"...","angle":"..."}],
-  "technical_tips": ["tip1","tip2","tip3"],
+  "technical_tips": [{"tip":"short tip","how_to":"concrete step-by-step on actually doing this"}],
   "biggest_opportunity": "single most impactful thing to do right now in 1-2 sentences"
 }
-quick_wins = 5 items. title_rewrites = 3 items using actual post titles provided. content_gaps = 4 items.`,
+quick_wins = 5 items. title_rewrites = 3 items using actual post titles provided. content_gaps = 4 items. technical_tips = 3 items.`,
         `Site: caskandstream.com — fly fishing and whiskey lifestyle blog.
 Published posts: ${postTitles || "none yet"}
 Top keywords: ${topKeywords || "no GSC data yet"}
@@ -10163,16 +10171,23 @@ Page clicks: ${gscPage?.clicks || 0}`,
             <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:14 }}>⚡ Quick Wins</div>
             <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
               {analysis.quick_wins?.map((w, i) => (
-                <div key={i} style={{ padding:"12px 16px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)", display:"flex", gap:16, alignItems:"flex-start" }}>
-                  <div style={{ flexShrink:0, width:24, height:24, borderRadius:6, background:"var(--amber-glow)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"var(--amber)" }}>{i+1}</div>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontWeight:600, fontSize:13, marginBottom:4 }}>{w.action}</div>
-                    <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.5 }}>{w.detail}</div>
+                <div key={i} style={{ padding:"12px 16px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                  <div style={{ display:"flex", gap:16, alignItems:"flex-start" }}>
+                    <div style={{ flexShrink:0, width:24, height:24, borderRadius:6, background:"var(--amber-glow)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"var(--amber)" }}>{i+1}</div>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontWeight:600, fontSize:13, marginBottom:4 }}>{w.action}</div>
+                      <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.5 }}>{w.detail}</div>
+                    </div>
+                    <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:impactColor[w.impact]+"15", color:impactColor[w.impact], border:`1px solid ${impactColor[w.impact]}33`, fontWeight:600 }}>{w.impact} impact</span>
+                      <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:effortColor[w.effort]+"15", color:effortColor[w.effort], border:`1px solid ${effortColor[w.effort]}33` }}>{w.effort}</span>
+                    </div>
                   </div>
-                  <div style={{ display:"flex", gap:6, flexShrink:0 }}>
-                    <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:impactColor[w.impact]+"15", color:impactColor[w.impact], border:`1px solid ${impactColor[w.impact]}33`, fontWeight:600 }}>{w.impact} impact</span>
-                    <span style={{ fontSize:10, padding:"2px 7px", borderRadius:99, background:effortColor[w.effort]+"15", color:effortColor[w.effort], border:`1px solid ${effortColor[w.effort]}33` }}>{w.effort}</span>
-                  </div>
+                  {w.how_to && (
+                    <div style={{ marginTop:10, paddingTop:10, borderTop:"1px solid var(--border)", fontSize:11, color:"var(--text-secondary)", lineHeight:1.6, marginLeft:40 }}>
+                      <strong style={{ color:"#7a9166" }}>How to:</strong> {w.how_to}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -10201,7 +10216,13 @@ Page clicks: ${gscPage?.clicks || 0}`,
                   <div key={i} style={{ padding:"10px 12px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
                     <div style={{ fontSize:12, fontWeight:600, marginBottom:3 }}>{g.topic}</div>
                     <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:3 }}>{g.why}</div>
-                    <div style={{ fontSize:11, color:"var(--amber)" }}>Angle: {g.angle}</div>
+                    <div style={{ fontSize:11, color:"var(--amber)", marginBottom:8 }}>Angle: {g.angle}</div>
+                    {onAddInspiration && (
+                      <button onClick={() => onAddInspiration({ id:Date.now()+i, title:g.topic, source:"Site SEO Analysis — Content Gap", type:"article", notes:`Why: ${g.why}\n\nAngle: ${g.angle}` })}
+                        style={{ fontSize:10, padding:"4px 10px", borderRadius:6, border:"1px solid var(--amber)", background:"transparent", color:"var(--amber)", cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                        + Add to Inspiration
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -10212,12 +10233,23 @@ Page clicks: ${gscPage?.clicks || 0}`,
           {analysis.technical_tips?.length > 0 && (
             <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
               <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>⚙ Technical Tips</div>
-              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-                {analysis.technical_tips.map((t, i) => (
-                  <div key={i} style={{ display:"flex", gap:10, padding:"6px 0", borderBottom:"1px solid var(--border)11", fontSize:12, color:"var(--text-secondary)" }}>
-                    <span style={{ color:"var(--amber)", flexShrink:0 }}>→</span>{t}
-                  </div>
-                ))}
+              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                {analysis.technical_tips.map((t, i) => {
+                  const tipText = typeof t === "string" ? t : t.tip; // legacy bare-string shape
+                  const howTo = typeof t === "object" ? t.how_to : null;
+                  return (
+                    <div key={i} style={{ padding:"8px 0", borderBottom:"1px solid var(--border)11" }}>
+                      <div style={{ display:"flex", gap:10, fontSize:12, color:"var(--text-secondary)" }}>
+                        <span style={{ color:"var(--amber)", flexShrink:0 }}>→</span>{tipText}
+                      </div>
+                      {howTo && (
+                        <div style={{ marginTop:6, marginLeft:20, fontSize:11, color:"var(--text-secondary)", lineHeight:1.6 }}>
+                          <strong style={{ color:"#7a9166" }}>How to:</strong> {howTo}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -12504,9 +12536,37 @@ export default function Dashboard({ user, workspace }) {
     setBlogTab("posts");
   };
 
-  const saveCalEvent = (ev) => setCalEvents(all => [...all, ev]);
+  // Replaces any existing event for the same post (matched by title) rather
+  // than blindly appending — otherwise every time a post moves through
+  // another save/publish action (e.g. first scheduled, later actually
+  // published, or republished via a different button), it adds a brand-new
+  // entry without removing the old one. That's what caused BOTH duplicate
+  // calendar entries AND stale "scheduled" labels that never updated to
+  // "published" — the original scheduled entry just sat there forever
+  // alongside a newer one instead of being replaced by it.
+  const saveCalEvent = (ev) => setCalEvents(all => [...all.filter(e => e.title !== ev.title), ev]);
   const navigateToPosts = () => { setActiveTab("blog"); setBlogTab("posts"); };
   const deleteCalEvent = (idx) => setCalEvents(all => all.filter((_, i) => i !== idx));
+  // One-time cleanup for calendar entries that accumulated duplicates/stale
+  // statuses before saveCalEvent started replacing instead of appending —
+  // corrects each event's type against its matching post's ACTUAL current
+  // status, then deduplicates by title (keeping the most authoritative type:
+  // published > scheduled > draft > idea).
+  const cleanUpCalendar = () => {
+    const priority = { published: 3, scheduled: 2, draft: 1, idea: 0 };
+    const corrected = calEvents.map(ev => {
+      const match = posts.find(p => p.title === ev.title);
+      return match ? { ...ev, type: match.status } : ev;
+    });
+    const byTitle = {};
+    for (const ev of corrected) {
+      const existing = byTitle[ev.title];
+      if (!existing || (priority[ev.type] ?? 0) >= (priority[existing.type] ?? 0)) {
+        byTitle[ev.title] = ev;
+      }
+    }
+    setCalEvents(Object.values(byTitle));
+  };
 
   const [gscData,     setGscData]     = useState(loadGSCData);
   const [metaConfig,   setMetaConfig]   = useState(loadMetaConfig);
@@ -12962,6 +13022,7 @@ export default function Dashboard({ user, workspace }) {
               activeProvider={activeProvider}
               activeModel={activeModel}
               apiKeys={apiKeys}
+              onAddInspiration={saveInspiration}
             />
           )}
 
@@ -12969,7 +13030,9 @@ export default function Dashboard({ user, workspace }) {
           {activeTab==="calendar"&&(
             <CalendarTab
               calEvents={calEvents}
+              posts={posts}
               deleteCalEvent={deleteCalEvent}
+              cleanUpCalendar={cleanUpCalendar}
               setCalModalDay={setCalModalDay}
               setCalModalOpen={setCalModalOpen}
               btnP={btnP}
