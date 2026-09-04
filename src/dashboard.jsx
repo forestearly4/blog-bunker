@@ -9607,6 +9607,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
           activeModel={activeModel}
           apiKeys={apiKeys}
           onConnectGSC={onConnectGSC}
+          onAddInspiration={onAddInspiration}
         />
       )}
 
@@ -9992,7 +9993,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
 
 // ─── SEO DASHBOARD ───────────────────────────────────────────────────────────
 
-function SEODashboard({ posts, gscData, activeProvider, activeModel, apiKeys, onConnectGSC }) {
+function SEODashboard({ posts, gscData, activeProvider, activeModel, apiKeys, onConnectGSC, onAddInspiration = null }) {
   const [analysis,     setAnalysis]     = useState(null);
   const [loading,      setLoading]      = useState(false);
   const [loadMsg,      setLoadMsg]      = useState("");
