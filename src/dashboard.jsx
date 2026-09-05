@@ -3371,9 +3371,9 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   "primaryKeyword": "best target keyword",
   "secondaryKeywords": ["kw1","kw2","kw3"],
   "titles": [
-    {"text":"title option 1 (≤60 chars)","score":85,"why":"reason CTR is good","charCount":52},
-    {"text":"title option 2 (≤60 chars)","score":78,"why":"reason","charCount":48},
-    {"text":"title option 3 (≤60 chars)","score":72,"why":"reason","charCount":55}
+    {"text":"title option 1 (≤60 chars)","ctrScore":85,"seoScore":70,"why":"reason","charCount":52},
+    {"text":"title option 2 (≤60 chars)","ctrScore":78,"seoScore":82,"why":"reason","charCount":48},
+    {"text":"title option 3 (≤60 chars)","ctrScore":72,"seoScore":75,"why":"reason","charCount":55}
   ],
   "descriptions": [
     {"text":"meta description option 1 (≤160 chars)","score":88,"why":"why this converts","charCount":145},
@@ -3385,20 +3385,25 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   "suggestions": ["actionable tip 1","actionable tip 2","actionable tip 3"],
   "overallScore": 80
 }
-Titles and descriptions MUST be under their character limits. Score each on: keyword inclusion, CTR potential, length, clarity.`,
+Titles and descriptions MUST be under their character limits. Score each title on TWO SEPARATE axes: ctrScore (how clickable/compelling — curiosity, emotional hook, power words) and seoScore (how well it targets the primary keyword and matches search intent — these often trade off against each other, so a title can score high on one and low on the other).`,
         `Title: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0, 1200)}`,
         apiKeys[activeProvider],
         2000
       );
       const seo = parseAIJson(text);
-      // Pick best by default
-      const bestTitle = seo.titles?.sort((a,b)=>b.score-a.score)[0]?.text || draft.title;
+      // Combined score is the average of both axes — picking a title that's
+      // both clickable AND well-optimized, rather than maximizing just one.
+      if (seo.titles) {
+        seo.titles = seo.titles.map(t => ({ ...t, combinedScore: Math.round(((t.ctrScore||0) + (t.seoScore||0)) / 2) }));
+      }
+      // Pick best by default — by combined score, not just one axis
+      const bestTitle = [...(seo.titles||[])].sort((a,b)=>b.combinedScore-a.combinedScore)[0]?.text || draft.title;
       const bestDesc  = seo.descriptions?.sort((a,b)=>b.score-a.score)[0]?.text || "";
       setEnhance({
         ...seo,
         metaTitle:       bestTitle,
         metaDescription: bestDesc,
-        selectedTitle:   0,
+        selectedTitle:   seo.titles?.findIndex(t=>t.text===bestTitle) ?? 0,
         selectedDesc:    0,
         headlines:       seo.titles?.map(t=>t.text) || [],
       });
@@ -3856,30 +3861,45 @@ Titles and descriptions MUST be under their character limits. Score each on: key
               <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
                 <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:12 }}>
                   Title Options — pick one (Google shows ~60 chars)
+                  <span style={{ fontWeight:400, textTransform:"none", letterSpacing:0, color:"var(--text-secondary)", marginLeft:8 }}>
+                    · each is scored on CTR appeal (clickability) AND SEO (keyword/search fit) — these can trade off against each other
+                  </span>
                 </div>
                 <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-                  {(enhance.titles || []).map((t, i) => {
+                  {(() => {
+                    const bestCombined = Math.max(...(enhance.titles||[]).map(t=>t.combinedScore||0));
+                    return (enhance.titles || []).map((t, i) => {
                     const selected = enhance.selectedTitle === i;
                     const over = t.charCount > 60 || t.text?.length > 60;
-                    const score = t.score || 0;
-                    const scoreColor = score >= 80 ? "#7a9166" : score >= 65 ? "var(--amber)" : "var(--red)";
+                    const ctrScore = t.ctrScore ?? t.score ?? 0; // fall back to legacy single-score shape
+                    const seoScore = t.seoScore ?? null;
+                    const isBest = seoScore != null && t.combinedScore === bestCombined && bestCombined > 0;
+                    const ctrColor = ctrScore >= 80 ? "#7a9166" : ctrScore >= 65 ? "var(--amber)" : "var(--red)";
+                    const seoColor = seoScore >= 80 ? "#7a9166" : seoScore >= 65 ? "var(--amber)" : "var(--red)";
                     return (
                       <div key={i} onClick={() => setEnhance(e => ({ ...e, selectedTitle:i, metaTitle:t.text }))}
-                        style={{ padding:"12px 14px", borderRadius:9, border:`2px solid ${selected?"var(--amber)":"var(--border)"}`, background:selected?"var(--amber-glow)":"var(--bg-elevated)", cursor:"pointer", transition:"all 0.15s" }}>
+                        style={{ padding:"12px 14px", borderRadius:9, border:`2px solid ${selected?"var(--amber)":isBest?"#7a916666":"var(--border)"}`, background:selected?"var(--amber-glow)":"var(--bg-elevated)", cursor:"pointer", transition:"all 0.15s" }}>
                         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12 }}>
                           <div style={{ flex:1 }}>
-                            <div style={{ fontSize:13, fontWeight:selected?700:400, color:"var(--text)", marginBottom:4, lineHeight:1.4 }}>{t.text}</div>
+                            <div style={{ fontSize:13, fontWeight:selected?700:400, color:"var(--text)", marginBottom:4, lineHeight:1.4, display:"flex", alignItems:"center", gap:8 }}>
+                              {t.text}
+                              {isBest && <span style={{ fontSize:9, fontWeight:700, color:"#7a9166", background:"#7a91661a", padding:"2px 7px", borderRadius:99, whiteSpace:"nowrap" }}>🏆 Best Overall</span>}
+                            </div>
                             <div style={{ fontSize:11, color:"var(--text-secondary)", lineHeight:1.5 }}>💡 {t.why}</div>
                           </div>
-                          <div style={{ display:"flex", gap:8, flexShrink:0, alignItems:"center" }}>
+                          <div style={{ display:"flex", gap:6, flexShrink:0, alignItems:"center" }}>
                             <span style={{ fontSize:10, color:over?"var(--red)":"var(--muted)" }}>{t.text?.length || t.charCount}/60</span>
-                            <span style={{ fontSize:12, fontWeight:700, color:scoreColor, padding:"2px 8px", borderRadius:6, background:scoreColor+"15" }}>{score}</span>
+                            <span style={{ fontSize:12, fontWeight:700, color:ctrColor, padding:"2px 8px", borderRadius:6, background:ctrColor+"15" }} title="CTR appeal — how clickable this title is">{ctrScore} CTR</span>
+                            {seoScore != null && (
+                              <span style={{ fontSize:12, fontWeight:700, color:seoColor, padding:"2px 8px", borderRadius:6, background:seoColor+"15" }} title="SEO score — keyword targeting and search intent fit">{seoScore} SEO</span>
+                            )}
                             {selected && <span style={{ fontSize:10, fontWeight:700, color:"var(--amber)" }}>✓ Selected</span>}
                           </div>
                         </div>
                       </div>
                     );
-                  })}
+                  });
+                  })()}
                 </div>
                 {/* Editable selected title */}
                 <div style={{ marginTop:12 }}>
