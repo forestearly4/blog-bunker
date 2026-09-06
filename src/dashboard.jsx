@@ -3385,10 +3385,10 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   "suggestions": ["actionable tip 1","actionable tip 2","actionable tip 3"],
   "overallScore": 80
 }
-Titles and descriptions MUST be under their character limits. Score each title on TWO SEPARATE axes: ctrScore (how clickable/compelling — curiosity, emotional hook, power words) and seoScore (how well it targets the primary keyword and matches search intent — these often trade off against each other, so a title can score high on one and low on the other).`,
+Titles and descriptions MUST be under their character limits. EVERY title in the titles array MUST include BOTH a ctrScore AND a seoScore as separate integer fields — never omit either one, even if they're similar or the same value. ctrScore rates how clickable/compelling a title is (curiosity, emotional hook, power words). seoScore rates how well it targets the primary keyword and matches search intent. These two scores often differ from each other — that's expected, not an error.`,
         `Title: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0, 1200)}`,
         apiKeys[activeProvider],
-        2000
+        3000
       );
       const seo = parseAIJson(text);
       // Combined score is the average of both axes — picking a title that's
