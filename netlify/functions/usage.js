@@ -14,7 +14,7 @@ import { getStore } from "@netlify/blobs";
 
 const CORS = {
   "Access-Control-Allow-Origin":  "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
   "Content-Type":                 "application/json",
 };
@@ -27,10 +27,26 @@ const TOKENS_PER_WORD = 1.333; // rough inverse of the usual ~0.75 words/token
 export default async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
-  const url    = new URL(req.url);
-  const userId = url.searchParams.get("userId") || "anonymous";
   const store  = getStore("blog-bunker-data");
   const period = new Date().toISOString().slice(0, 7); // YYYY-MM
+
+  // Manual reset for the current month's usage — there's no real billing
+  // cycle yet to naturally reset this, so this lets a user (or Forest,
+  // testing) clear their own counter rather than wait until next month.
+  if (req.method === "POST") {
+    try {
+      const { userId } = await req.json();
+      if (!userId) return new Response(JSON.stringify({ error: "userId required" }), { status: 400, headers: CORS });
+      await store.setJSON(`${userId}:usage_text_${period}`, { tokens: 0 });
+      await store.setJSON(`${userId}:usage_images_${period}`, { images: 0 });
+      return new Response(JSON.stringify({ success: true }), { status: 200, headers: CORS });
+    } catch(e) {
+      return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: CORS });
+    }
+  }
+
+  const url    = new URL(req.url);
+  const userId = url.searchParams.get("userId") || "anonymous";
 
   try {
     const textUsage  = await store.get(`${userId}:usage_text_${period}`, { type: "json" }) || { tokens: 0 };
