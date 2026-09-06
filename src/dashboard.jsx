@@ -507,19 +507,32 @@ function TierLockedNotice({ feature, requiredTier = "Operative" }) {
 function UsagePanel({ tierConfig, userId }) {
   const [usage, setUsage] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [resetting, setResetting] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(`/api/usage?userId=${encodeURIComponent(userId)}`);
-        const data = await res.json();
-        if (!cancelled) setUsage(data);
-      } catch { /* fall through to loading:false below */ }
-      if (!cancelled) setLoading(false);
-    })();
-    return () => { cancelled = true; };
-  }, [userId]);
+  const loadUsage = async () => {
+    try {
+      const res = await fetch(`/api/usage?userId=${encodeURIComponent(userId)}`);
+      const data = await res.json();
+      setUsage(data);
+    } catch { /* fall through */ }
+    setLoading(false);
+  };
+
+  useEffect(() => { loadUsage(); }, [userId]);
+
+  const resetUsage = async () => {
+    if (!window.confirm("Reset this month's AI usage back to zero? This is a manual override for testing — real billing isn't wired up yet, so there's no other way for this to reset until next month.")) return;
+    setResetting(true);
+    try {
+      await fetch("/api/usage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
+      });
+      await loadUsage();
+    } catch {}
+    setResetting(false);
+  };
 
   const wordsUsed  = usage?.wordsUsed ?? 0;
   const wordCap    = tierConfig.wordsPerMonth;
@@ -533,7 +546,13 @@ function UsagePanel({ tierConfig, userId }) {
 
   return (
     <div style={{ borderTop:"1px solid var(--border)", paddingTop:20 }}>
-      <h4 style={{ fontFamily:"var(--font-display)", fontSize:14, fontWeight:700, margin:"0 0 12px" }}>This Month's AI Usage</h4>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+        <h4 style={{ fontFamily:"var(--font-display)", fontSize:14, fontWeight:700, margin:0 }}>This Month's AI Usage</h4>
+        <button onClick={resetUsage} disabled={resetting || loading}
+          style={{ fontSize:11, padding:"5px 12px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", cursor:resetting?"not-allowed":"pointer", fontFamily:"var(--font-body)" }}>
+          {resetting ? "Resetting…" : "↺ Reset Usage"}
+        </button>
+      </div>
       {loading ? (
         <div style={{ fontSize:12, color:"var(--muted)" }}>Loading…</div>
       ) : (
