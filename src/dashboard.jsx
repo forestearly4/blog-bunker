@@ -234,7 +234,44 @@ function parseAIJson(text) {
     }
   } catch {}
 
-  // Repair 3 — extract individual {...} objects via regex, parse each independently
+  // Repair 3 — a nested structure (object containing arrays/objects) cut off
+  // mid-way, where the OUTERMOST brace/bracket never gets to close at all.
+  // Repair 1 only trims to the last point where depth fully returns to 0 —
+  // for a large object like {primaryKeyword, titles:[...], descriptions:[...]}
+  // truncated partway through one of those inner arrays, depth never reaches
+  // 0 again, so Repair 1 never even attempts anything. This tracks the stack
+  // of open brackets/braces directly and force-closes them in the right
+  // order, then trims any trailing incomplete key/value pair first so the
+  // forced closes land on valid JSON rather than a dangling comma or key.
+  try {
+    let repaired = cleaned;
+    const quoteCount = (repaired.match(/(?<!\\)"/g) || []).length;
+    if (quoteCount % 2 !== 0) repaired += '"';
+
+    const stack = [];
+    let inString = false, escape = false, lastSafeIdx = -1;
+    for (let i = 0; i < repaired.length; i++) {
+      const ch = repaired[i];
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{" || ch === "[") stack.push(ch);
+      else if (ch === "}") { stack.pop(); lastSafeIdx = i; }
+      else if (ch === "]") { stack.pop(); lastSafeIdx = i; }
+      else if (ch === ",") lastSafeIdx = i; // safe point right after a complete value — NOT ":" (that precedes a value, which may be incomplete)
+    }
+    if (stack.length > 0) {
+      // Trim back to the last complete value (drops any half-written key or
+      // value at the very end) before appending the closers.
+      let trimmed = lastSafeIdx > -1 ? repaired.slice(0, lastSafeIdx) : repaired;
+      trimmed = trimmed.replace(/,\s*$/, ""); // drop a trailing comma if trimming landed right after one
+      const closers = stack.reverse().map(open => open === "{" ? "}" : "]").join("");
+      return JSON.parse(trimmed + closers);
+    }
+  } catch {}
+
+  // Repair 4 — extract individual {...} objects via regex, parse each independently
   // Recovers as many valid objects as possible even if overall structure is broken
   try {
     const objectMatches = cleaned.match(/\{[^{}]*\}/g);
@@ -3407,7 +3444,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
 Titles and descriptions MUST be under their character limits. EVERY title in the titles array MUST include BOTH a ctrScore AND a seoScore as separate integer fields — never omit either one, even if they're similar or the same value. ctrScore rates how clickable/compelling a title is (curiosity, emotional hook, power words). seoScore rates how well it targets the primary keyword and matches search intent. These two scores often differ from each other — that's expected, not an error.`,
         `Title: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0, 1200)}`,
         apiKeys[activeProvider],
-        3000
+        4096
       );
       const seo = parseAIJson(text);
       // Combined score is the average of both axes — picking a title that's
