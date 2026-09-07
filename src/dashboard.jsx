@@ -187,12 +187,15 @@ function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cl
 // cloud pull, all consistently. `skipCloudPull` lets an explicit hand-off
 // (e.g. loading a specific existing post to edit) take priority over
 // resuming a previously-saved draft — pass a value that's truthy when such
-// a hand-off is in progress.
-function usePersistedState(store, { skipCloudPull = false } = {}) {
+// a hand-off is in progress. `localOnly` is stronger — skips BOTH the pull
+// AND ever writing to the cloud on save, for state that's a genuine
+// per-device preference (e.g. which workspace you're currently viewing)
+// rather than shared account data.
+function usePersistedState(store, { skipCloudPull = false, localOnly = false } = {}) {
   const [value, setValue] = useState(store.load);
-  useEffect(() => { store.save(value); }, [value]);
+  useEffect(() => { store.save(value, { skipCloud: localOnly }); }, [value]);
   useEffect(() => {
-    if (skipCloudPull) return;
+    if (skipCloudPull || localOnly) return;
     const uid = window.__bbUserId;
     if (!uid) return;
     (async () => {
@@ -12459,13 +12462,21 @@ export default function Dashboard({ user, workspace }) {
   // first render, so it must be set before any child mounts, not deferred
   // to an effect (that was a real bug fixed earlier in this project).
   const [workspaces, setWorkspaces] = usePersistedState(workspacesStore);
-  const [activeWorkspaceId, setActiveWorkspaceIdState] = usePersistedState(activeWorkspaceStore);
+  // activeWorkspaceId is intentionally LOCAL-ONLY, never synced to the cloud
+  // — which workspace you're currently viewing is a per-device preference
+  // (you might be on workspace A on your laptop and B on your phone), not
+  // shared account data. This also eliminates a real race that was causing
+  // "always defaults back": the cloud write on save is fire-and-forget, so
+  // it likely never completed before the immediate reload after switching —
+  // the fresh page load's own cloud-pull would then find the OLD cloud
+  // value and silently overwrite the correctly-saved-locally new one.
+  const [activeWorkspaceId, setActiveWorkspaceIdState] = usePersistedState(activeWorkspaceStore, { localOnly: true });
   window.__bbWorkspaceId = activeWorkspaceId;
 
   const setActiveWorkspaceId = (id) => {
     setActiveWorkspaceIdState(id);
     window.__bbWorkspaceId = id; // update synchronously too — don't wait for the next render
-    activeWorkspaceStore.save(id, { debounce: false }); // write immediately — a reload right after this must not race the React state→effect→save path, which hasn't run yet
+    activeWorkspaceStore.save(id, { debounce: false, skipCloud: true }); // write immediately, local-only — a reload right after this must not race the React state→effect→save path, which hasn't run yet
   };
 
   const createWorkspace = (name) => {
