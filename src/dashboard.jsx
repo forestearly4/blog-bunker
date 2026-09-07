@@ -700,7 +700,18 @@ const CALENDAR_EVENTS = [
 // to compare like a draft does, so cloud wins only if it strictly has more
 // entries than what's already local (a simple, safe heuristic).
 const calEventsStore = createPersistedStore("bb_cal_events", "cal_events", CALENDAR_EVENTS, {
-  strategy: (cloudValue, localValue) => Array.isArray(cloudValue) && cloudValue.length > (localValue?.length || 0),
+  strategy: (cloudValue, localValue) => {
+    if (!Array.isArray(cloudValue)) return false;
+    // Never let a cloud copy that still has duplicate titles win, no matter
+    // how many events it has — that's exactly the stale, un-cleaned-up data
+    // this is trying to avoid resurrecting. A plain "more events wins" count
+    // is backwards here: cleaning up duplicates SHRINKS the list, so it was
+    // silently losing to an older, dirtier, larger cloud copy every reload.
+    const titles = cloudValue.map(e => e.title);
+    const hasDuplicates = new Set(titles).size !== titles.length;
+    if (hasDuplicates) return false;
+    return cloudValue.length > (localValue?.length || 0);
+  },
   scope: "workspace",
 });
 
@@ -12454,11 +12465,14 @@ export default function Dashboard({ user, workspace }) {
   const setActiveWorkspaceId = (id) => {
     setActiveWorkspaceIdState(id);
     window.__bbWorkspaceId = id; // update synchronously too — don't wait for the next render
+    activeWorkspaceStore.save(id, { debounce: false }); // write immediately — a reload right after this must not race the React state→effect→save path, which hasn't run yet
   };
 
   const createWorkspace = (name) => {
     const id = `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    setWorkspaces(list => [...list, { id, name, createdAt: new Date().toISOString() }]);
+    const newList = [...workspaces, { id, name, createdAt: new Date().toISOString() }];
+    setWorkspaces(newList);
+    workspacesStore.save(newList, { debounce: false }); // same reasoning — must be written before any reload
     setActiveWorkspaceId(id);
     return id;
   };
