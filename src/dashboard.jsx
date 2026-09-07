@@ -680,6 +680,10 @@ const DEFAULT_POSTS = [
   { id:7, title:"Best Single Malts for a Day on the River",           status:"published", date:"2026-03-10", views:2104, category:"Whiskey"      },
   { id:8, title:"Matching the Hatch: A Seasonal Primer",              status:"scheduled", date:"2026-04-01", views:0,    category:"Technique"    },
 ];
+const postsStore = createPersistedStore("bb_posts", "posts", DEFAULT_POSTS, {
+  strategy: (cloudValue) => Array.isArray(cloudValue) && cloudValue.length > 0,
+  scope: "workspace",
+});
 
 const DEFAULT_ANALYTICS = {
   totalViews:6118, viewsTrend:18.4, subscribers:142, subsTrend:12.1,
@@ -6136,12 +6140,12 @@ function clearSocialPipelineDraft() {
 const SOCIAL_POSTS_STORAGE = "bb_social_posts";
 
 function loadSocialPosts() {
-  try { return JSON.parse(localStorage.getItem(SOCIAL_POSTS_STORAGE) || "[]"); }
+  try { return JSON.parse(localStorage.getItem(scopedKey(SOCIAL_POSTS_STORAGE, "workspace")) || "[]"); }
   catch { return []; }
 }
 
 function saveSocialPostsToStorage(posts) {
-  try { localStorage.setItem(SOCIAL_POSTS_STORAGE, JSON.stringify(posts)); } catch {}
+  try { localStorage.setItem(scopedKey(SOCIAL_POSTS_STORAGE, "workspace"), JSON.stringify(posts)); } catch {}
 }
 
 function createSocialPost({ id = null, platforms, captions, hashtags, mediaType, imageUrl, imagePrompt, scheduledAt, status = "draft" }) {
@@ -12427,47 +12431,18 @@ function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
 export default function Dashboard({ user, workspace }) {
   const { logout: onLogout } = useAuth();
   const isMobile = useIsMobile();
-  const [dark,            setDark]           = useState(true);
-  const [activeTab,       setActiveTab]      = useState("posts");
-  // Scroll to top on every top-level tab switch — without this, if the user
-  // was scrolled down on one tab, switching to a shorter/differently-laid-out
-  // tab (e.g. Marketing) could leave them stranded mid-page, below the nav.
-  useEffect(() => {
-    window.scrollTo({ top: 0, behavior: "instant" });
-  }, [activeTab]);
-  const [postFilter,      setPostFilter]     = useState("all");
-  const [researchTab,     setResearchTab]    = useState("competitors");
-  const [blogTab,         setBlogTab]        = useState("pipeline");
-  const [aiTool,          setAiTool]         = useState("writer");
-  const [settingsSection, setSettingsSection]= useState("general");
-  const [showUpgrade,     setShowUpgrade]    = useState(false);
-  const [apiKeys,         setApiKeys]        = useState(loadKeys);
-  const [activeProvider,  setActiveProvider] = useState(() => localStorage.getItem(ACTIVE_PROVIDER_STORAGE) || "anthropic");
-  const [activeModel,     setActiveModel]    = useState(() => { const m = loadModels(); const p = AI_PROVIDERS.find(x=>x.id===(localStorage.getItem(ACTIVE_PROVIDER_STORAGE)||"anthropic"))||AI_PROVIDERS[0]; return m[p.id] || p.defaultModel; });
 
-  // ── Persistent state (localStorage)
-  const [posts,       setPosts]       = useState(() => { try { const s = localStorage.getItem("bb_posts"); return s ? JSON.parse(s) : DEFAULT_POSTS; } catch { return DEFAULT_POSTS; } });
-  const [competitors, setCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_competitors"); return s ? JSON.parse(s) : COMPETITORS; } catch { return COMPETITORS; } });
-  const [socialCompetitors, setSocialCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_social_competitors"); return s ? JSON.parse(s) : []; } catch { return []; } });
-  const [inspiration, setInspiration] = useState(() => { try { const s = localStorage.getItem("bb_inspiration"); return s ? JSON.parse(s) : INSPIRATION; } catch { return INSPIRATION; } });
-  const [socialInspiration, setSocialInspiration] = useState(() => { try { const s = localStorage.getItem("bb_social_inspiration"); return s ? JSON.parse(s) : []; } catch { return []; } });
-  const [calEvents,   setCalEvents]   = usePersistedState(calEventsStore);
-  const [wsSettings,  setWsSettings]  = usePersistedState(wsSettingsStore);
-
-  // ── Cloud sync (Netlify Blobs) — survives localStorage clearing ──────────
+  // ── User + workspace identity — MUST be set before any other state in
+  // this component initializes, since several stores (posts, calEvents,
+  // wsSettings, brand guide, connections, etc.) read window.__bbUserId /
+  // window.__bbWorkspaceId synchronously during their OWN first-render
+  // state initialization. useState initializers run exactly once, so if
+  // these globals aren't set yet when that happens, the store reads from
+  // the wrong (unscoped/default) key permanently for that page load — this
+  // was the actual bug behind "workspace still shows Cask and Stream data"
+  // even though the active workspace ID itself was switching correctly.
   const userId = user?.email || user?.id || "anonymous";
-  // Make userId available to components deep in tree (HeadlineImagePanel etc.)
   window.__bbUserId = userId;
-
-  // ── Multi-workspace ────────────────────────────────────────────────────
-  // The workspace LIST and which one is active are account-scoped (every
-  // workspace an account has, and which you're currently looking at) — the
-  // DATA inside each workspace (brand guide, connections, posts, etc.) is
-  // what actually gets scoped per-workspace, via scopedKey() in the store
-  // factory. window.__bbWorkspaceId is set synchronously here for the exact
-  // same reason __bbUserId is — several stores read it during their own
-  // first render, so it must be set before any child mounts, not deferred
-  // to an effect (that was a real bug fixed earlier in this project).
   const [workspaces, setWorkspaces] = usePersistedState(workspacesStore);
   // activeWorkspaceId is intentionally LOCAL-ONLY, never synced to the cloud
   // — which workspace you're currently viewing is a per-device preference
@@ -12495,15 +12470,38 @@ export default function Dashboard({ user, workspace }) {
     return id;
   };
 
+  const [dark,            setDark]           = useState(true);
+  const [activeTab,       setActiveTab]      = useState("posts");
+  // Scroll to top on every top-level tab switch — without this, if the user
+  // was scrolled down on one tab, switching to a shorter/differently-laid-out
+  // tab (e.g. Marketing) could leave them stranded mid-page, below the nav.
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, [activeTab]);
+  const [postFilter,      setPostFilter]     = useState("all");
+  const [researchTab,     setResearchTab]    = useState("competitors");
+  const [blogTab,         setBlogTab]        = useState("pipeline");
+  const [aiTool,          setAiTool]         = useState("writer");
+  const [settingsSection, setSettingsSection]= useState("general");
+  const [showUpgrade,     setShowUpgrade]    = useState(false);
+  const [apiKeys,         setApiKeys]        = useState(loadKeys);
+  const [activeProvider,  setActiveProvider] = useState(() => localStorage.getItem(ACTIVE_PROVIDER_STORAGE) || "anthropic");
+  const [activeModel,     setActiveModel]    = useState(() => { const m = loadModels(); const p = AI_PROVIDERS.find(x=>x.id===(localStorage.getItem(ACTIVE_PROVIDER_STORAGE)||"anthropic"))||AI_PROVIDERS[0]; return m[p.id] || p.defaultModel; });
+
+  // ── Persistent state (localStorage)
+  const [posts,       setPosts]       = usePersistedState(postsStore);
+  const [competitors, setCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_competitors"); return s ? JSON.parse(s) : COMPETITORS; } catch { return COMPETITORS; } });
+  const [socialCompetitors, setSocialCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_social_competitors"); return s ? JSON.parse(s) : []; } catch { return []; } });
+  const [inspiration, setInspiration] = useState(() => { try { const s = localStorage.getItem("bb_inspiration"); return s ? JSON.parse(s) : INSPIRATION; } catch { return INSPIRATION; } });
+  const [socialInspiration, setSocialInspiration] = useState(() => { try { const s = localStorage.getItem("bb_social_inspiration"); return s ? JSON.parse(s) : []; } catch { return []; } });
+  const [calEvents,   setCalEvents]   = usePersistedState(calEventsStore);
+  const [wsSettings,  setWsSettings]  = usePersistedState(wsSettingsStore);
+
   const [cloudSynced, setCloudSynced] = useState(false);
 
   // Pull from cloud once on mount — cloud wins if it has data
   useEffect(() => {
     (async () => {
-      const cloudPosts = await cloudGet("posts", userId);
-      if (cloudPosts && Array.isArray(cloudPosts) && cloudPosts.length > 0) {
-        setPosts(cloudPosts);
-      }
       const cloudInspiration = await cloudGet("inspiration", userId);
       if (cloudInspiration && Array.isArray(cloudInspiration)) {
         setInspiration(cloudInspiration);
@@ -12592,7 +12590,6 @@ export default function Dashboard({ user, workspace }) {
   }, [activeTab]);
 
   // Push to cloud whenever posts/inspiration/competitors change (debounced)
-  useEffect(() => { if (cloudSynced) cloudSaveDebounced("posts", userId, posts); }, [posts, cloudSynced]);
   useEffect(() => { if (cloudSynced) cloudSaveDebounced("inspiration", userId, inspiration); }, [inspiration, cloudSynced]);
   useEffect(() => { if (cloudSynced) cloudSaveDebounced("competitors", userId, competitors); }, [competitors, cloudSynced]);
   // Push API keys to cloud (debounced — they change when user adds a key in settings)
