@@ -2714,6 +2714,13 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
 // workspace's own data.
 const workspacesStore = createPersistedStore("bb_workspaces", "workspaces", []);
 const activeWorkspaceStore = createPersistedStore("bb_active_workspace", "active_workspace", "default");
+// The workspace's own display settings (name/url/tagline) — genuinely
+// per-workspace data (different brand, different name), but was left as a
+// plain global useState/localStorage pattern and never migrated. This was
+// the actual cause of "switching workspace still shows Cask and Stream" —
+// the active id was changing correctly, but the DISPLAYED name came from
+// this un-scoped store, shared across every workspace.
+const wsSettingsStore = createPersistedStore("bb_ws_settings", "ws_settings", null, { scope: "workspace" });
 
 // ─── SETTINGS: GENERAL ───────────────────────────────────────────────────────
 
@@ -12445,7 +12452,7 @@ export default function Dashboard({ user, workspace }) {
   const [inspiration, setInspiration] = useState(() => { try { const s = localStorage.getItem("bb_inspiration"); return s ? JSON.parse(s) : INSPIRATION; } catch { return INSPIRATION; } });
   const [socialInspiration, setSocialInspiration] = useState(() => { try { const s = localStorage.getItem("bb_social_inspiration"); return s ? JSON.parse(s) : []; } catch { return []; } });
   const [calEvents,   setCalEvents]   = usePersistedState(calEventsStore);
-  const [wsSettings,  setWsSettings]  = useState(() => { try { const s = localStorage.getItem("bb_ws_settings"); return s ? JSON.parse(s) : null; } catch { return null; } });
+  const [wsSettings,  setWsSettings]  = usePersistedState(wsSettingsStore);
 
   // ── Cloud sync (Netlify Blobs) — survives localStorage clearing ──────────
   const userId = user?.email || user?.id || "anonymous";
