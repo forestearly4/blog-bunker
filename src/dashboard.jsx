@@ -24,7 +24,7 @@ const DEFAULT_BRAND_GUIDE = {
   competitors:    "",
 };
 
-const brandGuideStore = createPersistedStore(BRAND_GUIDE_STORAGE, "brand_guide", DEFAULT_BRAND_GUIDE);
+const brandGuideStore = createPersistedStore(BRAND_GUIDE_STORAGE, "brand_guide", DEFAULT_BRAND_GUIDE, { scope: "workspace" });
 
 function loadBrandGuide() {
   return { ...DEFAULT_BRAND_GUIDE, ...brandGuideStore.load() };
@@ -119,25 +119,41 @@ async function cloudSet(key, userId, value) {
 //                    move a date that should only ever be set once.
 //   (value, key) => boolean — custom: return true if the cloud value should
 //                    replace local.
-function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cloud-wins" } = {}) {
+// `scope` controls whether a setting is shared across all of an account's
+// workspaces ("account", the default — plan tier, API keys, trial date) or
+// specific to just one ("workspace" — brand guide, WordPress/Buffer/Meta
+// connections, posts, calendar, etc.). Workspace-scoped keys get suffixed
+// with the active workspace id; when no workspace is set (or it's the first
+// one), the key falls back to its original unsuffixed form — so existing
+// single-workspace data needs no migration at all, it just becomes
+// "workspace #1" once workspaces exist.
+function scopedKey(key, scope) {
+  if (scope !== "workspace") return key;
+  const wsId = window.__bbWorkspaceId;
+  if (!wsId || wsId === "default") return key;
+  return `${key}__ws_${wsId}`;
+}
+
+function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cloud-wins", scope = "account" } = {}) {
   const load = () => {
     try {
-      const raw = localStorage.getItem(localKey);
+      const raw = localStorage.getItem(scopedKey(localKey, scope));
       if (raw == null) return defaultValue;
       try { return JSON.parse(raw); }
       catch { return raw; } // pre-existing raw (non-JSON) value from before migration to this store
     } catch { return defaultValue; }
   };
   const saveLocal = (value) => {
-    try { localStorage.setItem(localKey, JSON.stringify(value)); } catch {}
+    try { localStorage.setItem(scopedKey(localKey, scope), JSON.stringify(value)); } catch {}
   };
   const save = (value, { debounce = true, skipCloud = false } = {}) => {
     saveLocal(value);
     if (skipCloud) return;
     const uid = window.__bbUserId;
     if (!uid) return;
-    if (debounce) cloudSaveDebounced(cloudKey, uid, value);
-    else cloudSet(cloudKey, uid, value);
+    const key = scopedKey(cloudKey, scope);
+    if (debounce) cloudSaveDebounced(key, uid, value);
+    else cloudSet(key, uid, value);
   };
   const shouldCloudWin = (cloudValue, localValue) => {
     if (cloudValue == null) return false;
@@ -157,12 +173,12 @@ function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cl
   };
   const pullFromCloud = async (userId, localValue) => {
     if (!userId) return null;
-    const cloudValue = await cloudGet(cloudKey, userId);
+    const cloudValue = await cloudGet(scopedKey(cloudKey, scope), userId);
     if (!shouldCloudWin(cloudValue, localValue)) return null;
     saveLocal(cloudValue);
     return cloudValue;
   };
-  return { load, save, pullFromCloud, localKey, cloudKey };
+  return { load, save, pullFromCloud, localKey, cloudKey, scope };
 }
 
 // React hook wrapper — for a component that wants live, auto-syncing state
@@ -685,6 +701,7 @@ const CALENDAR_EVENTS = [
 // entries than what's already local (a simple, safe heuristic).
 const calEventsStore = createPersistedStore("bb_cal_events", "cal_events", CALENDAR_EVENTS, {
   strategy: (cloudValue, localValue) => Array.isArray(cloudValue) && cloudValue.length > (localValue?.length || 0),
+  scope: "workspace",
 });
 
 const COMPETITORS = [
@@ -2677,10 +2694,17 @@ function WixSyncPanel({ onSync, onDisconnect, currentPostCount, onConnect }) {
   );
 }
 
+// ─── MULTI-WORKSPACE ──────────────────────────────────────────────────────────
+// Both stores are account-scoped (scope defaults to "account") — the list of
+// workspaces and which one is active belong to the ACCOUNT, not to any one
+// workspace's own data.
+const workspacesStore = createPersistedStore("bb_workspaces", "workspaces", []);
+const activeWorkspaceStore = createPersistedStore("bb_active_workspace", "active_workspace", "default");
+
 // ─── SETTINGS: GENERAL ───────────────────────────────────────────────────────
 
 const LOGO_STORAGE = "bb_workspace_logo";
-const logoStore = createPersistedStore(LOGO_STORAGE, "workspace_logo", null);
+const logoStore = createPersistedStore(LOGO_STORAGE, "workspace_logo", null, { scope: "workspace" });
 function loadLogo() { return logoStore.load(); }
 async function saveLogo(data) {
   console.log("[logo] saveLogo called, userId:", window.__bbUserId, "data length:", data?.length);
@@ -2970,7 +2994,7 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
 // ─── COMPETITOR POST TRACKER ──────────────────────────────────────────────────
 
 const COMP_TRACKER_STORAGE = "bb_comp_tracker";
-const compTrackerStore = createPersistedStore(COMP_TRACKER_STORAGE, "comp_tracker", {});
+const compTrackerStore = createPersistedStore(COMP_TRACKER_STORAGE, "comp_tracker", {}, { scope: "workspace" });
 
 function loadTrackerData() { return compTrackerStore.load(); }
 function saveTrackerData(data) { compTrackerStore.save(data, { debounce: false }); }
@@ -4508,7 +4532,7 @@ function CalendarTab({ calEvents, posts = [], deleteCalEvent, cleanUpCalendar, s
 
 const GSC_STORAGE      = "bb_gsc_config";
 const GSC_DATA_STORAGE = "bb_gsc_data";
-const gscConfigStore = createPersistedStore(GSC_STORAGE, "gsc_config", {});
+const gscConfigStore = createPersistedStore(GSC_STORAGE, "gsc_config", {}, { scope: "workspace" });
 
 function loadGSCConfig() { return gscConfigStore.load(); }
 function saveGSCConfig(d) {
@@ -4965,7 +4989,7 @@ function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, s
 // ─── META (FACEBOOK + INSTAGRAM) INTEGRATION ─────────────────────────────────
 
 const META_STORAGE = "bb_meta_config";
-const metaConfigStore = createPersistedStore(META_STORAGE, "meta_config", {});
+const metaConfigStore = createPersistedStore(META_STORAGE, "meta_config", {}, { scope: "workspace" });
 function loadMetaConfig() { return metaConfigStore.load(); }
 function saveMetaConfig(d) {
   // Only push to cloud once actually connected — before that it's just an
@@ -9046,7 +9070,7 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
 // ─── VIDEO PLANNING STUDIO ───────────────────────────────────────────────────
 
 const VIDEO_PLAN_STORAGE = "bb_video_plans";
-const videoPlansStore = createPersistedStore(VIDEO_PLAN_STORAGE, "video_plans", []);
+const videoPlansStore = createPersistedStore(VIDEO_PLAN_STORAGE, "video_plans", [], { scope: "workspace" });
 function loadVideoPlans() { return videoPlansStore.load(); }
 function saveVideoPlansToStorage(p) { videoPlansStore.save(p); }
 
@@ -10614,7 +10638,7 @@ const MOBILE_CSS = `
 // ─── WORDPRESS SETTINGS ──────────────────────────────────────────────────────
 
 const WORDPRESS_STORAGE = "bb_wordpress_config";
-const wordPressStore = createPersistedStore(WORDPRESS_STORAGE, "wordpress_config", {});
+const wordPressStore = createPersistedStore(WORDPRESS_STORAGE, "wordpress_config", {}, { scope: "workspace" });
 function loadWordPressConfig() { return wordPressStore.load(); }
 function saveWordPressConfig(d) { wordPressStore.save(d, { debounce: false }); }
 
@@ -10711,7 +10735,7 @@ function WordPressSettings() {
 // ─── BUFFER SETTINGS ─────────────────────────────────────────────────────────
 
 const BUFFER_STORAGE = "bb_buffer_config";
-const bufferStore = createPersistedStore(BUFFER_STORAGE, "buffer_config", {});
+const bufferStore = createPersistedStore(BUFFER_STORAGE, "buffer_config", {}, { scope: "workspace" });
 function loadBufferConfig() { return bufferStore.load(); }
 function saveBufferConfig(d) { bufferStore.save(d, { debounce: false }); }
 
@@ -10965,7 +10989,7 @@ function BufferSettings() {
 
 // Keep old SocialPlatformSettings as a thin wrapper that redirects to Buffer
 const SOCIAL_PLATFORM_STORAGE = "bb_social_platforms";
-const socialPlatformsStore = createPersistedStore(SOCIAL_PLATFORM_STORAGE, "social_platforms", {});
+const socialPlatformsStore = createPersistedStore(SOCIAL_PLATFORM_STORAGE, "social_platforms", {}, { scope: "workspace" });
 function loadSocialPlatforms() { return socialPlatformsStore.load(); }
 function saveSocialPlatforms(d) { socialPlatformsStore.save(d, { debounce: false }); }
 
@@ -12413,6 +12437,32 @@ export default function Dashboard({ user, workspace }) {
   const userId = user?.email || user?.id || "anonymous";
   // Make userId available to components deep in tree (HeadlineImagePanel etc.)
   window.__bbUserId = userId;
+
+  // ── Multi-workspace ────────────────────────────────────────────────────
+  // The workspace LIST and which one is active are account-scoped (every
+  // workspace an account has, and which you're currently looking at) — the
+  // DATA inside each workspace (brand guide, connections, posts, etc.) is
+  // what actually gets scoped per-workspace, via scopedKey() in the store
+  // factory. window.__bbWorkspaceId is set synchronously here for the exact
+  // same reason __bbUserId is — several stores read it during their own
+  // first render, so it must be set before any child mounts, not deferred
+  // to an effect (that was a real bug fixed earlier in this project).
+  const [workspaces, setWorkspaces] = usePersistedState(workspacesStore);
+  const [activeWorkspaceId, setActiveWorkspaceIdState] = usePersistedState(activeWorkspaceStore);
+  window.__bbWorkspaceId = activeWorkspaceId;
+
+  const setActiveWorkspaceId = (id) => {
+    setActiveWorkspaceIdState(id);
+    window.__bbWorkspaceId = id; // update synchronously too — don't wait for the next render
+  };
+
+  const createWorkspace = (name) => {
+    const id = `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    setWorkspaces(list => [...list, { id, name, createdAt: new Date().toISOString() }]);
+    setActiveWorkspaceId(id);
+    return id;
+  };
+
   const [cloudSynced, setCloudSynced] = useState(false);
 
   // Pull from cloud once on mount — cloud wins if it has data
@@ -12843,6 +12893,34 @@ export default function Dashboard({ user, workspace }) {
             <span style={{width:6,height:6,borderRadius:99,background:cloudSynced?fixedGreen:"var(--muted)",display:"inline-block",marginRight:4}}/>
             {cloudSynced?"☁ Cloud synced":"☁ Syncing…"}
           </div>
+          {workspaces.length > 0 && (
+            <select
+              value={activeWorkspaceId}
+              onChange={(e) => {
+                if (e.target.value === "__new__") {
+                  const name = window.prompt("Name this workspace (e.g. a new brand or blog):");
+                  if (name?.trim()) { createWorkspace(name.trim()); window.location.reload(); }
+                  return;
+                }
+                setActiveWorkspaceId(e.target.value);
+                window.location.reload(); // simplest correct way to fully re-hydrate every workspace-scoped store
+              }}
+              style={{ marginTop:10, width:"100%", padding:"6px 8px", borderRadius:6, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:11, fontFamily:"var(--font-body)" }}>
+              <option value="default">{wsName} (this workspace)</option>
+              {workspaces.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+              <option value="__new__">+ New workspace…</option>
+            </select>
+          )}
+          {workspaces.length === 0 && (
+            <button
+              onClick={() => {
+                const name = window.prompt("Name this workspace (e.g. a new brand or blog):");
+                if (name?.trim()) { createWorkspace(name.trim()); window.location.reload(); }
+              }}
+              style={{ marginTop:10, width:"100%", padding:"6px 8px", borderRadius:6, border:"1px dashed var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              + Add another workspace
+            </button>
+          )}
         </div>
 
         <nav style={{padding:"12px 12px",flex:1}}>
