@@ -24,13 +24,14 @@ const DEFAULT_BRAND_GUIDE = {
   competitors:    "",
 };
 
+const brandGuideStore = createPersistedStore(BRAND_GUIDE_STORAGE, "brand_guide", DEFAULT_BRAND_GUIDE);
+
 function loadBrandGuide() {
-  try { return { ...DEFAULT_BRAND_GUIDE, ...JSON.parse(localStorage.getItem(BRAND_GUIDE_STORAGE) || "{}") }; }
-  catch { return { ...DEFAULT_BRAND_GUIDE }; }
+  return { ...DEFAULT_BRAND_GUIDE, ...brandGuideStore.load() };
 }
 
 function saveBrandGuide(data) {
-  try { localStorage.setItem(BRAND_GUIDE_STORAGE, JSON.stringify(data)); } catch {}
+  brandGuideStore.save(data, { debounce: false });
 }
 
 // Builds a system prompt prefix from the brand guide — injected into every AI call
@@ -130,8 +131,9 @@ function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cl
   const saveLocal = (value) => {
     try { localStorage.setItem(localKey, JSON.stringify(value)); } catch {}
   };
-  const save = (value, { debounce = true } = {}) => {
+  const save = (value, { debounce = true, skipCloud = false } = {}) => {
     saveLocal(value);
+    if (skipCloud) return;
     const uid = window.__bbUserId;
     if (!uid) return;
     if (debounce) cloudSaveDebounced(cloudKey, uid, value);
@@ -678,6 +680,12 @@ const CALENDAR_EVENTS = [
   { day:25, title:"Summer River Preview",          type:"idea"       },
   { day:28, title:"Newsletter: Cast & Cask Weekly",type:"newsletter" },
 ];
+// Custom strategy — events don't have one shared "last modified" timestamp
+// to compare like a draft does, so cloud wins only if it strictly has more
+// entries than what's already local (a simple, safe heuristic).
+const calEventsStore = createPersistedStore("bb_cal_events", "cal_events", CALENDAR_EVENTS, {
+  strategy: (cloudValue, localValue) => Array.isArray(cloudValue) && cloudValue.length > (localValue?.length || 0),
+});
 
 const COMPETITORS = [
   { name:"Hatch Magazine",  url:"hatchmag.com",       posts:"4/wk", traffic:"120K", strengths:"Strong SEO, video content",   threat:"high"   },
@@ -814,16 +822,10 @@ const AI_PROVIDERS = [
 const KEYS_STORAGE = "bb_api_keys";
 const MODEL_STORAGE = "bb_ai_models";
 const ACTIVE_PROVIDER_STORAGE = "bb_active_provider";
+const apiKeysStore = createPersistedStore(KEYS_STORAGE, "api_keys", {});
 
-function loadKeys() {
-  try { return JSON.parse(localStorage.getItem(KEYS_STORAGE) || "{}"); } catch { return {}; }
-}
-function saveKeys(keys) {
-  try { localStorage.setItem(KEYS_STORAGE, JSON.stringify(keys)); } catch {}
-  // Push to cloud
-  const uid = window.__bbUserId;
-  if (uid) cloudSet("api_keys", uid, keys);
-}
+function loadKeys() { return apiKeysStore.load(); }
+function saveKeys(keys) { apiKeysStore.save(keys, { debounce: false }); }
 function loadModels() {
   try {
     const m = JSON.parse(localStorage.getItem(MODEL_STORAGE) || "{}");
@@ -2968,13 +2970,10 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
 // ─── COMPETITOR POST TRACKER ──────────────────────────────────────────────────
 
 const COMP_TRACKER_STORAGE = "bb_comp_tracker";
+const compTrackerStore = createPersistedStore(COMP_TRACKER_STORAGE, "comp_tracker", {});
 
-function loadTrackerData() {
-  try { return JSON.parse(localStorage.getItem(COMP_TRACKER_STORAGE) || "{}"); } catch { return {}; }
-}
-function saveTrackerData(data) {
-  try { localStorage.setItem(COMP_TRACKER_STORAGE, JSON.stringify(data)); } catch {} 
-}
+function loadTrackerData() { return compTrackerStore.load(); }
+function saveTrackerData(data) { compTrackerStore.save(data, { debounce: false }); }
 
 function CompetitorTracker({ competitors, onAddInspiration, activeProvider, activeModel, apiKeys, dark, onProviderChange, onModelChange }) {
   const [tracking,   setTracking]   = useState(loadTrackerData);
@@ -4509,13 +4508,13 @@ function CalendarTab({ calEvents, posts = [], deleteCalEvent, cleanUpCalendar, s
 
 const GSC_STORAGE      = "bb_gsc_config";
 const GSC_DATA_STORAGE = "bb_gsc_data";
+const gscConfigStore = createPersistedStore(GSC_STORAGE, "gsc_config", {});
 
-function loadGSCConfig() { try { return JSON.parse(localStorage.getItem(GSC_STORAGE) || "{}"); } catch { return {}; } }
+function loadGSCConfig() { return gscConfigStore.load(); }
 function saveGSCConfig(d) {
-  try { localStorage.setItem(GSC_STORAGE, JSON.stringify(d)); } catch {}
-  // Also push to cloud if we have a userId
-  const uid = window.__bbUserId;
-  if (uid && d?.refreshToken) cloudSet("gsc_config", uid, d);
+  // Only push to cloud once there's an actual refresh token — before that,
+  // this is just an in-progress OAuth flow, not something worth syncing yet.
+  gscConfigStore.save(d, { debounce: false, skipCloud: !d?.refreshToken });
 }
 function loadGSCData()   { try { return JSON.parse(localStorage.getItem(GSC_DATA_STORAGE) || "null"); } catch { return null; } }
 function saveGSCData(d)  { try { localStorage.setItem(GSC_DATA_STORAGE, JSON.stringify(d)); } catch {} }
@@ -4966,12 +4965,12 @@ function PostsTab({ posts, filteredPosts, postFilter, setPostFilter, setPosts, s
 // ─── META (FACEBOOK + INSTAGRAM) INTEGRATION ─────────────────────────────────
 
 const META_STORAGE = "bb_meta_config";
-function loadMetaConfig() { try { return JSON.parse(localStorage.getItem(META_STORAGE) || "{}"); } catch { return {}; } }
+const metaConfigStore = createPersistedStore(META_STORAGE, "meta_config", {});
+function loadMetaConfig() { return metaConfigStore.load(); }
 function saveMetaConfig(d) {
-  try { localStorage.setItem(META_STORAGE, JSON.stringify(d)); } catch {}
-  // Also push to cloud if connected
-  const uid = window.__bbUserId;
-  if (uid && d?.connected) cloudSet("meta_config", uid, d);
+  // Only push to cloud once actually connected — before that it's just an
+  // in-progress setup state, not worth syncing.
+  metaConfigStore.save(d, { debounce: false, skipCloud: !d?.connected });
 }
 
 // Converts a blob: URL (from generated images) into a publicly fetchable URL.
@@ -9047,8 +9046,9 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
 // ─── VIDEO PLANNING STUDIO ───────────────────────────────────────────────────
 
 const VIDEO_PLAN_STORAGE = "bb_video_plans";
-function loadVideoPlans() { try { return JSON.parse(localStorage.getItem(VIDEO_PLAN_STORAGE) || "[]"); } catch { return []; } }
-function saveVideoPlansToStorage(p) { try { localStorage.setItem(VIDEO_PLAN_STORAGE, JSON.stringify(p)); } catch {} }
+const videoPlansStore = createPersistedStore(VIDEO_PLAN_STORAGE, "video_plans", []);
+function loadVideoPlans() { return videoPlansStore.load(); }
+function saveVideoPlansToStorage(p) { videoPlansStore.save(p); }
 
 function VideoPlanningStudio({ activeProvider, activeModel, apiKeys, posts, userId }) {
   const [plans,     setPlans]     = useState(loadVideoPlans);
@@ -12406,7 +12406,7 @@ export default function Dashboard({ user, workspace }) {
   const [socialCompetitors, setSocialCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_social_competitors"); return s ? JSON.parse(s) : []; } catch { return []; } });
   const [inspiration, setInspiration] = useState(() => { try { const s = localStorage.getItem("bb_inspiration"); return s ? JSON.parse(s) : INSPIRATION; } catch { return INSPIRATION; } });
   const [socialInspiration, setSocialInspiration] = useState(() => { try { const s = localStorage.getItem("bb_social_inspiration"); return s ? JSON.parse(s) : []; } catch { return []; } });
-  const [calEvents,   setCalEvents]   = useState(() => { try { const s = localStorage.getItem("bb_cal_events"); return s ? JSON.parse(s) : CALENDAR_EVENTS; } catch { return CALENDAR_EVENTS; } });
+  const [calEvents,   setCalEvents]   = usePersistedState(calEventsStore);
   const [wsSettings,  setWsSettings]  = useState(() => { try { const s = localStorage.getItem("bb_ws_settings"); return s ? JSON.parse(s) : null; } catch { return null; } });
 
   // ── Cloud sync (Netlify Blobs) — survives localStorage clearing ──────────
@@ -12437,28 +12437,16 @@ export default function Dashboard({ user, workspace }) {
         saveSocialPostsToStorage(cloudSocialPosts);
       }
       // Pull brand guide
-      const cloudBrandGuide = await cloudGet("brand_guide", userId);
-      if (cloudBrandGuide && typeof cloudBrandGuide === "object") {
-        setBrandGuide(cloudBrandGuide);
-        saveBrandGuide(cloudBrandGuide);
-      }
+      const cloudBrandGuide = await brandGuideStore.pullFromCloud(userId, loadBrandGuide());
+      if (cloudBrandGuide) setBrandGuide(cloudBrandGuide);
       // Pull API keys
-      const cloudApiKeys = await cloudGet("api_keys", userId);
-      if (cloudApiKeys && typeof cloudApiKeys === "object") {
-        setApiKeys(cloudApiKeys);
-        try { localStorage.setItem(KEYS_STORAGE, JSON.stringify(cloudApiKeys)); } catch {}
-      }
+      const cloudApiKeys = await apiKeysStore.pullFromCloud(userId, loadKeys());
+      if (cloudApiKeys) setApiKeys(cloudApiKeys);
       // Pull GSC config (tokens)
-      const cloudGSC = await cloudGet("gsc_config", userId);
-      if (cloudGSC && typeof cloudGSC === "object" && cloudGSC.refreshToken) {
-        saveGSCConfig(cloudGSC);
-      }
+      await gscConfigStore.pullFromCloud(userId, loadGSCConfig());
       // Pull Meta config
-      const cloudMeta = await cloudGet("meta_config", userId);
-      if (cloudMeta && typeof cloudMeta === "object" && cloudMeta.connected) {
-        saveMetaConfig(cloudMeta);
-        setMetaConfig(cloudMeta);
-      }
+      const cloudMeta = await metaConfigStore.pullFromCloud(userId, loadMetaConfig());
+      if (cloudMeta) setMetaConfig(cloudMeta);
       // Pull Buffer config
       const cloudBuffer = await bufferStore.pullFromCloud(userId, loadBufferConfig());
       if (cloudBuffer?.apiKey) { /* already saved locally by pullFromCloud */ }
@@ -12488,14 +12476,8 @@ export default function Dashboard({ user, workspace }) {
       }
       // Pull social platform connection settings
       await socialPlatformsStore.pullFromCloud(userId, loadSocialPlatforms());
-      // Pull calendar events — had zero cloud sync before, use whichever has
-      // more entries as a simple heuristic since events don't have a single
-      // shared "last modified" timestamp to compare directly.
-      const cloudCalEvents = await cloudGet("cal_events", userId);
-      if (Array.isArray(cloudCalEvents) && cloudCalEvents.length > calEvents.length) {
-        setCalEvents(cloudCalEvents);
-        try { localStorage.setItem("bb_cal_events", JSON.stringify(cloudCalEvents)); } catch {}
-      }
+      await compTrackerStore.pullFromCloud(userId, loadTrackerData());
+      await videoPlansStore.pullFromCloud(userId, loadVideoPlans());
       setCloudSynced(true);
     })();
   }, []);
@@ -12543,12 +12525,6 @@ export default function Dashboard({ user, workspace }) {
   useEffect(() => { try { localStorage.setItem("bb_inspiration", JSON.stringify(inspiration)); } catch {} }, [inspiration]);
   useEffect(() => { try { localStorage.setItem("bb_social_inspiration", JSON.stringify(socialInspiration)); } catch {} }, [socialInspiration]);
   useEffect(() => { try { localStorage.setItem("bb_social_competitors", JSON.stringify(socialCompetitors)); } catch {} }, [socialCompetitors]);
-  useEffect(() => {
-    try { localStorage.setItem("bb_cal_events", JSON.stringify(calEvents)); } catch {}
-    const uid = window.__bbUserId;
-    if (uid) cloudSaveDebounced("cal_events", uid, calEvents);
-  }, [calEvents]);
-
   // ── Modal state
   const [postEditorOpen,    setPostEditorOpen]    = useState(false);
   const [editingPost,       setEditingPost]       = useState(null);
@@ -13186,7 +13162,7 @@ export default function Dashboard({ user, workspace }) {
                 )}
 
                 {settingsSection==="brand"&&(
-                  <BrandGuidePanel onSave={(g) => { setBrandGuide(g); cloudSet("brand_guide", userId, g); }} />
+                  <BrandGuidePanel onSave={(g) => { setBrandGuide(g); saveBrandGuide(g); }} />
                 )}
 
                 {settingsSection==="gsc"&&(
