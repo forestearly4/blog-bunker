@@ -91,6 +91,17 @@ async function cloudSet(key, userId, value) {
   }
 }
 
+async function cloudDelete(key, userId) {
+  try {
+    const res = await fetch(`/api/data?key=${encodeURIComponent(key)}&userId=${encodeURIComponent(userId)}`, { method: "DELETE" });
+    if (!res.ok) { console.error(`[cloudDelete] "${key}" failed: HTTP ${res.status}`); return false; }
+    return true;
+  } catch(e) {
+    console.error(`[cloudDelete] "${key}" threw:`, e.message);
+    return false;
+  }
+}
+
 // ─── CENTRALIZED SETTINGS STORE ──────────────────────────────────────────────
 // One factory replaces the old pattern of ~21 individually hand-written
 // load/save function pairs — the exact inconsistency that repeatedly caused
@@ -133,6 +144,30 @@ function scopedKey(key, scope) {
   if (!wsId || wsId === "default") return key;
   return `${key}__ws_${wsId}`;
 }
+
+// Every workspace-scoped local/cloud key pair, for cleanly deleting a
+// workspace's data. Kept as one explicit, auditable list rather than derived
+// dynamically — update this whenever a new workspace-scoped setting is added
+// (createPersistedStore-based or scopedKey()-applied-directly, both listed).
+const WORKSPACE_SCOPED_KEYS = [
+  { local: "bb_brand_guide",         cloud: "brand_guide" },
+  { local: "bb_ws_settings",         cloud: "ws_settings" },
+  { local: "bb_workspace_logo",      cloud: "workspace_logo" },
+  { local: "bb_comp_tracker",        cloud: "comp_tracker" },
+  { local: "bb_gsc_config",          cloud: "gsc_config" },
+  { local: "bb_meta_config",         cloud: "meta_config" },
+  { local: "bb_video_plans",         cloud: "video_plans" },
+  { local: "bb_wordpress_config",    cloud: "wordpress_config" },
+  { local: "bb_buffer_config",       cloud: "buffer_config" },
+  { local: "bb_social_platforms",    cloud: "social_platforms" },
+  { local: "bb_cal_events",          cloud: "cal_events" },
+  { local: "bb_posts",               cloud: "posts" },
+  { local: "bb_social_posts",        cloud: "social_posts" },
+  { local: "bb_inspiration",         cloud: "inspiration" },
+  { local: "bb_competitors",         cloud: "competitors" },
+  { local: "bb_social_competitors",  cloud: "social_competitors" },
+  { local: "bb_social_inspiration",  cloud: "social_inspiration" },
+];
 
 function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cloud-wins", scope = "account" } = {}) {
   const load = () => {
@@ -12392,6 +12427,94 @@ function AddInspirationModal({ onSave, onClose }) {
   );
 }
 
+// ─── NEW WORKSPACE MINI-ONBOARDING ────────────────────────────────────────────
+// Shown when creating a new workspace instead of a plain prompt() — a new
+// workspace should feel like a fresh start for a different brand, not an
+// empty shell the user has to go hunting through Settings to fill in.
+
+function NewWorkspaceModal({ onCreate, onClose }) {
+  const [name, setName]           = useState("");
+  const [tagline, setTagline]     = useState("");
+  const [voiceTone, setVoiceTone] = useState("");
+  const [audience, setAudience]   = useState("");
+  const [logoDataUrl, setLogoDataUrl] = useState(null);
+  const [logoStatus, setLogoStatus]   = useState("");
+  const [creating, setCreating]       = useState(false);
+
+  const handleLogoPick = (file) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setLogoStatus("Only image files supported"); return; }
+    if (file.size > 2 * 1024 * 1024) { setLogoStatus("Logo too large — max 2MB"); return; }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const maxH   = 80;
+        const scale  = Math.min(1, maxH / img.height);
+        canvas.width  = Math.round(img.width  * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        setLogoDataUrl(canvas.toDataURL("image/png", 0.9));
+        setLogoStatus("✓ Logo ready");
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleCreate = async () => {
+    if (!name.trim()) return;
+    setCreating(true);
+    await onCreate({ name: name.trim(), tagline: tagline.trim(), voiceTone: voiceTone.trim(), audience: audience.trim(), logoDataUrl });
+    // onCreate reloads the page on success — if we're still here, something failed
+    setCreating(false);
+  };
+
+  const iS = { width:"100%", padding:"9px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
+  const label = { fontSize:11, fontWeight:600, color:"var(--text-secondary)", marginBottom:5, display:"block" };
+
+  return (
+    <Modal onClose={onClose} title="New Workspace">
+      <div style={{ display:"flex", flexDirection:"column", gap:14, minWidth:340 }}>
+        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.5 }}>
+          A workspace is a separate brand or blog — its own posts, calendar, and connections. Everything below is optional except the name; you can always fill in the rest later in Settings.
+        </div>
+        <div>
+          <label style={label}>Workspace name *</label>
+          <input style={iS} value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Trail & Table" autoFocus />
+        </div>
+        <div>
+          <label style={label}>Tagline</label>
+          <input style={iS} value={tagline} onChange={e=>setTagline(e.target.value)} placeholder="A short line under the name" />
+        </div>
+        <div>
+          <label style={label}>Voice & tone</label>
+          <input style={iS} value={voiceTone} onChange={e=>setVoiceTone(e.target.value)} placeholder="e.g. Warm, conversational, a little irreverent" />
+        </div>
+        <div>
+          <label style={label}>Target audience</label>
+          <input style={iS} value={audience} onChange={e=>setAudience(e.target.value)} placeholder="Who is this blog for?" />
+        </div>
+        <div>
+          <label style={label}>Logo</label>
+          <input type="file" accept="image/*" onChange={e=>handleLogoPick(e.target.files[0])} style={{ fontSize:12, color:"var(--text-secondary)" }} />
+          {logoStatus && <div style={{ fontSize:11, color: logoStatus.startsWith("✓") ? "#7a9166" : "var(--red)", marginTop:4 }}>{logoStatus}</div>}
+        </div>
+        <div style={{ display:"flex", gap:10, marginTop:6 }}>
+          <button onClick={handleCreate} disabled={!name.trim() || creating}
+            style={{ flex:1, padding:"10px 16px", borderRadius:8, border:"none", background:name.trim()?"var(--amber)":"var(--bg-elevated)", color:name.trim()?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:name.trim()&&!creating?"pointer":"not-allowed", fontFamily:"var(--font-body)" }}>
+            {creating ? "Creating…" : "Create Workspace"}
+          </button>
+          <button onClick={onClose} style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // ─── ADD CALENDAR EVENT MODAL ─────────────────────────────────────────────────
 
 function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
@@ -12465,6 +12588,7 @@ export default function Dashboard({ user, workspace }) {
   // value and silently overwrite the correctly-saved-locally new one.
   const [activeWorkspaceId, setActiveWorkspaceIdState] = usePersistedState(activeWorkspaceStore, { localOnly: true });
   window.__bbWorkspaceId = activeWorkspaceId;
+  const [showNewWorkspaceModal, setShowNewWorkspaceModal] = useState(false);
   console.log("[workspace-debug] Dashboard render — activeWorkspaceId:", activeWorkspaceId, "workspaces:", workspaces);
 
   const setActiveWorkspaceId = (id) => {
@@ -12480,6 +12604,38 @@ export default function Dashboard({ user, workspace }) {
     workspacesStore.save(newList, { debounce: false }); // same reasoning — must be written before any reload
     setActiveWorkspaceId(id);
     return id;
+  };
+
+  // Creates a workspace AND saves its mini-onboarding data (tagline, brand
+  // guide basics, logo) before reloading. createWorkspace() above already
+  // sets window.__bbWorkspaceId synchronously, so these saves correctly land
+  // scoped to the new workspace rather than the one that was active before.
+  const handleCreateWorkspaceWithOnboarding = async ({ name, tagline, voiceTone, audience, logoDataUrl }) => {
+    createWorkspace(name);
+    wsSettingsStore.save({ name, tagline }, { debounce: false });
+    brandGuideStore.save({ ...DEFAULT_BRAND_GUIDE, brandName: name, tagline, audience, voiceTone }, { debounce: false });
+    if (logoDataUrl) await saveLogo(logoDataUrl);
+    window.location.reload();
+  };
+
+  // Deletes a workspace (never "default" — that's the original workspace,
+  // not something created through this system, so it's never deletable).
+  // Cleans up every scoped key for it, both local and cloud, using the
+  // registry above — otherwise its data would just sit there orphaned
+  // forever under a workspace id nothing can reach anymore.
+  const deleteWorkspace = async (id) => {
+    if (id === "default") return;
+    for (const { local, cloud } of WORKSPACE_SCOPED_KEYS) {
+      try { localStorage.removeItem(`${local}__ws_${id}`); } catch {}
+      cloudDelete(`${cloud}__ws_${id}`, userId); // fire-and-forget is fine here — worst case an orphaned cloud key, not a correctness issue for the user
+    }
+    const newList = workspaces.filter(w => w.id !== id);
+    setWorkspaces(newList);
+    workspacesStore.save(newList, { debounce: false });
+    if (activeWorkspaceId === id) {
+      setActiveWorkspaceId("default");
+      window.location.reload();
+    }
   };
 
   const [dark,            setDark]           = useState(true);
@@ -12945,11 +13101,7 @@ export default function Dashboard({ user, workspace }) {
             <select
               value={activeWorkspaceId}
               onChange={(e) => {
-                if (e.target.value === "__new__") {
-                  const name = window.prompt("Name this workspace (e.g. a new brand or blog):");
-                  if (name?.trim()) { createWorkspace(name.trim()); window.location.reload(); }
-                  return;
-                }
+                if (e.target.value === "__new__") { setShowNewWorkspaceModal(true); return; }
                 setActiveWorkspaceId(e.target.value);
                 window.location.reload(); // simplest correct way to fully re-hydrate every workspace-scoped store
               }}
@@ -12959,17 +13111,33 @@ export default function Dashboard({ user, workspace }) {
               <option value="__new__">+ New workspace…</option>
             </select>
           )}
-          {workspaces.length === 0 && (
+          {activeWorkspaceId !== "default" && (
             <button
               onClick={() => {
-                const name = window.prompt("Name this workspace (e.g. a new brand or blog):");
-                if (name?.trim()) { createWorkspace(name.trim()); window.location.reload(); }
+                const current = workspaces.find(w => w.id === activeWorkspaceId);
+                if (window.confirm(`Delete "${current?.name || "this workspace"}"? This permanently removes its posts, calendar, brand guide, logo, and all connection settings. This cannot be undone.`)) {
+                  deleteWorkspace(activeWorkspaceId);
+                }
               }}
+              style={{ marginTop:6, width:"100%", padding:"5px 8px", borderRadius:6, border:"none", background:"transparent", color:"var(--red)", fontSize:10, cursor:"pointer", fontFamily:"var(--font-body)", opacity:0.7 }}>
+              🗑 Delete this workspace
+            </button>
+          )}
+          {workspaces.length === 0 && (
+            <button
+              onClick={() => setShowNewWorkspaceModal(true)}
               style={{ marginTop:10, width:"100%", padding:"6px 8px", borderRadius:6, border:"1px dashed var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
               + Add another workspace
             </button>
           )}
         </div>
+
+        {showNewWorkspaceModal && (
+          <NewWorkspaceModal
+            onCreate={handleCreateWorkspaceWithOnboarding}
+            onClose={() => setShowNewWorkspaceModal(false)}
+          />
+        )}
 
         <nav style={{padding:"12px 12px",flex:1}}>
           <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.12em",textTransform:"uppercase",color:"var(--muted)",padding:"0 8px 6px"}}>Modules</div>
