@@ -12502,10 +12502,10 @@ export default function Dashboard({ user, workspace }) {
 
   // ── Persistent state (localStorage)
   const [posts,       setPosts]       = usePersistedState(postsStore);
-  const [competitors, setCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_competitors"); return s ? JSON.parse(s) : COMPETITORS; } catch { return COMPETITORS; } });
-  const [socialCompetitors, setSocialCompetitors] = useState(() => { try { const s = localStorage.getItem("bb_social_competitors"); return s ? JSON.parse(s) : []; } catch { return []; } });
-  const [inspiration, setInspiration] = useState(() => { try { const s = localStorage.getItem("bb_inspiration"); return s ? JSON.parse(s) : INSPIRATION; } catch { return INSPIRATION; } });
-  const [socialInspiration, setSocialInspiration] = useState(() => { try { const s = localStorage.getItem("bb_social_inspiration"); return s ? JSON.parse(s) : []; } catch { return []; } });
+  const [competitors, setCompetitors] = useState(() => { try { const s = localStorage.getItem(scopedKey("bb_competitors", "workspace")); return s ? JSON.parse(s) : COMPETITORS; } catch { return COMPETITORS; } });
+  const [socialCompetitors, setSocialCompetitors] = useState(() => { try { const s = localStorage.getItem(scopedKey("bb_social_competitors", "workspace")); return s ? JSON.parse(s) : []; } catch { return []; } });
+  const [inspiration, setInspiration] = useState(() => { try { const s = localStorage.getItem(scopedKey("bb_inspiration", "workspace")); return s ? JSON.parse(s) : INSPIRATION; } catch { return INSPIRATION; } });
+  const [socialInspiration, setSocialInspiration] = useState(() => { try { const s = localStorage.getItem(scopedKey("bb_social_inspiration", "workspace")); return s ? JSON.parse(s) : []; } catch { return []; } });
   const [calEvents,   setCalEvents]   = usePersistedState(calEventsStore);
   const [wsSettings,  setWsSettings]  = usePersistedState(wsSettingsStore);
 
@@ -12514,16 +12514,16 @@ export default function Dashboard({ user, workspace }) {
   // Pull from cloud once on mount — cloud wins if it has data
   useEffect(() => {
     (async () => {
-      const cloudInspiration = await cloudGet("inspiration", userId);
+      const cloudInspiration = await cloudGet(scopedKey("inspiration", "workspace"), userId);
       if (cloudInspiration && Array.isArray(cloudInspiration)) {
         setInspiration(cloudInspiration);
       }
-      const cloudCompetitors = await cloudGet("competitors", userId);
+      const cloudCompetitors = await cloudGet(scopedKey("competitors", "workspace"), userId);
       if (cloudCompetitors && Array.isArray(cloudCompetitors)) {
         setCompetitors(cloudCompetitors);
       }
       // Pull social posts
-      const cloudSocialPosts = await cloudGet("social_posts", userId);
+      const cloudSocialPosts = await cloudGet(scopedKey("social_posts", "workspace"), userId);
       if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
         setSocialPosts(cloudSocialPosts);
         saveSocialPostsToStorage(cloudSocialPosts);
@@ -12578,7 +12578,7 @@ export default function Dashboard({ user, workspace }) {
   useEffect(() => {
     const onVisible = async () => {
       if (document.visibilityState !== "visible") return;
-      const cloudSocialPosts = await cloudGet("social_posts", userId);
+      const cloudSocialPosts = await cloudGet(scopedKey("social_posts", "workspace"), userId);
       if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
         setSocialPosts(cloudSocialPosts);
         saveSocialPostsToStorage(cloudSocialPosts);
@@ -12593,7 +12593,7 @@ export default function Dashboard({ user, workspace }) {
   useEffect(() => {
     if (activeTab !== "social") return;
     (async () => {
-      const cloudSocialPosts = await cloudGet("social_posts", userId);
+      const cloudSocialPosts = await cloudGet(scopedKey("social_posts", "workspace"), userId);
       if (cloudSocialPosts && Array.isArray(cloudSocialPosts)) {
         setSocialPosts(cloudSocialPosts);
         saveSocialPostsToStorage(cloudSocialPosts);
@@ -12602,8 +12602,8 @@ export default function Dashboard({ user, workspace }) {
   }, [activeTab]);
 
   // Push to cloud whenever posts/inspiration/competitors change (debounced)
-  useEffect(() => { if (cloudSynced) cloudSaveDebounced("inspiration", userId, inspiration); }, [inspiration, cloudSynced]);
-  useEffect(() => { if (cloudSynced) cloudSaveDebounced("competitors", userId, competitors); }, [competitors, cloudSynced]);
+  useEffect(() => { if (cloudSynced) cloudSaveDebounced(scopedKey("inspiration", "workspace"), userId, inspiration); }, [inspiration, cloudSynced]);
+  useEffect(() => { if (cloudSynced) cloudSaveDebounced(scopedKey("competitors", "workspace"), userId, competitors); }, [competitors, cloudSynced]);
   // Push API keys to cloud (debounced — they change when user adds a key in settings)
   useEffect(() => { if (cloudSynced && Object.keys(apiKeys).length > 0) cloudSaveDebounced("api_keys", userId, apiKeys, 2000); }, [apiKeys, cloudSynced]);
   // Push GSC + Meta configs whenever they change (triggered manually after connect/save)
@@ -12614,8 +12614,8 @@ export default function Dashboard({ user, workspace }) {
   useEffect(() => { try { localStorage.setItem("bb_posts",       JSON.stringify(posts));       } catch {} }, [posts]);
   useEffect(() => { try { localStorage.setItem("bb_competitors", JSON.stringify(competitors)); } catch {} }, [competitors]);
   useEffect(() => { try { localStorage.setItem("bb_inspiration", JSON.stringify(inspiration)); } catch {} }, [inspiration]);
-  useEffect(() => { try { localStorage.setItem("bb_social_inspiration", JSON.stringify(socialInspiration)); } catch {} }, [socialInspiration]);
-  useEffect(() => { try { localStorage.setItem("bb_social_competitors", JSON.stringify(socialCompetitors)); } catch {} }, [socialCompetitors]);
+  useEffect(() => { try { localStorage.setItem(scopedKey("bb_social_inspiration", "workspace"), JSON.stringify(socialInspiration)); } catch {} }, [socialInspiration]);
+  useEffect(() => { try { localStorage.setItem(scopedKey("bb_social_competitors", "workspace"), JSON.stringify(socialCompetitors)); } catch {} }, [socialCompetitors]);
   // ── Modal state
   const [postEditorOpen,    setPostEditorOpen]    = useState(false);
   const [editingPost,       setEditingPost]       = useState(null);
@@ -12727,7 +12727,7 @@ export default function Dashboard({ user, workspace }) {
         ...p,
         imageUrl: p.imageUrl?.startsWith("blob:") ? null : p.imageUrl,
       }));
-      cloudSet("social_posts", userId, forCloud);
+      cloudSet(scopedKey("social_posts", "workspace"), userId, forCloud);
       // Also sync Meta credentials alongside so the scheduler can publish
       const meta = loadMetaConfig();
       if (meta?.connected) cloudSet("meta_config", userId, meta);
@@ -12739,7 +12739,7 @@ export default function Dashboard({ user, workspace }) {
     setSocialPosts(all => {
       const next = all.filter(p => p.id !== id);
       saveSocialPostsToStorage(next);
-      cloudSet("social_posts", userId, next);
+      cloudSet(scopedKey("social_posts", "workspace"), userId, next);
       return next;
     });
   };
