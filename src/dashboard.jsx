@@ -137,7 +137,11 @@ function scopedKey(key, scope) {
 function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cloud-wins", scope = "account" } = {}) {
   const load = () => {
     try {
-      const raw = localStorage.getItem(scopedKey(localKey, scope));
+      const key = scopedKey(localKey, scope);
+      if (scope === "workspace" && (localKey === "bb_posts" || localKey === "bb_cal_events")) {
+        console.log(`[workspace-debug] loading "${localKey}" — window.__bbWorkspaceId=${window.__bbWorkspaceId}, resolved key="${key}"`);
+      }
+      const raw = localStorage.getItem(key);
       if (raw == null) return defaultValue;
       try { return JSON.parse(raw); }
       catch { return raw; } // pre-existing raw (non-JSON) value from before migration to this store
@@ -173,7 +177,14 @@ function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cl
   };
   const pullFromCloud = async (userId, localValue) => {
     if (!userId) return null;
-    const cloudValue = await cloudGet(scopedKey(cloudKey, scope), userId);
+    const key = scopedKey(cloudKey, scope);
+    if (scope === "workspace" && (cloudKey === "posts" || cloudKey === "cal_events")) {
+      console.log(`[workspace-debug] pulling "${cloudKey}" from cloud — window.__bbWorkspaceId=${window.__bbWorkspaceId}, resolved key="${key}"`);
+    }
+    const cloudValue = await cloudGet(key, userId);
+    if (scope === "workspace" && (cloudKey === "posts" || cloudKey === "cal_events")) {
+      console.log(`[workspace-debug] cloud returned for "${key}":`, Array.isArray(cloudValue) ? `array of ${cloudValue.length}` : cloudValue);
+    }
     if (!shouldCloudWin(cloudValue, localValue)) return null;
     saveLocal(cloudValue);
     return cloudValue;
@@ -12454,6 +12465,7 @@ export default function Dashboard({ user, workspace }) {
   // value and silently overwrite the correctly-saved-locally new one.
   const [activeWorkspaceId, setActiveWorkspaceIdState] = usePersistedState(activeWorkspaceStore, { localOnly: true });
   window.__bbWorkspaceId = activeWorkspaceId;
+  console.log("[workspace-debug] Dashboard render — activeWorkspaceId:", activeWorkspaceId, "workspaces:", workspaces);
 
   const setActiveWorkspaceId = (id) => {
     setActiveWorkspaceIdState(id);
