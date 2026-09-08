@@ -12786,9 +12786,16 @@ export default function Dashboard({ user, workspace }) {
     saveModels(m);
   };
 
-  const wsName    = wsSettings?.name      || workspace?.name      || "Cask & Stream";
-  const wsUrl     = wsSettings?.url       || workspace?.url       || "caskandstream.com";
-  const wsTagline = wsSettings?.tagline   || "Cast at Dawn. Sip at Dusk.";
+  // The "workspace" prop is OLD, pre-multi-workspace global data — it's
+  // specifically Cask & Stream's own info from Forest's original onboarding,
+  // not generic fallback data. For any OTHER (newly created) workspace with
+  // no settings configured yet, fall back to the name given at creation time
+  // instead — never to Cask & Stream's own legacy data or hardcoded values.
+  const currentWorkspaceMeta = workspaces.find(w => w.id === activeWorkspaceId);
+  const isDefaultWorkspace = !activeWorkspaceId || activeWorkspaceId === "default";
+  const wsName    = wsSettings?.name    || (isDefaultWorkspace ? workspace?.name : currentWorkspaceMeta?.name) || "New Workspace";
+  const wsUrl     = wsSettings?.url     || (isDefaultWorkspace ? workspace?.url  : null) || "";
+  const wsTagline = wsSettings?.tagline || (isDefaultWorkspace ? "Cast at Dawn. Sip at Dusk." : "Add a tagline in Settings → General");
   const connected = workspace?.connected  || false;
   const plan      = "operative";
   const [userTier, setUserTier] = useState(loadUserTier);
@@ -12947,7 +12954,7 @@ export default function Dashboard({ user, workspace }) {
                 window.location.reload(); // simplest correct way to fully re-hydrate every workspace-scoped store
               }}
               style={{ marginTop:10, width:"100%", padding:"6px 8px", borderRadius:6, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:11, fontFamily:"var(--font-body)" }}>
-              <option value="default">{wsName} (this workspace)</option>
+              <option value="default">{workspace?.name || "Cask & Stream"}</option>
               {workspaces.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
               <option value="__new__">+ New workspace…</option>
             </select>
