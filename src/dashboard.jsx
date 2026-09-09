@@ -7387,9 +7387,42 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
 // ─── BRAND GUIDE PANEL ───────────────────────────────────────────────────────
 
-function BrandGuidePanel({ onSave }) {
+function BrandGuidePanel({ onSave, activeProvider, activeModel, apiKeys }) {
   const [guide, setGuide] = useState(loadBrandGuide);
   const [saved, setSaved] = useState(false);
+  const [aiDescription, setAiDescription] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState("");
+
+  const generateWithAI = async () => {
+    if (!aiDescription.trim()) { setGenError("Describe your blog in a sentence or two first"); return; }
+    setGenerating(true); setGenError("");
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a branding consultant. Given a blog's name and a short description, generate a complete, specific, usable brand guide. Return ONLY valid JSON (no fences):
+{
+  "tagline": "a short, memorable tagline (under 8 words)",
+  "audience": "2-3 sentences describing the target reader",
+  "topics": "comma-separated list of 5-8 core content topics",
+  "voiceTone": "2-3 sentences describing voice and tone",
+  "writingStyle": "2-3 sentences of concrete style guidance (sentence length, structure, POV)",
+  "avoidWords": "comma-separated list of 4-6 words/phrases to avoid",
+  "imageStyle": "2-3 sentences describing the visual/photography style",
+  "colorPalette": "a short description of a fitting color palette",
+  "competitors": "1-2 sentences naming the kind of competitors and how this blog differs"
+}
+Be specific and concrete, not generic marketing filler — ground everything in the actual description given.`,
+        `Blog name: ${guide.brandName || "this blog"}\nDescription: ${aiDescription.trim()}`,
+        apiKeys[activeProvider],
+        1500
+      );
+      const generated = parseAIJson(text);
+      setGuide(g => ({ ...g, ...generated }));
+    } catch(e) {
+      setGenError(e.message || "Generation failed — try again");
+    }
+    setGenerating(false);
+  };
 
   const set = (key, val) => setGuide(g => ({ ...g, [key]: val }));
 
@@ -7456,6 +7489,27 @@ function BrandGuidePanel({ onSave }) {
             ● Active
           </div>
         )}
+      </div>
+
+      <div style={{ padding:16, borderRadius:10, background:"var(--amber-glow)", border:"1px solid var(--amber)33" }}>
+        <div style={{ fontSize:12, fontWeight:700, color:"var(--amber)", marginBottom:8 }}>✨ Generate with AI</div>
+        <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:10, lineHeight:1.5 }}>
+          Describe your blog in a sentence or two, and AI fills in every field below — review and tweak anything before saving.
+        </div>
+        <div style={{ display:"flex", gap:8 }}>
+          <input
+            value={aiDescription}
+            onChange={e => setAiDescription(e.target.value)}
+            placeholder='e.g. "A practical blog for independent bloggers about SEO, AI writing tools, and outgrowing Wix"'
+            style={{ ...iS, flex:1 }}
+            onKeyDown={e => { if (e.key === "Enter" && !generating) generateWithAI(); }}
+          />
+          <button onClick={generateWithAI} disabled={generating}
+            style={{ padding:"0 18px", borderRadius:8, border:"none", background:generating?"var(--bg-elevated)":"var(--amber)", color:generating?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:generating?"not-allowed":"pointer", fontFamily:"var(--font-body)", whiteSpace:"nowrap" }}>
+            {generating ? "Generating…" : "Generate"}
+          </button>
+        </div>
+        {genError && <div style={{ fontSize:11, color:"var(--red)", marginTop:8 }}>{genError}</div>}
       </div>
 
       {SECTIONS.map(section => (
@@ -12439,7 +12493,7 @@ function AddInspirationModal({ onSave, onClose }) {
 // workspace should feel like a fresh start for a different brand, not an
 // empty shell the user has to go hunting through Settings to fill in.
 
-function NewWorkspaceModal({ onCreate, onClose }) {
+function NewWorkspaceModal({ onCreate, onClose, activeProvider, activeModel, apiKeys }) {
   const [name, setName]           = useState("");
   const [tagline, setTagline]     = useState("");
   const [voiceTone, setVoiceTone] = useState("");
@@ -12447,6 +12501,31 @@ function NewWorkspaceModal({ onCreate, onClose }) {
   const [logoDataUrl, setLogoDataUrl] = useState(null);
   const [logoStatus, setLogoStatus]   = useState("");
   const [creating, setCreating]       = useState(false);
+  const [description, setDescription] = useState("");
+  const [generating, setGenerating]   = useState(false);
+  const [genError, setGenError]       = useState("");
+
+  const generateFields = async () => {
+    if (!description.trim()) { setGenError("Describe the blog in a sentence or two first"); return; }
+    setGenerating(true); setGenError("");
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a branding consultant. Given a blog's name and a short description, generate a tagline, voice/tone, and target audience. Return ONLY valid JSON (no fences):
+{"tagline":"a short, memorable tagline (under 8 words)","voiceTone":"2-3 sentences describing voice and tone","audience":"2-3 sentences describing the target reader"}
+Be specific and concrete, not generic marketing filler — ground everything in the actual description given.`,
+        `Blog name: ${name || "this blog"}\nDescription: ${description.trim()}`,
+        apiKeys[activeProvider],
+        800
+      );
+      const generated = parseAIJson(text);
+      if (generated.tagline)   setTagline(generated.tagline);
+      if (generated.voiceTone) setVoiceTone(generated.voiceTone);
+      if (generated.audience)  setAudience(generated.audience);
+    } catch(e) {
+      setGenError(e.message || "Generation failed — try again");
+    }
+    setGenerating(false);
+  };
 
   const handleLogoPick = (file) => {
     if (!file) return;
@@ -12490,6 +12569,19 @@ function NewWorkspaceModal({ onCreate, onClose }) {
         <div>
           <label style={label}>Workspace name *</label>
           <input style={iS} value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Trail & Table" autoFocus />
+        </div>
+        <div style={{ padding:12, borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)33" }}>
+          <div style={{ fontSize:11, fontWeight:700, color:"var(--amber)", marginBottom:6 }}>✨ Fill the rest with AI</div>
+          <div style={{ display:"flex", gap:6 }}>
+            <input value={description} onChange={e=>setDescription(e.target.value)} placeholder="Describe this blog in a sentence…"
+              style={{ ...iS, flex:1, fontSize:12, padding:"7px 10px" }}
+              onKeyDown={e => { if (e.key === "Enter" && !generating) { e.preventDefault(); generateFields(); } }} />
+            <button onClick={generateFields} disabled={generating}
+              style={{ padding:"0 14px", borderRadius:6, border:"none", background:generating?"var(--bg-elevated)":"var(--amber)", color:generating?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:generating?"not-allowed":"pointer", fontFamily:"var(--font-body)", whiteSpace:"nowrap" }}>
+              {generating ? "…" : "Generate"}
+            </button>
+          </div>
+          {genError && <div style={{ fontSize:10, color:"var(--red)", marginTop:6 }}>{genError}</div>}
         </div>
         <div>
           <label style={label}>Tagline</label>
@@ -13157,6 +13249,9 @@ export default function Dashboard({ user, workspace }) {
           <NewWorkspaceModal
             onCreate={handleCreateWorkspaceWithOnboarding}
             onClose={() => setShowNewWorkspaceModal(false)}
+            activeProvider={activeProvider}
+            activeModel={activeModel}
+            apiKeys={apiKeys}
           />
         )}
 
@@ -13477,7 +13572,7 @@ export default function Dashboard({ user, workspace }) {
                 )}
 
                 {settingsSection==="brand"&&(
-                  <BrandGuidePanel onSave={(g) => { setBrandGuide(g); saveBrandGuide(g); }} />
+                  <BrandGuidePanel onSave={(g) => { setBrandGuide(g); saveBrandGuide(g); }} activeProvider={activeProvider} activeModel={activeModel} apiKeys={apiKeys} />
                 )}
 
                 {settingsSection==="gsc"&&(
