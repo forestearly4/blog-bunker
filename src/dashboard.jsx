@@ -187,12 +187,12 @@ function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cl
   };
   const save = (value, { debounce = true, skipCloud = false } = {}) => {
     saveLocal(value);
-    if (skipCloud) return;
+    if (skipCloud) return Promise.resolve(true);
     const uid = window.__bbUserId;
-    if (!uid) return;
+    if (!uid) return Promise.resolve(false);
     const key = scopedKey(cloudKey, scope);
-    if (debounce) cloudSaveDebounced(key, uid, value);
-    else cloudSet(key, uid, value);
+    if (debounce) { cloudSaveDebounced(key, uid, value); return Promise.resolve(true); }
+    return cloudSet(key, uid, value); // returned so callers can await it before doing something like an immediate reload
   };
   const shouldCloudWin = (cloudValue, localValue) => {
     if (cloudValue == null) return false;
@@ -208,6 +208,12 @@ function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cl
       if (isNaN(cloudTime)) return false;
       return isNaN(localTime) || cloudTime < localTime;
     }
+    // Default "cloud-wins": for arrays specifically, never let an empty
+    // cloud value overwrite non-empty local data — a stale/never-actually-
+    // synced empty array from the cloud (e.g. from an earlier failed save)
+    // would otherwise silently wipe out good local data on every reload,
+    // since a non-null empty array still passes the null check above.
+    if (Array.isArray(cloudValue) && cloudValue.length === 0 && Array.isArray(localValue) && localValue.length > 0) return false;
     return true; // "cloud-wins"
   };
   const pullFromCloud = async (userId, localValue) => {
@@ -12597,11 +12603,11 @@ export default function Dashboard({ user, workspace }) {
     activeWorkspaceStore.save(id, { debounce: false, skipCloud: true }); // write immediately, local-only — a reload right after this must not race the React state→effect→save path, which hasn't run yet
   };
 
-  const createWorkspace = (name) => {
+  const createWorkspace = async (name) => {
     const id = `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const newList = [...workspaces, { id, name, createdAt: new Date().toISOString() }];
     setWorkspaces(newList);
-    workspacesStore.save(newList, { debounce: false }); // same reasoning — must be written before any reload
+    await workspacesStore.save(newList, { debounce: false }); // MUST be awaited — an immediate reload right after this was previously killing the in-flight cloud write before it finished, so the new workspace never actually reached the cloud and other devices never saw it (only the local device, which already had it saved locally, appeared to work)
     setActiveWorkspaceId(id);
     return id;
   };
@@ -12611,9 +12617,9 @@ export default function Dashboard({ user, workspace }) {
   // sets window.__bbWorkspaceId synchronously, so these saves correctly land
   // scoped to the new workspace rather than the one that was active before.
   const handleCreateWorkspaceWithOnboarding = async ({ name, tagline, voiceTone, audience, logoDataUrl }) => {
-    createWorkspace(name);
-    wsSettingsStore.save({ name, tagline }, { debounce: false });
-    brandGuideStore.save({ ...DEFAULT_BRAND_GUIDE, brandName: name, tagline, audience, voiceTone }, { debounce: false });
+    await createWorkspace(name);
+    await wsSettingsStore.save({ name, tagline }, { debounce: false });
+    await brandGuideStore.save({ ...DEFAULT_BRAND_GUIDE, brandName: name, tagline, audience, voiceTone }, { debounce: false });
     if (logoDataUrl) await saveLogo(logoDataUrl);
     window.location.reload();
   };
@@ -12631,7 +12637,7 @@ export default function Dashboard({ user, workspace }) {
     }
     const newList = workspaces.filter(w => w.id !== id);
     setWorkspaces(newList);
-    workspacesStore.save(newList, { debounce: false });
+    await workspacesStore.save(newList, { debounce: false });
     if (activeWorkspaceId === id) {
       setActiveWorkspaceId("default");
       window.location.reload();
@@ -13097,7 +13103,7 @@ export default function Dashboard({ user, workspace }) {
             <span style={{width:6,height:6,borderRadius:99,background:cloudSynced?fixedGreen:"var(--muted)",display:"inline-block",marginRight:4}}/>
             {cloudSynced?"☁ Cloud synced":"☁ Syncing…"}
           </div>
-          {workspaces.length > 0 && (
+          {(workspaces.length > 0 || activeWorkspaceId !== "default") && (
             <select
               value={activeWorkspaceId}
               onChange={(e) => {
@@ -13108,6 +13114,9 @@ export default function Dashboard({ user, workspace }) {
               style={{ marginTop:10, width:"100%", padding:"6px 8px", borderRadius:6, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:11, fontFamily:"var(--font-body)" }}>
               <option value="default">{workspace?.name || "Cask & Stream"}</option>
               {workspaces.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+              {activeWorkspaceId !== "default" && !workspaces.some(w => w.id === activeWorkspaceId) && (
+                <option value={activeWorkspaceId}>{wsName} (not in your workspace list — try switching away and back)</option>
+              )}
               <option value="__new__">+ New workspace…</option>
             </select>
           )}
@@ -13123,7 +13132,7 @@ export default function Dashboard({ user, workspace }) {
               🗑 Delete this workspace
             </button>
           )}
-          {workspaces.length === 0 && (
+          {workspaces.length === 0 && activeWorkspaceId === "default" && (
             <button
               onClick={() => setShowNewWorkspaceModal(true)}
               style={{ marginTop:10, width:"100%", padding:"6px 8px", borderRadius:6, border:"1px dashed var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
