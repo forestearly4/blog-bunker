@@ -219,14 +219,15 @@ function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cl
   const pullFromCloud = async (userId, localValue) => {
     if (!userId) return null;
     const key = scopedKey(cloudKey, scope);
-    if (scope === "workspace" && (cloudKey === "posts" || cloudKey === "cal_events")) {
-      console.log(`[workspace-debug] pulling "${cloudKey}" from cloud — window.__bbWorkspaceId=${window.__bbWorkspaceId}, resolved key="${key}"`);
+    if (scope === "workspace") {
+      console.log(`[workspace-debug] pulling "${cloudKey}" — window.__bbWorkspaceId=${window.__bbWorkspaceId}, resolved key="${key}", local value:`, localValue);
     }
     const cloudValue = await cloudGet(key, userId);
-    if (scope === "workspace" && (cloudKey === "posts" || cloudKey === "cal_events")) {
-      console.log(`[workspace-debug] cloud returned for "${key}":`, Array.isArray(cloudValue) ? `array of ${cloudValue.length}` : cloudValue);
+    const wins = shouldCloudWin(cloudValue, localValue);
+    if (scope === "workspace") {
+      console.log(`[workspace-debug] cloud returned for "${key}":`, cloudValue, `— shouldCloudWin=${wins}`);
     }
-    if (!shouldCloudWin(cloudValue, localValue)) return null;
+    if (!wins) return null;
     saveLocal(cloudValue);
     return cloudValue;
   };
@@ -13108,6 +13109,16 @@ export default function Dashboard({ user, workspace }) {
               value={activeWorkspaceId}
               onChange={(e) => {
                 if (e.target.value === "__new__") { setShowNewWorkspaceModal(true); return; }
+                if (e.target.value === "__recover__") {
+                  const id = window.prompt("Enter the workspace ID to recover (found in earlier browser console logs, looks like ws_1234567890_abcdef):");
+                  if (!id?.trim()) return;
+                  if (workspaces.some(w => w.id === id.trim())) { window.alert("That workspace is already in your list."); return; }
+                  const name = window.prompt("Name to show for this workspace:") || "Recovered Workspace";
+                  const newList = [...workspaces, { id: id.trim(), name, createdAt: new Date().toISOString() }];
+                  setWorkspaces(newList);
+                  workspacesStore.save(newList, { debounce: false });
+                  return;
+                }
                 setActiveWorkspaceId(e.target.value);
                 window.location.reload(); // simplest correct way to fully re-hydrate every workspace-scoped store
               }}
@@ -13118,6 +13129,7 @@ export default function Dashboard({ user, workspace }) {
                 <option value={activeWorkspaceId}>{wsName} (not in your workspace list — try switching away and back)</option>
               )}
               <option value="__new__">+ New workspace…</option>
+              <option value="__recover__">↺ Recover a workspace by ID…</option>
             </select>
           )}
           {activeWorkspaceId !== "default" && (
