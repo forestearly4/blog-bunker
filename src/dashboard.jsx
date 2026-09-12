@@ -12493,6 +12493,83 @@ function AddInspirationModal({ onSave, onClose }) {
 // workspace should feel like a fresh start for a different brand, not an
 // empty shell the user has to go hunting through Settings to fill in.
 
+// ─── BUG REPORT ───────────────────────────────────────────────────────────────
+// Lets any user — beta testers especially — submit a bug report from inside
+// the app itself, with useful context auto-attached, instead of needing to
+// manually screenshot the console and send it over some other channel.
+
+function BugReportModal({ onClose, userId, activeTab, activeWorkspaceId }) {
+  const [description, setDescription] = useState("");
+  const [submitting, setSubmitting]    = useState(false);
+  const [submitted, setSubmitted]      = useState(false);
+  const [error, setError]              = useState("");
+
+  const handleSubmit = async () => {
+    if (!description.trim()) return;
+    setSubmitting(true); setError("");
+    try {
+      const res = await fetch("/api/bug-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          description: description.trim(),
+          context: {
+            activeTab,
+            workspaceId: activeWorkspaceId,
+            url: window.location.href,
+            userAgent: navigator.userAgent,
+          },
+        }),
+      });
+      if (!res.ok) throw new Error("Submission failed — try again in a moment");
+      setSubmitted(true);
+    } catch(e) {
+      setError(e.message);
+    }
+    setSubmitting(false);
+  };
+
+  const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box", resize:"vertical" };
+
+  return (
+    <Modal onClose={onClose} title="Report a Bug">
+      {submitted ? (
+        <div style={{ minWidth:320, textAlign:"center", padding:"20px 0" }}>
+          <div style={{ fontSize:28, marginBottom:10 }}>✓</div>
+          <div style={{ fontSize:14, fontWeight:600, marginBottom:6 }}>Thanks — got it.</div>
+          <div style={{ fontSize:12, color:"var(--text-secondary)", marginBottom:16 }}>This really helps. We'll take a look.</div>
+          <button onClick={onClose} style={{ padding:"8px 20px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" }}>Close</button>
+        </div>
+      ) : (
+        <div style={{ display:"flex", flexDirection:"column", gap:12, minWidth:340 }}>
+          <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.5 }}>
+            What happened? Be as specific as you can — what you were trying to do, and what went wrong instead. We automatically attach the page you were on and some browser info, so you don't need to include that.
+          </div>
+          <textarea
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            rows={6}
+            placeholder="e.g. 'I clicked Publish on the Article Pipeline and the page went blank instead of showing the success message.'"
+            style={iS}
+            autoFocus
+          />
+          {error && <div style={{ fontSize:11, color:"var(--red)" }}>{error}</div>}
+          <div style={{ display:"flex", gap:10 }}>
+            <button onClick={handleSubmit} disabled={!description.trim() || submitting}
+              style={{ flex:1, padding:"10px 16px", borderRadius:8, border:"none", background:description.trim()?"var(--amber)":"var(--bg-elevated)", color:description.trim()?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:description.trim()&&!submitting?"pointer":"not-allowed", fontFamily:"var(--font-body)" }}>
+              {submitting ? "Sending…" : "Send Report"}
+            </button>
+            <button onClick={onClose} style={{ padding:"10px 16px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function NewWorkspaceModal({ onCreate, onClose, activeProvider, activeModel, apiKeys }) {
   const [name, setName]           = useState("");
   const [tagline, setTagline]     = useState("");
@@ -12688,6 +12765,7 @@ export default function Dashboard({ user, workspace }) {
   const [activeWorkspaceId, setActiveWorkspaceIdState] = usePersistedState(activeWorkspaceStore, { localOnly: true });
   window.__bbWorkspaceId = activeWorkspaceId;
   const [showNewWorkspaceModal, setShowNewWorkspaceModal] = useState(false);
+  const [showBugReport, setShowBugReport] = useState(false);
   console.log("[workspace-debug] Dashboard render — activeWorkspaceId:", activeWorkspaceId, "workspaces:", workspaces);
 
   const setActiveWorkspaceId = (id) => {
@@ -13055,15 +13133,25 @@ export default function Dashboard({ user, workspace }) {
   const plan      = "operative";
   const [userTier, setUserTier] = useState(loadUserTier);
   const [trialStart, setTrialStart] = useState(getOrStartTrial);
+  // Selected beta testers — free, full-featured access, one workspace only
+  // (multi-workspace isn't battle-tested enough yet for testers other than
+  // Forest himself). Add/remove emails here before each deploy as the beta
+  // cohort changes — deliberately a simple hardcoded list rather than a
+  // real admin system, since the cohort is small and curated by hand.
+  const BETA_TESTER_EMAILS = [
+    // "someone@example.com",
+  ];
+  const isBetaTester = BETA_TESTER_EMAILS.includes(userId);
+  const effectiveTier = isBetaTester ? "operative" : userTier;
   const trialDaysRemaining = trialDaysLeft(trialStart);
-  const inTrial = trialDaysRemaining > 0;
+  const inTrial = isBetaTester || trialDaysRemaining > 0;
   // The free trial IS Scout access (scout is already the default tier for a
   // new signup) — no functional tier elevation, this is purely a messaging +
   // post-trial-gate concern, not a tier override. If someone has manually
   // switched to Operative via the dev toggle, that stays respected regardless
   // of trial status.
-  const tierConfig = TIER_CONFIG[userTier] || TIER_CONFIG.scout;
-  const planLabel = TIER_CONFIG[userTier]?.label || "Scout";
+  const tierConfig = TIER_CONFIG[effectiveTier] || TIER_CONFIG.scout;
+  const planLabel = isBetaTester ? "Operative (Beta Tester)" : (TIER_CONFIG[userTier]?.label || "Scout");
   const changeTier = (tier) => { setUserTier(tier); saveUserTier(tier); };
   const isScout   = false;
   const fixedGreen= "#7a9166";
@@ -13196,7 +13284,7 @@ export default function Dashboard({ user, workspace }) {
             <span style={{width:6,height:6,borderRadius:99,background:cloudSynced?fixedGreen:"var(--muted)",display:"inline-block",marginRight:4}}/>
             {cloudSynced?"☁ Cloud synced":"☁ Syncing…"}
           </div>
-          {(workspaces.length > 0 || activeWorkspaceId !== "default") && (
+          {!isBetaTester && (workspaces.length > 0 || activeWorkspaceId !== "default") && (
             <select
               value={activeWorkspaceId}
               onChange={(e) => {
@@ -13224,7 +13312,7 @@ export default function Dashboard({ user, workspace }) {
               <option value="__recover__">↺ Recover a workspace by ID…</option>
             </select>
           )}
-          {activeWorkspaceId !== "default" && (
+          {!isBetaTester && activeWorkspaceId !== "default" && (
             <button
               onClick={() => {
                 const current = workspaces.find(w => w.id === activeWorkspaceId);
@@ -13236,7 +13324,7 @@ export default function Dashboard({ user, workspace }) {
               🗑 Delete this workspace
             </button>
           )}
-          {workspaces.length === 0 && activeWorkspaceId === "default" && (
+          {!isBetaTester && workspaces.length === 0 && activeWorkspaceId === "default" && (
             <button
               onClick={() => setShowNewWorkspaceModal(true)}
               style={{ marginTop:10, width:"100%", padding:"6px 8px", borderRadius:6, border:"1px dashed var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)" }}>
@@ -13245,13 +13333,22 @@ export default function Dashboard({ user, workspace }) {
           )}
         </div>
 
-        {showNewWorkspaceModal && (
+        {!isBetaTester && showNewWorkspaceModal && (
           <NewWorkspaceModal
             onCreate={handleCreateWorkspaceWithOnboarding}
             onClose={() => setShowNewWorkspaceModal(false)}
             activeProvider={activeProvider}
             activeModel={activeModel}
             apiKeys={apiKeys}
+          />
+        )}
+
+        {showBugReport && (
+          <BugReportModal
+            onClose={() => setShowBugReport(false)}
+            userId={userId}
+            activeTab={activeTab}
+            activeWorkspaceId={activeWorkspaceId}
           />
         )}
 
@@ -13266,6 +13363,12 @@ export default function Dashboard({ user, workspace }) {
           ))}
         </nav>
 
+        <div style={{padding:"0 16px 8px"}}>
+          <button onClick={()=>setShowBugReport(true)}
+            style={{width:"100%",padding:"7px 10px",borderRadius:6,border:"1px solid var(--border)",background:"transparent",color:"var(--text-secondary)",fontSize:11,cursor:"pointer",fontFamily:"var(--font-body)",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+            🐛 Report a Bug
+          </button>
+        </div>
         <div style={{padding:"12px 16px",borderTop:"1px solid var(--border)",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
           <div onClick={()=>setDark(!dark)} style={{width:36,height:20,borderRadius:99,background:dark?"var(--amber)":"var(--border)",cursor:"pointer",position:"relative",transition:"background 0.3s",flexShrink:0}}>
             <div style={{width:14,height:14,borderRadius:99,background:dark?"#0e0f11":"#fff",position:"absolute",top:3,left:dark?19:3,transition:"left 0.3s",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8}}>{dark?"🌙":"☀️"}</div>
@@ -13621,9 +13724,16 @@ export default function Dashboard({ user, workspace }) {
                 {settingsSection==="billing"&&(
                   <div>
                     <h3 style={{fontFamily:"var(--font-display)",fontSize:18,fontWeight:700,margin:"0 0 8px"}}>Billing & Plan</h3>
-                    <p style={{fontSize:13,color:"var(--text-secondary)",margin:"0 0 12px"}}>Your plan: <span style={{color:"var(--amber)",fontWeight:700}}>{TIER_CONFIG[userTier]?.label || "Scout"}</span></p>
+                    <p style={{fontSize:13,color:"var(--text-secondary)",margin:"0 0 12px"}}>Your plan: <span style={{color:"var(--amber)",fontWeight:700}}>{planLabel}</span></p>
 
-                    {inTrial ? (
+                    {isBetaTester ? (
+                      <div style={{ padding:"14px 16px", borderRadius:10, background:"linear-gradient(135deg, var(--amber-glow), transparent)", border:"1px solid var(--amber)44", marginBottom:16 }}>
+                        <div style={{ fontSize:13, fontWeight:700, color:"var(--amber)", marginBottom:4 }}>🎉 You're a beta tester</div>
+                        <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
+                          Full Operative-level access, free, no credit card, no expiration — thank you for helping test Blog Bunker. Limited to one workspace for now while multi-workspace is still being refined.
+                        </div>
+                      </div>
+                    ) : inTrial ? (
                       <div style={{ padding:"14px 16px", borderRadius:10, background:"linear-gradient(135deg, var(--amber-glow), transparent)", border:"1px solid var(--amber)44", marginBottom:16 }}>
                         <div style={{ fontSize:13, fontWeight:700, color:"var(--amber)", marginBottom:4 }}>🎉 Your first month is free</div>
                         <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
