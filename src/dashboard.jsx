@@ -4328,6 +4328,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
                   const linkCount = (draft.body.match(/\[([^\]]+)\]\(([^)]+)\)/g) || []).length;
                   const socialCount = Object.keys(social.posts).length;
                   const wpConnected = loadWordPressConfig().connected;
+                  console.log("[wp-debug] Pipeline WordPress check — window.__bbWorkspaceId:", window.__bbWorkspaceId, "resolved key:", scopedKey(WORDPRESS_STORAGE, "workspace"), "config:", loadWordPressConfig());
                   return (
                     <div style={{ padding:16, borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", marginBottom:20 }}>
                       <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>✦ From This One Article</div>
@@ -10870,6 +10871,7 @@ function saveWordPressConfig(d) { wordPressStore.save(d, { debounce: false }); }
 
 function WordPressSettings() {
   const [config,      setConfig]      = useState(loadWordPressConfig);
+  console.log("[wp-debug] Settings WordPress check — window.__bbWorkspaceId:", window.__bbWorkspaceId, "resolved key:", scopedKey(WORDPRESS_STORAGE, "workspace"), "config:", loadWordPressConfig());
   const [siteUrl,     setSiteUrl]     = useState(() => loadWordPressConfig().siteUrl || "");
   const [username,    setUsername]    = useState(() => loadWordPressConfig().username || "");
   const [appPassword, setAppPassword] = useState(() => loadWordPressConfig().appPassword || "");
