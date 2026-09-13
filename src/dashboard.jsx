@@ -1821,10 +1821,10 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig 
               {/* Action buttons */}
               <div style={{ display:"flex", gap:8, marginTop:16, flexWrap:"wrap" }}>
                 {plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0 && (
-                  <FacebookPostButton page={metaConfig.pages[0]} caption={posts[plat.id] || ""} />
+                  <FacebookPostButton page={resolveMetaPage(metaConfig)} caption={posts[plat.id] || ""} />
                 )}
                 {plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id) && (
-                  <InstagramPostButton page={metaConfig.pages.find(p=>p.instagram_id)} caption={posts[plat.id] || ""} />
+                  <InstagramPostButton page={resolveMetaInstagramPage(metaConfig)} caption={posts[plat.id] || ""} />
                 )}
                 {(!metaConfig?.connected || (plat.id !== "facebook" && plat.id !== "instagram")) && (
                   <button onClick={()=>handleCopy(plat.id, posts[plat.id])}
@@ -5219,6 +5219,30 @@ async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, med
   return await res.json();
 }
 
+// Resolves which Facebook Page a workspace should actually publish to. A
+// Facebook account can have access to multiple Pages (e.g. one person
+// managing Pages for several different brands/workspaces) — this was
+// previously hardcoded to always use pages[0], meaning whichever Page
+// Facebook's API happened to list first silently received every post,
+// regardless of which workspace was actually publishing. Now resolves the
+// user's explicit choice (selectedPageId, set in MetaConnectPanel) first,
+// falling back to pages[0] only for connections made before this existed.
+function resolveMetaPage(metaConfig) {
+  if (!metaConfig?.pages?.length) return null;
+  return metaConfig.pages.find(p => p.id === metaConfig.selectedPageId) || metaConfig.pages[0];
+}
+
+// Same idea, but specifically for Instagram — prefers the selected page IF
+// it has Instagram linked; otherwise falls back to any page that does. This
+// matters if a workspace's selected Page has no Instagram account linked but
+// another available Page does.
+function resolveMetaInstagramPage(metaConfig) {
+  if (!metaConfig?.pages?.length) return null;
+  const selected = metaConfig.pages.find(p => p.id === metaConfig.selectedPageId);
+  if (selected?.instagram_id) return selected;
+  return metaConfig.pages.find(p => p.instagram_id) || null;
+}
+
 function MetaConnectPanel({ onConnected }) {
   const [cfg,      setCfg]     = useState(loadMetaConfig);
   const [appId,    setAppId]   = useState(cfg.appId || "");
@@ -5258,6 +5282,13 @@ function MetaConnectPanel({ onConnected }) {
   };
 
   if (cfg.connected && cfg.pages) {
+    const selectedPageId = cfg.selectedPageId || cfg.pages[0]?.id;
+    const selectPage = (pageId) => {
+      const updated = { ...cfg, selectedPageId: pageId };
+      saveMetaConfig(updated);
+      setCfg(updated);
+      if (onConnected) onConnected(updated);
+    };
     return (
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
         <div style={{ padding:14, borderRadius:10, border:"1px solid #7a916644", background:"#7a91660a", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
@@ -5270,17 +5301,29 @@ function MetaConnectPanel({ onConnected }) {
           <button onClick={disconnect} style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>Disconnect</button>
         </div>
         <div>
-          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Your Pages</div>
-          {cfg.pages.map(p => (
-            <div key={p.id} style={{ padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", marginBottom:6, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <div>
-                <div style={{ fontWeight:600, fontSize:13 }}>{p.name}</div>
-                <div style={{ fontSize:11, color:"var(--text-secondary)" }}>
-                  Facebook Page {p.instagram_id ? "· Instagram linked ✓" : "· No Instagram"}
-                </div>
-              </div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>
+            {cfg.pages.length > 1 ? "Which page should this workspace post to?" : "Your Page"}
+          </div>
+          {cfg.pages.length > 1 && (
+            <div style={{ fontSize:11, color:"var(--text-secondary)", marginBottom:10, lineHeight:1.5 }}>
+              Your Facebook account has access to more than one Page — pick the one this specific workspace should publish to. (Each workspace remembers its own choice.)
             </div>
-          ))}
+          )}
+          {cfg.pages.map(p => {
+            const isSelected = p.id === selectedPageId;
+            return (
+              <div key={p.id} onClick={() => cfg.pages.length > 1 && selectPage(p.id)}
+                style={{ padding:"10px 14px", borderRadius:8, border:`2px solid ${isSelected ? "var(--amber)" : "var(--border)"}`, background:isSelected?"var(--amber-glow)":"var(--bg-elevated)", marginBottom:6, display:"flex", justifyContent:"space-between", alignItems:"center", cursor:cfg.pages.length>1?"pointer":"default" }}>
+                <div>
+                  <div style={{ fontWeight:600, fontSize:13 }}>{p.name}</div>
+                  <div style={{ fontSize:11, color:"var(--text-secondary)" }}>
+                    Facebook Page {p.instagram_id ? "· Instagram linked ✓" : "· No Instagram"}
+                  </div>
+                </div>
+                {isSelected && <span style={{ fontSize:11, fontWeight:700, color:"var(--amber)" }}>✓ Posting here</span>}
+              </div>
+            );
+          })}
         </div>
       </div>
     );
@@ -5289,13 +5332,19 @@ function MetaConnectPanel({ onConnected }) {
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
       <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--amber-glow)", border:"1px solid var(--amber)33", fontSize:12, color:"var(--text-secondary)", lineHeight:1.8 }}>
-        <strong style={{color:"var(--amber)"}}>Setup (one time):</strong><br/>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+          <strong style={{color:"var(--amber)"}}>Setup (one time):</strong>
+          <a href="/help/facebook-instagram-setup.html" target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)", fontWeight:600, whiteSpace:"nowrap" }}>
+            📖 Full step-by-step guide →
+          </a>
+        </div>
         1. Go to <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>developers.facebook.com/apps</a> → Create App → Business type<br/>
         2. Add <strong style={{color:"var(--text)"}}>Facebook Login</strong> product → set redirect URI to:<br/>
         <code style={{background:"var(--bg-elevated)",padding:"2px 6px",borderRadius:4,fontSize:11}}>https://blogbunker.netlify.app/api/meta-callback</code><br/>
         3. Add <strong style={{color:"var(--text)"}}>Instagram Graph API</strong> product for Instagram posting<br/>
         4. In Netlify env vars add <code style={{background:"var(--bg-elevated)",padding:"1px 4px",borderRadius:3,fontSize:11}}>META_APP_ID</code> and <code style={{background:"var(--bg-elevated)",padding:"1px 4px",borderRadius:3,fontSize:11}}>META_APP_SECRET</code><br/>
-        5. Paste your App ID below and click Connect
+        5. Paste your App ID below and click Connect<br/>
+        <span style={{fontSize:11, color:"var(--muted)"}}>Page not showing up when you connect? That's almost always a Business Portfolio setting — <a href="/help/facebook-instagram-setup.html#" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>see the full guide</a>.</span>
       </div>
       <div>
         <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Meta App ID</label>
@@ -6681,14 +6730,14 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
 
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
-          const page = metaConfig.pages[0];
+          const page = resolveMetaPage(metaConfig);
           const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: imageData.url, mediaType: imageData.mediaType, platforms: ["facebook"] });
           if (!res.facebook?.success) throw new Error(res.facebook?.error || "Facebook post failed");
           results[plat.id] = { success: true, message: "✓ Posted to Facebook" };
 
         } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
           if (!imageData.url) throw new Error("Instagram requires an image or video");
-          const page = metaConfig.pages.find(p => p.instagram_id);
+          const page = resolveMetaInstagramPage(metaConfig);
           if (imageData.mediaType === "video") setLoadMsg(`Uploading video to Instagram — this can take a few minutes while Instagram processes it…`);
           const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: imageData.url, mediaType: imageData.mediaType, platforms: ["instagram"] });
           if (!res.instagram?.success) throw new Error(res.instagram?.error || "Instagram post failed");
@@ -8215,11 +8264,11 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
       const fullMessage = `${captionText}\n\n${limitHashtagsForPlatform(getHashtagsForPlatform(post.hashtags, plat.id), plat.id)}`.trim();
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
-          const page = metaConfig.pages[0];
+          const page = resolveMetaPage(metaConfig);
           const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: publicImageUrl, mediaType: post.mediaType, platforms: ["facebook"] });
           results[plat.id] = res.facebook?.success ? "✓ Posted" : `Error: ${res.facebook?.error}`;
         } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
-          const page = metaConfig.pages.find(p => p.instagram_id);
+          const page = resolveMetaInstagramPage(metaConfig);
           const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: publicImageUrl, mediaType: post.mediaType, platforms: ["instagram"] });
           results[plat.id] = res.instagram?.success ? "✓ Posted" : `Error: ${res.instagram?.error}`;
         } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
@@ -9738,7 +9787,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
     if (!metaConfig?.connected || !metaConfig?.pages?.length) return;
     setLoadingInsights(true); setInsightError("");
     try {
-      const page   = metaConfig.pages[0];
+      const page   = resolveMetaPage(metaConfig);
       const token  = page.access_token;
       const pageId = page.id;
       const igId   = page.instagram_id;
