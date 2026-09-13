@@ -88,16 +88,6 @@
   status = 200
 
 [[redirects]]
-  from   = "/api/image-edit"
-  to     = "/.netlify/functions/image-edit"
-  status = 200
-
-[[redirects]]
-  from   = "/api/image-edit-status"
-  to     = "/.netlify/functions/image-edit-status"
-  status = 200
-
-[[redirects]]
   from   = "/api/gcs-upload"
   to     = "/.netlify/functions/gcs-upload"
   status = 200
@@ -135,6 +125,14 @@
 [[redirects]]
   from   = "/api/get-image"
   to     = "/.netlify/functions/get-image"
+  status = 200
+
+# Help center static pages — must come before the SPA fallback below, or
+# requests to these get swallowed and served the React app shell instead
+# (which then shows a blank screen, since no app route matches the path).
+[[redirects]]
+  from   = "/help/*"
+  to     = "/help/:splat"
   status = 200
 
 # SPA fallback — MUST be last so it doesn't swallow API routes above
