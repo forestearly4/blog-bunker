@@ -1,1 +1,2 @@
+/help/*  /help/:splat  200
 /*    /index.html   200
