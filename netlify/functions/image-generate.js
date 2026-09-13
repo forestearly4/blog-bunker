@@ -95,12 +95,13 @@ export default async (req) => {
       const period = new Date().toISOString().slice(0, 7); // YYYY-MM
 
       if (userId) {
-        const tier  = (await store.get(`${userId}:user_tier`, { type: "json" })) || "scout";
-        const cap   = IMAGE_CAPS[tier] || IMAGE_CAPS.scout;
-        const usage = await store.get(`${userId}:usage_images_${period}`, { type: "json" }) || { images: 0 };
+        const tier      = (await store.get(`${userId}:user_tier`, { type: "json" })) || "scout";
+        const imageTopUp = ((await store.get(`${userId}:topup_images_${period}`, { type: "json" })) || { amount: 0 }).amount;
+        const cap       = (IMAGE_CAPS[tier] || IMAGE_CAPS.scout) + imageTopUp;
+        const usage     = await store.get(`${userId}:usage_images_${period}`, { type: "json" }) || { images: 0 };
         if ((usage.images || 0) >= cap) {
           return new Response(JSON.stringify({
-            error: `Monthly AI image limit reached (${cap} images on your current plan). Upgrade your plan, add your own Stability/OpenAI/Gemini key in Settings → API Keys, or wait until next month.`,
+            error: `Monthly AI image limit reached (${cap} images on your current plan). Buy more images in Settings → Billing & Plan, add your own Stability/OpenAI/Gemini key in Settings → API Keys, or wait until next month.`,
           }), { status: 429, headers: CORS });
         }
       }
@@ -188,12 +189,13 @@ export default async (req) => {
       const store  = getStore("blog-bunker-data");
       const period = new Date().toISOString().slice(0, 7);
       if (userId) {
-        const tier  = (await store.get(`${userId}:user_tier`, { type: "json" })) || "scout";
-        const cap   = IMAGE_CAPS[tier] || IMAGE_CAPS.scout;
-        const usage = await store.get(`${userId}:usage_images_${period}`, { type: "json" }) || { images: 0 };
+        const tier      = (await store.get(`${userId}:user_tier`, { type: "json" })) || "scout";
+        const imageTopUp = ((await store.get(`${userId}:topup_images_${period}`, { type: "json" })) || { amount: 0 }).amount;
+        const cap       = (IMAGE_CAPS[tier] || IMAGE_CAPS.scout) + imageTopUp;
+        const usage     = await store.get(`${userId}:usage_images_${period}`, { type: "json" }) || { images: 0 };
         if ((usage.images || 0) >= cap) {
           return new Response(JSON.stringify({
-            error: `Monthly AI image limit reached (${cap} images on your current plan). Upgrade your plan, add your own Stability key in Settings → API Keys, or wait until next month.`,
+            error: `Monthly AI image limit reached (${cap} images on your current plan). Buy more images in Settings → Billing & Plan, add your own Stability key in Settings → API Keys, or wait until next month.`,
           }), { status: 429, headers: CORS });
         }
       }

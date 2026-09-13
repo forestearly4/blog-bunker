@@ -33,12 +33,13 @@ export default async (req) => {
     // Blog Bunker's own Claude spend, never a user's own key usage.
     if (userId) {
       const tier    = (await store.get(`${userId}:user_tier`, { type: "json" })) || "scout";
-      const cap     = WORD_CAPS[tier] || WORD_CAPS.scout;
+      const wordTopUp = ((await store.get(`${userId}:topup_words_${period}`, { type: "json" })) || { amount: 0 }).amount;
+      const cap     = (WORD_CAPS[tier] || WORD_CAPS.scout) + wordTopUp;
       const capTokens = Math.round(cap * TOKENS_PER_WORD);
       const usage   = await store.get(`${userId}:usage_text_${period}`, { type: "json" }) || { tokens: 0 };
       if ((usage.tokens || 0) >= capTokens) {
         return new Response(JSON.stringify({
-          error: `Monthly AI word limit reached (${cap.toLocaleString()} words on your current plan). Upgrade your plan for more, add your own API key in Settings → API Keys, or wait until next month.`,
+          error: `Monthly AI word limit reached (${cap.toLocaleString()} words on your current plan). Buy more words in Settings → Billing & Plan, add your own API key in Settings → API Keys, or wait until next month.`,
         }), { status: 429, headers: CORS });
       }
     }
