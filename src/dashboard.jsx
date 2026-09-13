@@ -4328,7 +4328,6 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
                   const linkCount = (draft.body.match(/\[([^\]]+)\]\(([^)]+)\)/g) || []).length;
                   const socialCount = Object.keys(social.posts).length;
                   const wpConnected = loadWordPressConfig().connected;
-                  console.log("[wp-debug] Pipeline WordPress check — window.__bbWorkspaceId:", window.__bbWorkspaceId, "resolved key:", scopedKey(WORDPRESS_STORAGE, "workspace"), "config:", loadWordPressConfig());
                   return (
                     <div style={{ padding:16, borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", marginBottom:20 }}>
                       <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>✦ From This One Article</div>
@@ -10871,7 +10870,6 @@ function saveWordPressConfig(d) { wordPressStore.save(d, { debounce: false }); }
 
 function WordPressSettings() {
   const [config,      setConfig]      = useState(loadWordPressConfig);
-  console.log("[wp-debug] Settings WordPress check — window.__bbWorkspaceId:", window.__bbWorkspaceId, "resolved key:", scopedKey(WORDPRESS_STORAGE, "workspace"), "config:", loadWordPressConfig());
   const [siteUrl,     setSiteUrl]     = useState(() => loadWordPressConfig().siteUrl || "");
   const [username,    setUsername]    = useState(() => loadWordPressConfig().username || "");
   const [appPassword, setAppPassword] = useState(() => loadWordPressConfig().appPassword || "");
@@ -13823,10 +13821,37 @@ export default function Dashboard({ user, workspace }) {
                   <div>
                     <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Publishing</h3>
                     <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 20px", lineHeight:1.6 }}>
-                      Blog Bunker doesn't publish directly to a blog host yet. Write and finish your article in the Pipeline, then copy it and paste it into whichever blog host you use — WordPress, Wix, Squarespace, Ghost, or anywhere else — when you're ready to go live.
+                      Where your content actually goes live, and how to set each one up.
                     </p>
-                    <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"12px 14px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
-                      ✦ Direct social publishing to Facebook, Instagram, and other platforms via Buffer is already live — see <strong style={{color:"var(--text)"}}>Facebook & Instagram</strong> and <strong style={{color:"var(--text)"}}>Buffer (Social)</strong> in this menu. Direct blog-host publishing is still on the roadmap.
+                    <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                      <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"14px 16px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid #7a916644" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+                          <strong style={{color:"var(--text)"}}>📝 WordPress</strong>
+                          <span style={{fontSize:10, fontWeight:700, color:"#7a9166", background:"#7a916622", padding:"2px 8px", borderRadius:99}}>LIVE</span>
+                        </div>
+                        Blog Bunker publishes directly to your WordPress site (self-hosted or WordPress.com Business) from the Article Pipeline's Publish stage — no copy-paste needed. Set it up under <strong onClick={()=>setSettingsSection("wordpress")} style={{color:"var(--amber)", cursor:"pointer"}}>WordPress</strong> in this menu.
+                      </div>
+                      <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"14px 16px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid #7a916644" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+                          <strong style={{color:"var(--text)"}}>📘 Facebook & Instagram</strong>
+                          <span style={{fontSize:10, fontWeight:700, color:"#7a9166", background:"#7a916622", padding:"2px 8px", borderRadius:99}}>LIVE</span>
+                        </div>
+                        Direct publishing, no copy-paste. Set it up under <strong onClick={()=>setSettingsSection("meta")} style={{color:"var(--amber)", cursor:"pointer"}}>Facebook & Instagram</strong> in this menu.
+                      </div>
+                      <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"14px 16px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid #7a916644" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+                          <strong style={{color:"var(--text)"}}>📡 X, TikTok, Pinterest, Reddit, Threads, Bluesky, YouTube</strong>
+                          <span style={{fontSize:10, fontWeight:700, color:"#7a9166", background:"#7a916622", padding:"2px 8px", borderRadius:99}}>LIVE</span>
+                        </div>
+                        Direct publishing via Buffer, once connected. Set it up under <strong onClick={()=>setSettingsSection("buffer")} style={{color:"var(--amber)", cursor:"pointer"}}>Buffer (Social)</strong> in this menu.
+                      </div>
+                      <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"14px 16px", borderRadius:8, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+                          <strong style={{color:"var(--text)"}}>Other blog hosts — Wix, Squarespace, Ghost, etc.</strong>
+                          <span style={{fontSize:10, fontWeight:700, color:"var(--amber)", background:"var(--amber-glow)", padding:"2px 8px", borderRadius:99}}>ROADMAP</span>
+                        </div>
+                        Not yet direct — write and finish your article in the Pipeline, then copy it into your host of choice for now. Direct publishing to more hosts is actively being worked on.
+                      </div>
                     </div>
                   </div>
                 )}
