@@ -619,6 +619,8 @@ function UsagePanel({ tierConfig, userId }) {
   const [usage, setUsage] = useState(null);
   const [loading, setLoading] = useState(true);
   const [resetting, setResetting] = useState(false);
+  const [buyingWords, setBuyingWords] = useState(false);
+  const [buyingImages, setBuyingImages] = useState(false);
 
   const loadUsage = async () => {
     try {
@@ -638,20 +640,38 @@ function UsagePanel({ tierConfig, userId }) {
       await fetch("/api/usage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId }),
+        body: JSON.stringify({ userId, action: "reset" }),
       });
       await loadUsage();
     } catch {}
     setResetting(false);
   };
 
+  const buyTopUp = async (type) => {
+    const pack = usage?.topUpPacks?.[type];
+    const label = type === "words" ? `${pack?.amount?.toLocaleString() || "10,000"} more words` : `${pack?.amount || 25} more images`;
+    if (!window.confirm(`Add ${label} for the rest of this month for ${pack?.price || "$5"}? (Real payment collection isn't live yet — for now, this just confirms your choice and unlocks the extra capacity right away; we'll follow up before anything is ever charged.)`)) return;
+    (type === "words" ? setBuyingWords : setBuyingImages)(true);
+    try {
+      await fetch("/api/usage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, action: "topup", type }),
+      });
+      await loadUsage();
+    } catch {}
+    (type === "words" ? setBuyingWords : setBuyingImages)(false);
+  };
+
   const wordsUsed  = usage?.wordsUsed ?? 0;
-  const wordCap    = tierConfig.wordsPerMonth;
+  const wordCap    = usage?.wordCap ?? tierConfig.wordsPerMonth;
+  const wordTopUp  = usage?.wordTopUp ?? 0;
   const wordPct    = Math.min(100, Math.round((wordsUsed / wordCap) * 100));
   const wordColor  = wordPct >= 100 ? "var(--red)" : wordPct >= 80 ? "var(--amber)" : "#7a9166";
 
   const imagesUsed = usage?.imagesUsed ?? 0;
-  const imageCap   = tierConfig.imagesPerMonth;
+  const imageCap   = usage?.imageCap ?? tierConfig.imagesPerMonth;
+  const imageTopUp = usage?.imageTopUp ?? 0;
   const imagePct   = Math.min(100, Math.round((imagesUsed / imageCap) * 100));
   const imageColor = imagePct >= 100 ? "var(--red)" : imagePct >= 80 ? "var(--amber)" : "#7a9166";
 
@@ -670,29 +690,49 @@ function UsagePanel({ tierConfig, userId }) {
         <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
           <div>
             <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:6 }}>
-              <span style={{ color:"var(--text-secondary)" }}>AI writing (platform-managed Claude credits)</span>
+              <span style={{ color:"var(--text-secondary)" }}>AI writing (platform-managed Claude credits){wordTopUp > 0 && <span style={{color:"#7a9166"}}> · +{wordTopUp.toLocaleString()} top-up</span>}</span>
               <span style={{ fontWeight:700, color: wordPct >= 100 ? "var(--red)" : "var(--text)" }}>{wordsUsed.toLocaleString()} / {wordCap.toLocaleString()} words</span>
             </div>
             <div style={{ height:8, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
               <div style={{ height:"100%", width:`${wordPct}%`, background:wordColor, borderRadius:99, transition:"width 0.3s" }} />
             </div>
-            {wordPct >= 100 && (
-              <div style={{ fontSize:11, color:"var(--red)", marginTop:6 }}>
-                ⚠ Monthly limit reached — add your own API key in Settings → API Keys{tierConfig.byok ? "" : " (upgrade to Operative to unlock this)"}, or wait until next month.
+            {wordPct >= 80 && (
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, marginTop:6, flexWrap:"wrap" }}>
+                {wordPct >= 100 ? (
+                  <div style={{ fontSize:11, color:"var(--red)" }}>
+                    ⚠ Monthly limit reached — add your own API key in Settings → API Keys{tierConfig.byok ? "" : " (upgrade to Operative to unlock this)"}, or wait until next month.
+                  </div>
+                ) : (
+                  <div style={{ fontSize:11, color:"var(--amber)" }}>Getting close to your limit.</div>
+                )}
+                <button onClick={()=>buyTopUp("words")} disabled={buyingWords}
+                  style={{ fontSize:11, padding:"5px 12px", borderRadius:6, border:"1px solid var(--amber)", background:"var(--amber-glow)", color:"var(--amber)", fontWeight:600, cursor:buyingWords?"not-allowed":"pointer", fontFamily:"var(--font-body)", whiteSpace:"nowrap" }}>
+                  {buyingWords ? "Adding…" : `+ Buy ${(usage?.topUpPacks?.words?.amount || 10000).toLocaleString()} words (${usage?.topUpPacks?.words?.price || "$5"})`}
+                </button>
               </div>
             )}
           </div>
           <div>
             <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:6 }}>
-              <span style={{ color:"var(--text-secondary)" }}>AI images (platform-managed Stability credits)</span>
+              <span style={{ color:"var(--text-secondary)" }}>AI images (platform-managed Stability credits){imageTopUp > 0 && <span style={{color:"#7a9166"}}> · +{imageTopUp} top-up</span>}</span>
               <span style={{ fontWeight:700, color: imagePct >= 100 ? "var(--red)" : "var(--text)" }}>{imagesUsed.toLocaleString()} / {imageCap.toLocaleString()} images</span>
             </div>
             <div style={{ height:8, borderRadius:99, background:"var(--bg-elevated)", overflow:"hidden" }}>
               <div style={{ height:"100%", width:`${imagePct}%`, background:imageColor, borderRadius:99, transition:"width 0.3s" }} />
             </div>
-            {imagePct >= 100 && (
-              <div style={{ fontSize:11, color:"var(--red)", marginTop:6 }}>
-                ⚠ Monthly limit reached — add your own OpenAI/Gemini/Stability key in Settings → API Keys{tierConfig.byok ? "" : " (upgrade to Operative to unlock this)"}, or wait until next month.
+            {imagePct >= 80 && (
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, marginTop:6, flexWrap:"wrap" }}>
+                {imagePct >= 100 ? (
+                  <div style={{ fontSize:11, color:"var(--red)" }}>
+                    ⚠ Monthly limit reached — add your own OpenAI/Gemini/Stability key in Settings → API Keys{tierConfig.byok ? "" : " (upgrade to Operative to unlock this)"}, or wait until next month.
+                  </div>
+                ) : (
+                  <div style={{ fontSize:11, color:"var(--amber)" }}>Getting close to your limit.</div>
+                )}
+                <button onClick={()=>buyTopUp("images")} disabled={buyingImages}
+                  style={{ fontSize:11, padding:"5px 12px", borderRadius:6, border:"1px solid var(--amber)", background:"var(--amber-glow)", color:"var(--amber)", fontWeight:600, cursor:buyingImages?"not-allowed":"pointer", fontFamily:"var(--font-body)", whiteSpace:"nowrap" }}>
+                  {buyingImages ? "Adding…" : `+ Buy ${usage?.topUpPacks?.images?.amount || 25} images (${usage?.topUpPacks?.images?.price || "$5"})`}
+                </button>
               </div>
             )}
           </div>
