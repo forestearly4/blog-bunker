@@ -4893,7 +4893,12 @@ function GSCPanel({ onDataLoaded }) {
 
       {/* Setup instructions */}
       <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--bg-elevated)", border:"1px solid var(--border)", fontSize:12, color:"var(--text-secondary)", lineHeight:1.8 }}>
-        <div style={{ fontWeight:700, color:"var(--text)", marginBottom:8 }}>Setup (one-time, 5 minutes):</div>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+          <div style={{ fontWeight:700, color:"var(--text)" }}>Setup (one-time, 5 minutes):</div>
+          <a href="/help/connections.html#search-console" target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)", fontWeight:600, whiteSpace:"nowrap" }}>
+            📖 Full guide →
+          </a>
+        </div>
         1. <a href="https://console.cloud.google.com" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>Google Cloud Console</a> → select your project → <strong>APIs & Services → Library</strong> → enable <strong>Google Search Console API</strong><br/>
         2. <strong>APIs & Services → Credentials → Create Credentials → OAuth Client ID</strong><br/>
         3. Application type: <strong>Web application</strong><br/>
@@ -5334,7 +5339,7 @@ function MetaConnectPanel({ onConnected }) {
       <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--amber-glow)", border:"1px solid var(--amber)33", fontSize:12, color:"var(--text-secondary)", lineHeight:1.8 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
           <strong style={{color:"var(--amber)"}}>Setup (one time):</strong>
-          <a href="/help/facebook-instagram-setup.html" target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)", fontWeight:600, whiteSpace:"nowrap" }}>
+          <a href="/help/connections.html#facebook-instagram" target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)", fontWeight:600, whiteSpace:"nowrap" }}>
             📖 Full step-by-step guide →
           </a>
         </div>
@@ -5344,7 +5349,7 @@ function MetaConnectPanel({ onConnected }) {
         3. Add <strong style={{color:"var(--text)"}}>Instagram Graph API</strong> product for Instagram posting<br/>
         4. In Netlify env vars add <code style={{background:"var(--bg-elevated)",padding:"1px 4px",borderRadius:3,fontSize:11}}>META_APP_ID</code> and <code style={{background:"var(--bg-elevated)",padding:"1px 4px",borderRadius:3,fontSize:11}}>META_APP_SECRET</code><br/>
         5. Paste your App ID below and click Connect<br/>
-        <span style={{fontSize:11, color:"var(--muted)"}}>Page not showing up when you connect? That's almost always a Business Portfolio setting — <a href="/help/facebook-instagram-setup.html#" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>see the full guide</a>.</span>
+        <span style={{fontSize:11, color:"var(--muted)"}}>Page not showing up when you connect? That's almost always a Business Portfolio setting — <a href="/help/connections.html#facebook-instagram" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>see the full guide</a>.</span>
       </div>
       <div>
         <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Meta App ID</label>
@@ -10911,7 +10916,12 @@ function WordPressSettings() {
       </p>
 
       <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16, marginBottom:20, fontSize:12, color:"var(--text-secondary)", lineHeight:1.7 }}>
-        <strong style={{ color:"var(--text)" }}>You'll need an Application Password</strong> — a feature built into WordPress itself since version 5.6, no plugin required. In your WordPress admin, go to <strong>Users → Profile</strong>, scroll to <strong>Application Passwords</strong>, give it a name like "Blog Bunker", and click Add. Use the generated password below — <em>not</em> your regular login password.
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, marginBottom:6 }}>
+          <span><strong style={{ color:"var(--text)" }}>You'll need an Application Password</strong> — a feature built into WordPress itself since version 5.6, no plugin required. In your WordPress admin, go to <strong>Users → Profile</strong>, scroll to <strong>Application Passwords</strong>, give it a name like "Blog Bunker", and click Add. Use the generated password below — <em>not</em> your regular login password.</span>
+          <a href="/help/connections.html#wordpress" target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)", fontWeight:600, whiteSpace:"nowrap", flexShrink:0 }}>
+            📖 Full guide →
+          </a>
+        </div>
       </div>
 
       <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
@@ -11084,7 +11094,12 @@ function BufferSettings() {
 
       {/* Setup steps */}
       <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:16 }}>
-        <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:10 }}>Setup (2 minutes)</div>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)" }}>Setup (2 minutes)</div>
+          <a href="/help/connections.html#buffer" target="_blank" rel="noopener" style={{ fontSize:11, color:"var(--amber)", fontWeight:600, whiteSpace:"nowrap" }}>
+            📖 Full guide →
+          </a>
+        </div>
         <ol style={{ paddingLeft:16, display:"flex", flexDirection:"column", gap:8 }}>
           {[
             <>Sign up at <a href="https://buffer.com" target="_blank" rel="noopener" style={{color:"var(--amber)"}}>buffer.com</a> — free plan works</>,
@@ -13745,6 +13760,10 @@ export default function Dashboard({ user, workspace }) {
                     )}
                   </button>
                 ))}
+                <a href="/help/connections.html" target="_blank" rel="noopener"
+                  style={{display:"flex",alignItems:"center",gap:8,padding:"12px 12px 9px",borderRadius:8,marginTop:8,borderTop:"1px solid var(--border)",color:"var(--amber)",fontSize:13,fontWeight:600,textDecoration:"none",fontFamily:"var(--font-body)"}}>
+                  ❓ How-To / FAQ
+                </a>
               </div>
 
               <div style={card}>
