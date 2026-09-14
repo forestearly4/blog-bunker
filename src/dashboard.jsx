@@ -8809,6 +8809,7 @@ function MediaLibrary({ userId }) {
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
           userId:   resolvedUserId,
+          workspaceId: window.__bbWorkspaceId,
           fileName: file.name,
           mimeType: file.type,
           size:     file.size,
@@ -8837,7 +8838,7 @@ function MediaLibrary({ userId }) {
       await fetchWithTimeout("/api/gcs-finalize", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userId: resolvedUserId, objectId }),
+        body:    JSON.stringify({ userId: resolvedUserId, workspaceId: window.__bbWorkspaceId, objectId }),
       }, 15000);
       console.log("[upload] step 3 done — finalized");
 
