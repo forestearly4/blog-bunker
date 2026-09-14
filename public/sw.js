@@ -1,7 +1,7 @@
 // Blog Bunker Service Worker
 // Caches the app shell for offline use and fast loading
 
-const CACHE_NAME = "blog-bunker-v2";
+const CACHE_NAME = "blog-bunker-v3";
 const SHELL = ["/", "/index.html"];
 
 self.addEventListener("install", e => {
@@ -32,6 +32,15 @@ self.addEventListener("fetch", e => {
   // handle them completely natively, exactly like a plain page without any
   // service worker would.
   if (url.hostname === "storage.googleapis.com") return;
+
+  // Never cache the static help/FAQ pages — these are plain, standalone
+  // pages (not part of the React app), and caching them risks exactly the
+  // failure mode that happened here: an old, broken response gets cached
+  // once, then keeps being served forever afterward even once the real
+  // page is fixed server-side, since cache-first never re-checks the
+  // network. Always going straight to the network for these means a fix
+  // takes effect immediately, every time, with no stale-cache risk at all.
+  if (url.pathname.startsWith("/help/")) return;
 
   // Always network-first for API calls
   if (url.pathname.startsWith("/api/") || url.hostname !== location.hostname) {
