@@ -1283,7 +1283,7 @@ function SaveToLibraryButton({ imageUrl, tags = ["generated"], name = "generated
       const res = await fetch("/api/gcs", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userId: resolvedUserId, dataUrl, name: `${name}-${Date.now()}`, tags, source: "generated" }),
+        body:    JSON.stringify({ userId: resolvedUserId, workspaceId: window.__bbWorkspaceId, dataUrl, name: `${name}-${Date.now()}`, tags, source: "generated" }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -1365,6 +1365,7 @@ function ImageSavePanel({ imageUrl, tags = ["generated"], name = "generated" }) 
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
           userId,
+          workspaceId: window.__bbWorkspaceId,
           dataUrl,
           name:   `${name}-${Date.now()}`,
           tags,
@@ -8473,7 +8474,7 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
 const MEDIA_STORAGE = "bb_media_library_cache";
 
 function loadMediaLibraryCache() {
-  try { return JSON.parse(localStorage.getItem(MEDIA_STORAGE) || "[]"); }
+  try { return JSON.parse(localStorage.getItem(scopedKey(MEDIA_STORAGE, "workspace")) || "[]"); }
   catch { return []; }
 }
 
@@ -8481,7 +8482,7 @@ function saveMediaLibraryCache(items) {
   try {
     // Strip dataUrl before caching to save localStorage space
     const lite = items.map(({ dataUrl, ...rest }) => rest);
-    localStorage.setItem(MEDIA_STORAGE, JSON.stringify(lite));
+    localStorage.setItem(scopedKey(MEDIA_STORAGE, "workspace"), JSON.stringify(lite));
     window.dispatchEvent(new CustomEvent("bb-media-updated"));
   } catch(e) { /* cache full — ignore */ }
 }
@@ -8504,7 +8505,7 @@ async function saveToMediaLibrary(url, name = "generated", tags = ["generated"],
   const res = await fetch("/api/gcs", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify({ userId, dataUrl, name, tags, source: "generated" }),
+    body:    JSON.stringify({ userId, workspaceId: window.__bbWorkspaceId, dataUrl, name, tags, source: "generated" }),
   });
   if (!res.ok) throw new Error(`Media save failed: ${res.status}`);
   const data = await res.json();
@@ -8718,6 +8719,7 @@ function MediaLibrary({ userId }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId:  resolvedUserId,
+          workspaceId: window.__bbWorkspaceId,
           dataUrl: restyleResult,
           name:    `${selected?.name || "image"}-restyled`,
           tags:    ["restyled", "generated"],
@@ -8740,7 +8742,7 @@ function MediaLibrary({ userId }) {
   const fetchItems = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}`);
+      const res = await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}&workspaceId=${encodeURIComponent(window.__bbWorkspaceId || "")}`);
       const data = await res.json();
       if (data.items) {
         setItems(data.items);
@@ -8766,7 +8768,7 @@ function MediaLibrary({ userId }) {
   const deleteItem = async (id) => {
     if (!window.confirm("Delete this image?")) return;
     try {
-      await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}&id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}&workspaceId=${encodeURIComponent(window.__bbWorkspaceId || "")}&id=${encodeURIComponent(id)}`, { method: "DELETE" });
     } catch {}
     setItems(prev => prev.filter(i => i.id !== id));
     if (selected?.id === id) setSelected(null);
@@ -8780,7 +8782,7 @@ function MediaLibrary({ userId }) {
       await fetch("/api/gcs", {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userId, id, ...patch }),
+        body:    JSON.stringify({ userId, workspaceId: window.__bbWorkspaceId, id, ...patch }),
       });
     } catch {}
   };
@@ -9204,7 +9206,7 @@ function LibraryImagePicker({ onSelect, compact = false, userId }) {
   const fetchItems = async () => {
     setLoading(true);
     try {
-      const res  = await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}`);
+      const res  = await fetch(`/api/gcs?userId=${encodeURIComponent(resolvedUserId)}&workspaceId=${encodeURIComponent(window.__bbWorkspaceId || "")}`);
       const data = await res.json();
       setItems(data.items || []);
     } catch {
@@ -11400,7 +11402,7 @@ function ImageTextOverlayEditor({ imageUrl, imageName, userId, onSave }) {
       const exportUrl = canvasEl.toDataURL("image/png", 0.92);
       const res  = await fetch("/api/gcs", {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ userId, dataUrl: exportUrl, name:`${imageName||"image"}-overlay`, tags:["overlay","edited"], source:"edited" }),
+        body: JSON.stringify({ userId, workspaceId: window.__bbWorkspaceId, dataUrl: exportUrl, name:`${imageName||"image"}-overlay`, tags:["overlay","edited"], source:"edited" }),
       });
       const data = await res.json();
       if (data.item) onSave(data.item);
@@ -11662,7 +11664,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
       const res = await fetch("/api/gcs", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userId, dataUrl, name: safeName, tags: ["blog headline", "generated"], notes: prompt ? `Prompt: ${prompt.slice(0, 100)}` : "", source: "generated" }),
+        body:    JSON.stringify({ userId, workspaceId: window.__bbWorkspaceId, dataUrl, name: safeName, tags: ["blog headline", "generated"], notes: prompt ? `Prompt: ${prompt.slice(0, 100)}` : "", source: "generated" }),
       });
       if (!res.ok) throw new Error(`Upload failed (${res.status})`);
       window.dispatchEvent(new CustomEvent("bb-media-updated"));
@@ -11721,6 +11723,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
           headers: { "Content-Type": "application/json" },
           body:    JSON.stringify({
             userId,
+            workspaceId: window.__bbWorkspaceId,
             dataUrl,
             name:   safeName,
             tags:   ["blog headline", "generated"],
