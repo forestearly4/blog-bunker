@@ -68,6 +68,19 @@ function publicUrl(objectName) {
 // Store metadata in Netlify Blobs (small JSON, not images)
 const metaStore = () => getStore("blog-bunker-data");
 
+// Media items were previously shared across every workspace under one
+// userId-only key — meaning uploads/generations from ANY workspace all
+// mixed into one combined list, regardless of which brand they were
+// actually for. Suffixing the key per workspace (same convention used
+// everywhere else in the app) separates them properly. Falls back to the
+// unsuffixed key for "default"/missing workspaceId so existing media
+// already uploaded stays exactly where it is — no migration needed.
+function mediaKey(userId, workspaceId) {
+  const base = `${userId}:media_library`;
+  if (!workspaceId || workspaceId === "default") return base;
+  return `${base}__ws_${workspaceId}`;
+}
+
 export default async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
@@ -85,16 +98,17 @@ export default async (req) => {
         const buffer  = await blob.arrayBuffer();
         return new Response(buffer, { status: 200, headers: { ...CORS, "Content-Type": imgRes.headers.get("content-type") || "image/png" } });
       }
-      const userId = url.searchParams.get("userId") || "anonymous";
+      const userId      = url.searchParams.get("userId") || "anonymous";
+      const workspaceId = url.searchParams.get("workspaceId");
       const store  = metaStore();
-      const meta   = await store.get(`${userId}:media_library`, { type: "json" }) || [];
+      const meta   = await store.get(mediaKey(userId, workspaceId), { type: "json" }) || [];
       return new Response(JSON.stringify({ items: meta }), { status: 200, headers: CORS });
     }
 
     // ── UPLOAD ────────────────────────────────────────────────────────────────
     if (req.method === "POST") {
       const body = await req.json();
-      const { userId = "anonymous", dataUrl, name, tags = [], notes = "", source = "generated" } = body;
+      const { userId = "anonymous", workspaceId, dataUrl, name, tags = [], notes = "", source = "generated" } = body;
       if (!dataUrl) return new Response(JSON.stringify({ error: "dataUrl required" }), { status: 400, headers: CORS });
 
       const match = dataUrl.match(/^data:(image\/\w+);base64,(.+)$/);
@@ -129,16 +143,18 @@ export default async (req) => {
 
       // Save metadata
       const store    = metaStore();
-      const existing = await store.get(`${userId}:media_library`, { type: "json" }) || [];
+      const key      = mediaKey(userId, workspaceId);
+      const existing = await store.get(key, { type: "json" }) || [];
       const newItem  = { id, url: itemUrl, name: name || id.split("/").pop(), type: mimeType, size: bytes.length, tags, notes, source, createdAt: new Date().toISOString() };
-      await store.setJSON(`${userId}:media_library`, [newItem, ...existing]);
+      await store.setJSON(key, [newItem, ...existing]);
 
       return new Response(JSON.stringify({ id, url: itemUrl, item: newItem }), { status: 200, headers: CORS });
     }
 
     // ── DELETE ────────────────────────────────────────────────────────────────
     if (req.method === "DELETE") {
-      const userId = url.searchParams.get("userId") || "anonymous";
+      const userId      = url.searchParams.get("userId") || "anonymous";
+      const workspaceId = url.searchParams.get("workspaceId");
       const id     = url.searchParams.get("id");
       if (!id) return new Response(JSON.stringify({ error: "id required" }), { status: 400, headers: CORS });
 
@@ -152,19 +168,21 @@ export default async (req) => {
 
       // Remove from metadata
       const store    = metaStore();
-      const existing = await store.get(`${userId}:media_library`, { type: "json" }) || [];
-      await store.setJSON(`${userId}:media_library`, existing.filter(i => i.id !== id));
+      const key      = mediaKey(userId, workspaceId);
+      const existing = await store.get(key, { type: "json" }) || [];
+      await store.setJSON(key, existing.filter(i => i.id !== id));
       return new Response(JSON.stringify({ success: true }), { status: 200, headers: CORS });
     }
 
     // ── PATCH (update metadata) ───────────────────────────────────────────────
     if (req.method === "PATCH") {
       const body = await req.json();
-      const { userId = "anonymous", id, ...patch } = body;
+      const { userId = "anonymous", workspaceId, id, ...patch } = body;
       if (!id) return new Response(JSON.stringify({ error: "id required" }), { status: 400, headers: CORS });
       const store    = metaStore();
-      const existing = await store.get(`${userId}:media_library`, { type: "json" }) || [];
-      await store.setJSON(`${userId}:media_library`, existing.map(i => i.id === id ? { ...i, ...patch } : i));
+      const key      = mediaKey(userId, workspaceId);
+      const existing = await store.get(key, { type: "json" }) || [];
+      await store.setJSON(key, existing.map(i => i.id === id ? { ...i, ...patch } : i));
       return new Response(JSON.stringify({ success: true }), { status: 200, headers: CORS });
     }
 
