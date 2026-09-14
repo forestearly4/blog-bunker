@@ -127,14 +127,6 @@
   to     = "/.netlify/functions/get-image"
   status = 200
 
-# Help center static pages — must come before the SPA fallback below, or
-# requests to these get swallowed and served the React app shell instead
-# (which then shows a blank screen, since no app route matches the path).
-[[redirects]]
-  from   = "/help/*"
-  to     = "/help/:splat"
-  status = 200
-
 # SPA fallback — MUST be last so it doesn't swallow API routes above
 [[redirects]]
   from   = "/*"
