@@ -1475,7 +1475,7 @@ async function generateImagePrompt(topic, platId, activeProvider, activeModel, a
   const styleNote = brandImgCtx ? `Brand visual style: ${brandImgCtx}.` : "Style: moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones.";
   const text = await callAI(
     activeProvider, activeModel,
-    `You generate image prompts for Cask & Stream — a fly fishing and whiskey lifestyle brand. ${styleNote} Format: ${spec.style}. Return ONLY a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
+    `You generate image prompts for a blog/brand. ${styleNote} Format: ${spec.style}. Return ONLY a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
     `Write an image prompt for a ${platId} post (${spec.label}) about: ${topic}`,
     apiKey
   );
@@ -2928,7 +2928,7 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
 
 // ─── AI IDEA GENERATOR ───────────────────────────────────────────────────────
 
-function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activeModel, apiKeys, dark, onProviderChange, onModelChange }) {
+function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activeModel, apiKeys, dark, onProviderChange, onModelChange, brandGuide }) {
   const [loading,    setLoading]    = useState(false);
   const [ideas,      setIdeas]      = useState([]);
   const [error,      setError]      = useState("");
@@ -2940,33 +2940,37 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
 
+  // Focus area options come from the brand guide's own topics — falls back
+  // to a generic split if no topics are set yet, rather than hardcoding one
+  // specific brand's categories for every workspace.
+  const brandTopics = (brandGuide?.topics || "").split(",").map(t => t.trim()).filter(Boolean);
   const FOCUSES = [
-    { id:"mixed",      label:"Mixed",          desc:"All angles" },
-    { id:"whiskey",    label:"Whiskey",         desc:"Bourbon, scotch, pairings" },
-    { id:"flyfishing", label:"Fly Fishing",     desc:"Technique, gear, destinations" },
-    { id:"lifestyle",  label:"Lifestyle",       desc:"Culture, slow living, outdoors" },
-    { id:"seo",        label:"SEO Gaps",        desc:"High-search, low-competition" },
+    { id:"mixed", label:"Mixed", desc:"All angles" },
+    ...brandTopics.slice(0, 4).map(topic => ({ id: topic.toLowerCase().replace(/[^a-z0-9]/g, ""), label: topic, desc: topic })),
+    { id:"seo", label:"SEO Gaps", desc:"High-search, low-competition" },
   ];
 
   const generate = async () => {
     setLoading(true); setIdeas([]); setError(""); setSaved({});
     try {
       const existingTitles = posts.slice(0, 20).map(p => p.title).join("\n");
+      const brandCtx = buildBrandContext(brandGuide);
       const focusMap = {
-        mixed:      "a mix of fly fishing, whiskey/bourbon culture, and lifestyle",
-        whiskey:    "whiskey, bourbon, scotch, and spirits — pairings, reviews, culture",
-        flyfishing: "fly fishing — technique, gear, destinations, seasonal tips",
-        lifestyle:  "outdoor lifestyle, slow living, the culture of fly fishing and whiskey together",
-        seo:        "SEO-optimized angles with high search volume and low competition for a fly fishing and whiskey niche blog",
+        mixed: brandTopics.length ? `a mix of: ${brandTopics.join(", ")}` : "a mix of topics matching this blog's brand guide",
+        seo:   "SEO-optimized angles with high search volume and low competition for this blog's niche",
       };
+      brandTopics.forEach(topic => {
+        const id = topic.toLowerCase().replace(/[^a-z0-9]/g, "");
+        focusMap[id] = topic;
+      });
 
       const promptFocus = mode === "custom" && customTopic.trim()
         ? `the specific topic: "${customTopic.trim()}"`
-        : focusMap[focus];
+        : (focusMap[focus] || "a mix of topics matching this blog's brand guide");
 
       const text = await callAI(
         activeProvider, activeModel,
-        `You are a content strategist for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "Cast at Dawn. Sip at Dusk." Generate fresh, specific, actionable blog post ideas. Return ONLY valid JSON — no markdown, no fences, no explanation. Format: [{"title":"...","angle":"...","type":"article","notes":"...","outline":["point 1","point 2","point 3"]}] where angle is 1 sentence explaining the unique hook, notes is why this resonates with the audience, outline is 3 talking points. Generate exactly ${ideaCount} ideas.`,
+        `${brandCtx}You are a content strategist for this blog, matching the brand guide above. Generate fresh, specific, actionable blog post ideas. Return ONLY valid JSON — no markdown, no fences, no explanation. Format: [{"title":"...","angle":"...","type":"article","notes":"...","outline":["point 1","point 2","point 3"]}] where angle is 1 sentence explaining the unique hook, notes is why this resonates with the audience, outline is 3 talking points. Generate exactly ${ideaCount} ideas.`,
         `Focus: ${promptFocus}\n\nAlready published/drafted (avoid these angles):\n${existingTitles}\n\nGenerate ${ideaCount} fresh, specific content ideas.`,
         apiKeys[activeProvider],
         2000
@@ -3002,7 +3006,7 @@ function AIIdeaGenerator({ posts, inspiration, onAddIdeas, activeProvider, activ
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
         <div>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>✦ AI Idea Generator</h3>
-          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Generate content ideas tailored to Cask & Stream based on what you've already written.</p>
+          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Generate content ideas based on your brand guide and what you've already written.</p>
         </div>
       </div>
 
@@ -3200,7 +3204,7 @@ function CompetitorTracker({ competitors, onAddInspiration, activeProvider, acti
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
         <div>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>◎ Competitor Post Tracker</h3>
-          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Track what competitors are publishing and find counter-opportunities for Cask & Stream.</p>
+          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>Track what competitors are publishing and find counter-opportunities for your brand.</p>
         </div>
         <button onClick={scanAll} disabled={scanning}
           style={{ padding:"9px 18px", borderRadius:8, border:"none", background:scanning?"var(--bg-elevated)":provider.color, color:scanning?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:scanning?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
@@ -3384,7 +3388,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
 
   // Shared pipeline state — restored from localStorage if available
   const [brief, setBrief] = useState(saved?.brief || {
-    topic: "", angle: "", audience: "fly fishing and whiskey enthusiasts", keywords: "", inspiration: null,
+    topic: "", angle: "", audience: brandGuide?.audience || "", keywords: "", inspiration: null,
   });
   const [draft, setDraft] = useState(saved?.draft || {
     title: "", body: "", category: "Culture", tone: "literary",
@@ -3463,7 +3467,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       setStage(cloud.stage || "brief");
       setCompleted(cloud.completed || []);
       setPipelinePostId(cloud.pipelinePostId || null);
-      setBrief(cloud.brief || { topic:"", angle:"", audience:"fly fishing and whiskey enthusiasts", keywords:"", inspiration:null });
+      setBrief(cloud.brief || { topic:"", angle:"", audience:brandGuide?.audience || "", keywords:"", inspiration:null });
       setDraft(cloud.draft || { title:"", body:"", category:"Culture", tone:"literary" });
       setEnhance(cloud.enhance || { metaTitle:"", metaDescription:"", primaryKeyword:"", suggestions:[], headlines:[], improved:"" });
       setSocial(cloud.social || { posts:{}, images:{} });
@@ -3505,7 +3509,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const openBriefPromptPreview = () => {
     if (!brief.topic.trim()) return;
     const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
-    const system = `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`;
+    const system = `${brandCtx}You are a professional blog writer. Write a complete, publication-ready blog post in markdown that matches the brand guide above. Use # for title, ## for sections. Aim for 800+ words. Never generic -- always specific to the brand actual voice and topics.`;
     const user = `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`;
     setPromptPreview({ title:"Review Blog Post Prompt", system, user, confirmLabel:"Generate Draft", accentColor:"var(--amber)", mode:"brief" });
   };
@@ -3515,7 +3519,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     setLoading(true); setLoadMsg("Generating draft from your brief…"); setError(""); setPromptPreview(null);
     try {
       const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
-      const system = overridePrompt?.system ?? `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write a complete, publication-ready blog post in markdown. Use # for title, ## for sections. Aim for 800+ words. Voice: literary, evocative, specific. Never generic.`;
+      const system = overridePrompt?.system ?? `${brandCtx}You are a professional blog writer. Write a complete, publication-ready blog post in markdown that matches the brand guide above. Use # for title, ## for sections. Aim for 800+ words. Never generic -- always specific to the brand actual voice and topics.`;
       const user = overridePrompt?.user ?? `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the full post now.`;
       const text = await callAI(activeProvider, activeModel, system, user, apiKeys[activeProvider], 4000);
       // Extract title from first # line
@@ -3543,7 +3547,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     setLoading(true); setLoadMsg("Regenerating draft…"); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
-        `${brandCtx}You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "${wsTagline}". Write in markdown. # title, ## sections. 800+ words. Literary, evocative voice.`,
+        `${brandCtx}You are a professional blog writer, matching the brand guide above. Write in markdown. # title, ## sections. 800+ words.`,
         `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\n\nWrite a fresh version of the full post.`,
         apiKeys[activeProvider],
         4000
@@ -3564,7 +3568,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     try {
       const brandCtxLocal = buildBrandContext(loadBrandGuide());
       const text = await callAI(activeProvider, activeModel,
-        `${brandCtxLocal}You are an SEO expert for Cask & Stream (fly fishing + whiskey lifestyle blog). Return ONLY valid JSON (no fences):
+        `${brandCtxLocal}You are an SEO expert for this blog (see brand guide above). Return ONLY valid JSON (no fences):
 {
   "primaryKeyword": "best target keyword",
   "secondaryKeywords": ["kw1","kw2","kw3"],
@@ -3718,7 +3722,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
     try {
       for (const plat of targets) {
         setLoadMsg(`Writing ${plat.name} post…`);
-        const system = `${brandCtx}You are a social media manager for Cask & Stream. Tagline: "${wsTagline}". Voice: ${plat.tone}. Format: ${plat.format}. ${plat.urlNote}. Write ONLY the post content.`;
+        const system = `${brandCtx}You are a social media manager for this brand, matching the brand guide above. Voice: ${plat.tone}. Format: ${plat.format}. ${plat.urlNote}. Write ONLY the post content.`;
         results[plat.id] = await callAI(activeProvider, activeModel, system,
           `Write a ${plat.name} post based on this blog post:\nTitle: ${draft.title}\n\n${draft.body.slice(0,800)}`,
           apiKeys[activeProvider]
@@ -3789,7 +3793,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
   const resetPipeline = () => {
     clearPipelineDraft();
     setStage("brief"); setCompleted([]); setError(""); setSuccess(""); setSavedAt(null);
-    setBrief({ topic:"", angle:"", audience:"fly fishing and whiskey enthusiasts", keywords:"", inspiration:null });
+    setBrief({ topic:"", angle:"", audience:brandGuide?.audience || "", keywords:"", inspiration:null });
     setDraft({ title:"", body:"", category:"Culture", tone:"literary" });
     setEnhance({ metaTitle:"", metaDescription:"", primaryKeyword:"", suggestions:[], headlines:[], improved:"" });
     setSocial({ posts:{}, images:{} });
@@ -5391,7 +5395,7 @@ class MarketingErrorBoundary extends React.Component {
   }
 }
 
-function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null }) {
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null, wsUrl = "" }) {
   const [tab, setTab] = useState("pipeline");
   const [editPostForPipeline, setEditPostForPipeline] = useState(null);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
@@ -5490,6 +5494,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           onAddCalEvent={onAddCalEvent}
           editPost={editPostForPipeline}
           onConsumedEditPost={() => setEditPostForPipeline(null)}
+          brandGuide={brandGuide}
         />
       )}
 
@@ -5501,6 +5506,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           apiKeys={apiKeys}
           posts={posts}
           brandGuide={brandGuide}
+          wsUrl={wsUrl}
         />
       )}
 
@@ -5513,6 +5519,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           posts={posts}
           inspiration={socialInspiration}
           onAddInspiration={onAddSocialInspiration}
+          brandGuide={brandGuide}
         />
       )}
 
@@ -5575,6 +5582,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
               posts={posts}
               inspiration={socialInspiration}
               onAddInspiration={onAddSocialInspiration}
+              brandGuide={brandGuide}
             />
           )}
 
@@ -5599,6 +5607,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
               posts={posts}
               inspiration={socialInspiration}
               onAddInspiration={onAddSocialInspiration}
+              brandGuide={brandGuide}
             />
           )}
 
@@ -5607,6 +5616,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
               activeProvider={activeProvider}
               activeModel={activeModel}
               apiKeys={apiKeys}
+              brandGuide={brandGuide}
             />
           )}
 
@@ -5619,6 +5629,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
               posts={posts}
               inspiration={socialInspiration}
               onAddInspiration={onAddSocialInspiration}
+              brandGuide={brandGuide}
             />
           )}
         </div>
@@ -5630,6 +5641,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           activeProvider={activeProvider}
           activeModel={activeModel}
           apiKeys={apiKeys}
+          brandGuide={brandGuide}
         />
       )}
 
@@ -5652,7 +5664,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
 
 // ─── SOCIAL RESEARCH ──────────────────────────────────────────────────────────
 
-function SocialResearch({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
+function SocialResearch({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration, brandGuide = null }) {
   const [topic,      setTopic]      = useState("");
   const [results,    setResults]    = useState(null);
   const [loading,    setLoading]    = useState(false);
@@ -5675,18 +5687,18 @@ function SocialResearch({ activeProvider, activeModel, apiKeys, posts, inspirati
     try {
       const typeLabel = ideaType === "blog" ? "blog post" : ideaType === "social" ? "social media post" : "blog post or social media post";
       const text = await callAI(activeProvider, activeModel,
-        `You are a content strategist for Cask & Stream — a fly fishing and whiskey/bourbon lifestyle blog. Generate specific, compelling ${typeLabel} ideas. Return ONLY valid JSON array (no fences, no prose):
+        `${buildBrandContext(brandGuide)}You are a content strategist for this brand, matching the brand guide above. Generate specific, compelling ${typeLabel} ideas. Return ONLY valid JSON array (no fences, no prose):
 [
   {
     "title": "specific post title or hook",
     "type": "blog" or "social",
     "platform": "instagram" or "facebook" or "blog" or "tiktok" or "pinterest",
     "angle": "unique angle or hook in one sentence",
-    "why": "why this will resonate with fly fishing / whiskey audience",
+    "why": "why this will resonate with this brand's actual audience",
     "outline": ["point 1", "point 2", "point 3"]
   }
 ]
-Be specific and actionable. Use real fly fishing and whiskey terminology. Vary the angles — educational, storytelling, tips, gear, recipes, locations, seasonal.`,
+Be specific and actionable, grounded in this brand's real topics and voice. Vary the angles — educational, storytelling, tips, gear, recipes, locations, seasonal.`,
         `Generate ${ideaCount} ${typeLabel} ideas for the topic: "${ideaTopic}"\n\nExisting posts to avoid repeating: ${posts.slice(0,8).map(p=>p.title).join("; ")}`,
         apiKeys[activeProvider],
         2000
@@ -5709,7 +5721,7 @@ Be specific and actionable. Use real fly fishing and whiskey terminology. Vary t
     setLoading(true); setError(""); setResults(null);
     try {
       const text = await callAI(activeProvider, activeModel,
-        `You are a social media strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Research the given topic and return ONLY valid JSON (no fences):
+        `${buildBrandContext(brandGuide)}You are a social media strategist for this brand, matching the brand guide above. Research the given topic and return ONLY valid JSON (no fences):
 {
   "trending": [{"topic":"...","why":"...","platforms":["instagram","tiktok"]}],
   "angles": [{"angle":"...","hook":"...","platform":"..."}],
@@ -5903,7 +5915,7 @@ Be specific and actionable. Use real fly fishing and whiskey terminology. Vary t
 
 // ─── HASHTAG OPTIMIZER ────────────────────────────────────────────────────────
 
-function HashtagOptimizer({ activeProvider, activeModel, apiKeys }) {
+function HashtagOptimizer({ activeProvider, activeModel, apiKeys, brandGuide = null }) {
   const [topic,    setTopic]    = useState("");
   const [platform, setPlatform] = useState("instagram");
   const [results,  setResults]  = useState(null);
@@ -5918,7 +5930,7 @@ function HashtagOptimizer({ activeProvider, activeModel, apiKeys }) {
     setLoading(true); setError(""); setResults(null);
     try {
       const text = await callAI(activeProvider, activeModel,
-        `You are a hashtag strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Generate optimized hashtags. Return ONLY valid JSON (no fences):
+        `${buildBrandContext(brandGuide)}You are a hashtag strategist for this brand, matching the brand guide above. Generate optimized hashtags. Return ONLY valid JSON (no fences):
 {
   "primary": ["#tag1","#tag2"],
   "niche": ["#tag1","#tag2"],
@@ -6020,7 +6032,7 @@ primary = 5 high-volume (100k-1M posts), niche = 8 medium-volume (10k-100k), tre
 
 // ─── SOCIAL IMAGE STUDIO ──────────────────────────────────────────────────────
 
-function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
+function SocialImageStudio({ activeProvider, activeModel, apiKeys, brandGuide = null }) {
   const [topic,    setTopic]    = useState("");
   const [style,    setStyle]    = useState("cinematic");
   const [platform, setPlatform] = useState("instagram");
@@ -6060,7 +6072,7 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
     if (!topic.trim() || !provider) return;
     setLoading(true); setError("");
     try {
-      const aiPrompt = `Generate an image prompt for a Cask & Stream (fly fishing and whiskey lifestyle brand) ${platform} post. Style: ${styleMap[style]}. Topic: ${topic}. Amber and teal color palette. Return ONLY the prompt, no explanation.`;
+      const aiPrompt = `Generate an image prompt for a ${platform} post for this brand: ${buildBrandImageContext(brandGuide) || "a lifestyle brand"}. Style: ${styleMap[style]}. Topic: ${topic}. Return ONLY the prompt, no explanation.`;
       const generatedPrompt = await callAI(activeProvider, activeModel, "You generate concise, vivid image prompts. Return only the prompt string.", aiPrompt, apiKeys[activeProvider]);
       setDraftPrompt(generatedPrompt.trim());
       setPreviewOpen(true);
@@ -6169,7 +6181,7 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys }) {
 
 // ─── SOCIAL POST IDEAS ────────────────────────────────────────────────────────
 
-function SocialPostIdeas({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
+function SocialPostIdeas({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration, brandGuide = null }) {
   const [ideas,   setIdeas]   = useState([]);
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState("");
@@ -6190,10 +6202,10 @@ function SocialPostIdeas({ activeProvider, activeModel, apiKeys, posts, inspirat
     try {
       const existingTitles = posts.slice(0,8).map(p=>p.title).join(", ");
       const text = await callAI(activeProvider, activeModel,
-        `You are a social media strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Generate 10 social post ideas. Return ONLY valid JSON array, no markdown fences, no explanation before or after. Keep every field SHORT — one sentence max per field:
+        `${buildBrandContext(brandGuide)}You are a social media strategist for this brand, matching the brand guide above. Generate 10 social post ideas. Return ONLY valid JSON array, no markdown fences, no explanation before or after. Keep every field SHORT — one sentence max per field:
 [{"platform":"instagram","type":"reel","hook":"short hook","caption_idea":"one sentence","visual":"one sentence","hashtag_theme":"2-3 words"}]
 Mix platforms across instagram, tiktok, facebook, twitter. Be concise — brevity matters more than detail here.`,
-        `Cask & Stream. Existing: ${existingTitles}. Generate exactly 10 ideas, keep all fields brief.`,
+        `Existing posts: ${existingTitles}. Generate exactly 10 ideas, keep all fields brief.`,
         apiKeys[activeProvider],
         2200
       );
@@ -6216,7 +6228,7 @@ Mix platforms across instagram, tiktok, facebook, twitter. Be concise — brevit
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
         <div>
           <h3 style={{ fontFamily:"var(--font-display)", fontSize:17, fontWeight:700, margin:"0 0 4px" }}>Social Post Ideas</h3>
-          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>AI-generated post ideas tailored to Cask & Stream — save to Inspiration Board.</p>
+          <p style={{ fontSize:12, color:"var(--text-secondary)", margin:0 }}>AI-generated post ideas based on your brand guide — save to Inspiration Board.</p>
         </div>
         <button onClick={generate} disabled={loading}
           style={{ padding:"10px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
@@ -6265,7 +6277,7 @@ Mix platforms across instagram, tiktok, facebook, twitter. Be concise — brevit
       {!ideas.length && !loading && (
         <div style={{ textAlign:"center", padding:"48px 20px", color:"var(--muted)", fontSize:13 }}>
           <div style={{ fontSize:32, marginBottom:12 }}>◈</div>
-          Click "Generate 10 Ideas" to get platform-specific post ideas for Cask & Stream.
+          Click "Generate 10 Ideas" to get platform-specific post ideas for your brand.
         </div>
       )}
     </div>
@@ -6350,7 +6362,7 @@ function SocialPipelineProgress({ stage, setStage, completed }) {
   );
 }
 
-function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null, editPost = null, onConsumedEditPost = null }) {
+function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig, inspiration, onAddInspiration, onSaveSocialPost, initialIdea = null, onConsumedInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null, editPost = null, onConsumedEditPost = null, brandGuide = null }) {
   let saved = loadSocialPipelineDraft();
   if (saved?.completed?.includes("publish")) saved = null; // never resume an already-published draft
 
@@ -6519,7 +6531,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setLoading(true); setLoadMsg("Generating idea…"); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
-        `You are a social strategist for Cask & Stream — a fly fishing and whiskey lifestyle brand. Suggest ONE compelling, specific social post idea. Return ONLY the topic/concept as a single sentence, nothing else.`,
+        `${buildBrandContext(brandGuide)}You are a social strategist for this brand, matching the brand guide above. Suggest ONE compelling, specific social post idea. Return ONLY the topic/concept as a single sentence, nothing else.`,
         `Platforms: ${idea.platforms.join(", ")}. Suggest a fresh post idea that works across all of them.`,
         apiKeys[activeProvider]
       );
@@ -6540,7 +6552,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     .trim();
 
   const captionPromptFor = (plat) =>
-    `You are the social voice for Cask & Stream — a fly fishing and whiskey lifestyle brand. Tagline: "Cast at Dawn. Sip at Dusk." Write ONLY the caption text, no explanation, no quotes around it. Tone: ${plat.tone || plat.label}. Format: ${plat.format || ""} Keep the caption itself under ${plat.charLimit} characters. Do NOT include any hashtags — hashtags are added separately in a later step, so the caption must have zero # tags.`;
+    `${buildBrandContext(brandGuide)}You are the social voice for this brand, matching the brand guide above. Write ONLY the caption text, no explanation, no quotes around it. Tone: ${plat.tone || plat.label}. Format: ${plat.format || ""} Keep the caption itself under ${plat.charLimit} characters. Do NOT include any hashtags — hashtags are added separately in a later step, so the caption must have zero # tags.`;
 
   const generateCaptionFor = async (platId) => {
     if (!idea.topic.trim()) return;
@@ -6579,7 +6591,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setLoading(true); setLoadMsg("Optimizing hashtags…"); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
-        `You are a hashtag strategist for Cask & Stream. Return ONLY valid JSON (no fences): {"primary":[{"tag":"#tag1","score":85}],"niche":[{"tag":"#tag1","score":40}],"branded":[{"tag":"#CaskAndStream","score":20}],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags. "score" is your best estimate of reach potential from 1-100 (higher = broader audience but more competition to be seen; lower = smaller but more targeted audience).`,
+        `${buildBrandContext(brandGuide)}You are a hashtag strategist for this brand, matching the brand guide above. Return ONLY valid JSON (no fences): {"primary":[{"tag":"#tag1","score":85}],"niche":[{"tag":"#tag1","score":40}],"branded":[{"tag":"#${(brandGuide?.brandName||"YourBrand").replace(/[^a-zA-Z0-9]/g,"")}","score":20}],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags. "score" is your best estimate of reach potential from 1-100 (higher = broader audience but more competition to be seen; lower = smaller but more targeted audience).`,
         `Topic: ${idea.topic}\nPlatforms: ${idea.platforms.join(", ")}`,
         apiKeys[activeProvider]
       );
@@ -7710,7 +7722,7 @@ function PromptPreviewModal({ title, systemPrompt, userPrompt, onSystemChange, o
 
 // ─── EMAIL NEWSLETTER STUDIO ─────────────────────────────────────────────────
 
-function EmailNewsletterStudio({ activeProvider, activeModel, apiKeys, posts, brandGuide }) {
+function EmailNewsletterStudio({ activeProvider, activeModel, apiKeys, posts, brandGuide, wsUrl = "" }) {
   const [mode,     setMode]    = useState("from-post"); // "from-post" | "from-scratch"
   const [postId,   setPostId]  = useState("");
   const [topic,    setTopic]   = useState("");
@@ -7739,7 +7751,7 @@ function EmailNewsletterStudio({ activeProvider, activeModel, apiKeys, posts, br
           apiKeys[activeProvider]),
         callAI(activeProvider, activeModel,
           `${brandCtx}You write engaging email newsletters for bloggers. Write in a warm, personal voice — like writing to a friend. Structure: greeting → hook → main content → call to action → sign-off. Include a clear CTA to read the full post. Use plain text formatting only. 200-350 words.`,
-          `Write an email newsletter. ${context}${selectedPost ? `\nLink to post: [Read the full post →](https://caskandstream.com/blog/${selectedPost.title?.toLowerCase().replace(/\s+/g,"-")})` : ""}`,
+          `Write an email newsletter. ${context}${selectedPost && wsUrl ? `\nLink to post: [Read the full post →](https://${wsUrl.replace(/^https?:\/\//,"").replace(/\/$/,"")}/blog/${selectedPost.title?.toLowerCase().replace(/\s+/g,"-")})` : ""}`,
           apiKeys[activeProvider]),
       ]);
 
@@ -7948,7 +7960,7 @@ function PinterestStudio({ activeProvider, activeModel, apiKeys, posts, brandGui
 
 // ─── KEYWORD RESEARCH STUDIO ──────────────────────────────────────────────────
 
-function KeywordResearchStudio({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration }) {
+function KeywordResearchStudio({ activeProvider, activeModel, apiKeys, posts, inspiration, onAddInspiration, brandGuide = null }) {
   const [topic,   setTopic]   = useState("");
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -7971,7 +7983,7 @@ function KeywordResearchStudio({ activeProvider, activeModel, apiKeys, posts, in
   "avoid": ["too competitive keyword 1","too competitive keyword 2"]
 }
 long_tail array = 6 keywords. Focus heavily on low-difficulty, high-specificity terms.`,
-        `Niche: fly fishing and whiskey lifestyle blog. Research keywords for topic: "${topic}". Already covered: ${existingTopics.slice(0,300)}`,
+        `Niche: ${brandGuide?.topics || "this blog's niche (see brand guide)"}. Research keywords for topic: "${topic}". Already covered: ${existingTopics.slice(0,300)}`,
         apiKeys[activeProvider],
         2000
       );
@@ -8078,7 +8090,7 @@ long_tail array = 6 keywords. Focus heavily on low-difficulty, high-specificity 
 
 // ─── COMPETITOR MARKETING PANEL ───────────────────────────────────────────────
 
-function CompetitorMarketingPanel({ activeProvider, activeModel, apiKeys, competitors, posts, inspiration, onAddInspiration }) {
+function CompetitorMarketingPanel({ activeProvider, activeModel, apiKeys, competitors, posts, inspiration, onAddInspiration, brandGuide = null }) {
   const [selected,  setSelected]  = useState(competitors[0]?.url || "");
   const [analysis,  setAnalysis]  = useState(null);
   const [loading,   setLoading]   = useState(false);
@@ -8104,9 +8116,9 @@ function CompetitorMarketingPanel({ activeProvider, activeModel, apiKeys, compet
   "quick_wins": ["actionable win 1","actionable win 2","actionable win 3"]
 }
 content_gaps = 4 items. Be specific and actionable.`,
-        `Analyze this competitor blog for a fly fishing and whiskey lifestyle blogger (Cask & Stream):
+        `${buildBrandContext(brandGuide)}Analyze this competitor blog for me, given the brand guide above:
 Competitor: ${selectedCompetitor.name} (${selectedCompetitor.url})
-Their content focus: ${selectedCompetitor.focus || "general fly fishing blog"}
+Their content focus: ${selectedCompetitor.focus || "general blog in this niche"}
 My existing posts: ${posts.slice(0,8).map(p=>p.title).join(", ")}`,
         apiKeys[activeProvider],
         2000
@@ -9358,7 +9370,7 @@ function VideoPlanningStudio({ activeProvider, activeModel, apiKeys, posts, user
       };
 
       const text = await callAI(activeProvider, activeModel,
-        `${brandCtx}You are a content strategist specializing in fly fishing and whiskey lifestyle video content for Cask & Stream. Platform: ${platform?.name || activeTab}. Format: ${platform?.format || ""}. Create engaging, authentic content that resonates with fly fishing enthusiasts and whiskey lovers.`,
+        `${brandCtx}You are a content strategist for this brand video content, matching the brand guide above. Platform: ${platform?.name || activeTab}. Format: ${platform?.format || ""}. Create engaging, authentic content that resonates with this brand actual audience.`,
         prompts[genType] || prompts.script,
         apiKeys[activeProvider],
         2500
@@ -9775,7 +9787,7 @@ function BlogHealthScore({ posts, socialPosts, metaConfig, dark }) {
   );
 }
 
-function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onGSCDataLoaded, onConnectMeta, activeProvider, activeModel, apiKeys, onAddInspiration = null }) {
+function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, userId, onConnectGSC, onGSCDataLoaded, onConnectMeta, activeProvider, activeModel, apiKeys, onAddInspiration = null, brandGuide = null, wsUrl = "" }) {
   const [tab, setTab] = useState("overview");
   const [socialInsights, setSocialInsights] = useState(null);
   const [loadingInsights, setLoadingInsights] = useState(false);
@@ -9937,6 +9949,8 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
           apiKeys={apiKeys}
           onConnectGSC={onConnectGSC}
           onAddInspiration={onAddInspiration}
+          brandGuide={brandGuide}
+          wsUrl={wsUrl}
         />
       )}
 
@@ -10322,7 +10336,7 @@ function AnalyticsDashboard({ posts, gscData, metaConfig, socialPosts, dark, use
 
 // ─── SEO DASHBOARD ───────────────────────────────────────────────────────────
 
-function SEODashboard({ posts, gscData, activeProvider, activeModel, apiKeys, onConnectGSC, onAddInspiration = null }) {
+function SEODashboard({ posts, gscData, activeProvider, activeModel, apiKeys, onConnectGSC, onAddInspiration = null, brandGuide = null, wsUrl = "" }) {
   const [analysis,     setAnalysis]     = useState(null);
   const [loading,      setLoading]      = useState(false);
   const [loadMsg,      setLoadMsg]      = useState("");
@@ -10387,7 +10401,7 @@ function SEODashboard({ posts, gscData, activeProvider, activeModel, apiKeys, on
   "biggest_opportunity": "single most impactful thing to do right now in 1-2 sentences"
 }
 quick_wins = 5 items. title_rewrites = 3 items using actual post titles provided. content_gaps = 4 items. technical_tips = 3 items.`,
-        `Site: caskandstream.com — fly fishing and whiskey lifestyle blog.
+        `${buildBrandContext(brandGuide)}Site: ${wsUrl || "this blog"}.
 Published posts: ${postTitles || "none yet"}
 Top keywords: ${topKeywords || "no GSC data yet"}
 Top pages: ${topPages || "no data"}
@@ -10430,7 +10444,7 @@ Site age: relatively new, building domain authority`,
   "internal_links": ["suggest a topic to link to from this post","another link opportunity"],
   "verdict": "one sentence on the post's SEO potential"
 }`,
-        `Blog: caskandstream.com (fly fishing and whiskey lifestyle)
+        `Blog: ${wsUrl || "this blog"}
 Post title: "${post.title}"
 Post status: ${post.status}
 GSC data for this post: ${gscKw.length ? JSON.stringify(gscKw) : "no data yet"}
@@ -10468,7 +10482,7 @@ Page clicks: ${gscPage?.clicks || 0}`,
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
         <div>
           <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>SEO Dashboard</h2>
-          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>AI-powered recommendations to grow organic traffic on caskandstream.com</p>
+          <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>AI-powered recommendations to grow organic traffic{wsUrl ? ` on ${wsUrl}` : ""}</p>
         </div>
         <button onClick={runFullAnalysis} disabled={loading}
           style={{ padding:"9px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":provider.color, color:loading?"var(--muted)":"#0e0f11", fontSize:13, fontWeight:700, cursor:loading?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:8 }}>
@@ -11587,7 +11601,7 @@ function Modal({ title, onClose, children, wide }) {
 const HEADLINE_IMAGE_SPEC = {
   ratio: "16:9",
   label: "Blog Headline (16:9)",
-  style: "cinematic editorial photography, moody atmospheric, fly fishing and whiskey lifestyle, amber and teal tones, wide landscape",
+  style: "cinematic editorial photography, moody atmospheric, professional lighting, wide landscape",
 };
 
 function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys, onImageSaved, existingImageUrl = null }) {
@@ -11685,7 +11699,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
       if (!draftedPrompt) {
         // Build a prompt directly from the title — no extra AI call needed
         const guide = loadBrandGuide();
-        const style = guide?.imageStyle || "cinematic editorial photography, moody atmospheric, fly fishing and whiskey lifestyle, amber and teal tones";
+        const style = guide?.imageStyle || "cinematic editorial photography, moody atmospheric, professional lighting";
         const topic = (title || "").replace(/[#*\n]/g, " ").trim();
         draftedPrompt = `${topic}, ${style}, wide landscape banner, professional photography, golden hour lighting, 16:9 aspect ratio`;
       }
@@ -13662,6 +13676,7 @@ export default function Dashboard({ user, workspace }) {
                   dark={dark}
                   onProviderChange={handleProviderChange}
                   onModelChange={handleModelChange}
+                  brandGuide={brandGuide}
                 />
               )}
               {researchTab==="tracker"&&(
@@ -13697,6 +13712,8 @@ export default function Dashboard({ user, workspace }) {
               activeModel={activeModel}
               apiKeys={apiKeys}
               onAddInspiration={saveInspiration}
+              brandGuide={brandGuide}
+              wsUrl={wsUrl}
             />
           )}
 
@@ -13745,6 +13762,7 @@ export default function Dashboard({ user, workspace }) {
                 onConsumedExternalInitialIdea={() => setSocialPipelineHandoff(null)}
                 tierConfig={tierConfig}
                 onAddCalEvent={saveCalEvent}
+                wsUrl={wsUrl}
               />
             </MarketingErrorBoundary>
           )}
