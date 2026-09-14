@@ -40,13 +40,21 @@ async function getGCSToken() {
   return data.access_token;
 }
 
+// Same convention as gcs.js's mediaKey — falls back to the unsuffixed key
+// for "default"/missing workspaceId so pre-existing media needs no migration.
+function mediaKey(userId, workspaceId) {
+  const base = `${userId}:media_library`;
+  if (!workspaceId || workspaceId === "default") return base;
+  return `${base}__ws_${workspaceId}`;
+}
+
 export default async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status:204, headers:CORS });
   if (req.method !== "POST")    return new Response(JSON.stringify({ error:"POST only" }), { status:405, headers:CORS });
 
   try {
     const body = await req.json();
-    const { userId = "anonymous", fileName, mimeType, size, name, tags = [], notes = "", source = "upload" } = body;
+    const { userId = "anonymous", workspaceId, fileName, mimeType, size, name, tags = [], notes = "", source = "upload" } = body;
     if (!fileName || !mimeType) return new Response(JSON.stringify({ error:"fileName and mimeType required" }), { status:400, headers:CORS });
 
     const ext      = fileName.split(".").pop() || "bin";
@@ -81,7 +89,8 @@ export default async (req) => {
 
     // Pre-save metadata stub — will be confirmed after upload completes
     const store    = getStore("blog-bunker-data");
-    const existing = await store.get(`${userId}:media_library`, { type:"json" }) || [];
+    const key      = mediaKey(userId, workspaceId);
+    const existing = await store.get(key, { type:"json" }) || [];
     const item     = {
       id:        objectId,
       url:       publicUrl,
@@ -95,7 +104,7 @@ export default async (req) => {
       status:    "uploading",
       createdAt: new Date().toISOString(),
     };
-    await store.setJSON(`${userId}:media_library`, [item, ...existing]);
+    await store.setJSON(key, [item, ...existing]);
 
     return new Response(JSON.stringify({ uploadUrl, objectId, publicUrl, item }), { status:200, headers:CORS });
 

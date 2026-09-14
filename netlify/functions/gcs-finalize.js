@@ -38,12 +38,20 @@ async function getGCSToken() {
   return data.access_token;
 }
 
+// Same convention as gcs.js's mediaKey — falls back to the unsuffixed key
+// for "default"/missing workspaceId so pre-existing media needs no migration.
+function mediaKey(userId, workspaceId) {
+  const base = `${userId}:media_library`;
+  if (!workspaceId || workspaceId === "default") return base;
+  return `${base}__ws_${workspaceId}`;
+}
+
 export default async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status:204, headers:CORS });
   if (req.method !== "POST")    return new Response(JSON.stringify({ error:"POST only" }), { status:405, headers:CORS });
 
   try {
-    const { userId = "anonymous", objectId } = await req.json();
+    const { userId = "anonymous", workspaceId, objectId } = await req.json();
     if (!objectId) return new Response(JSON.stringify({ error:"objectId required" }), { status:400, headers:CORS });
 
     const token = await getGCSToken();
@@ -58,11 +66,12 @@ export default async (req) => {
 
     // Update metadata status
     const store    = getStore("blog-bunker-data");
-    const existing = await store.get(`${userId}:media_library`, { type:"json" }) || [];
+    const key      = mediaKey(userId, workspaceId);
+    const existing = await store.get(key, { type:"json" }) || [];
     const updated  = existing.map(item =>
       item.id === objectId ? { ...item, status: "ready" } : item
     );
-    await store.setJSON(`${userId}:media_library`, updated);
+    await store.setJSON(key, updated);
 
     return new Response(JSON.stringify({ success: true, url: `${GCS_API}/${BUCKET}/${objectId}` }), { status:200, headers:CORS });
 
