@@ -26,7 +26,26 @@ async function ensurePublicImageUrl(imageUrl) {
   return `https://blogbunker.netlify.app/api/get-image?id=${id}`;
 }
 
-async function postToFacebook(page, fullMessage, imageUrl, mediaType = "image") {
+async function postToFacebook(page, fullMessage, imageUrl, mediaType = "image", imageUrls = null) {
+  if (Array.isArray(imageUrls) && imageUrls.length >= 2) {
+    const photoIds = [];
+    for (const url of imageUrls) {
+      const res = await fetch(`https://graph.facebook.com/v25.0/${page.id}/photos`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ url, published: false, access_token: page.access_token }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(`Carousel photo: ${data.error.message} (code ${data.error.code})`);
+      photoIds.push(data.id);
+    }
+    const res = await fetch(`https://graph.facebook.com/v25.0/${page.id}/feed`, {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ message: fullMessage, attached_media: photoIds.map(id=>({media_fbid:id})), access_token: page.access_token }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(`Carousel post: ${data.error.message} (code ${data.error.code})`);
+    return data.id;
+  }
   const endpoint = imageUrl
     ? `https://graph.facebook.com/v25.0/${page.id}/${mediaType === "video" ? "videos" : "photos"}`
     : `https://graph.facebook.com/v25.0/${page.id}/feed`;
@@ -41,7 +60,44 @@ async function postToFacebook(page, fullMessage, imageUrl, mediaType = "image") 
   return data.id;
 }
 
-async function postToInstagram(page, fullMessage, imageUrl, mediaType = "image") {
+async function postToInstagram(page, fullMessage, imageUrl, mediaType = "image", imageUrls = null) {
+  if (mediaType !== "video" && Array.isArray(imageUrls) && imageUrls.length >= 2) {
+    if (imageUrls.length > 10) throw new Error("Instagram carousels support a maximum of 10 images.");
+    const childIds = [];
+    for (const url of imageUrls) {
+      const res = await fetch(`https://graph.facebook.com/v25.0/${page.instagram_id}/media`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ image_url: url, is_carousel_item: true, access_token: page.access_token }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(`Carousel item: ${data.error.message} (code ${data.error.code})`);
+      childIds.push(data.id);
+    }
+    let parentData;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const res = await fetch(`https://graph.facebook.com/v25.0/${page.instagram_id}/media`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ media_type:"CAROUSEL", children: childIds, caption: fullMessage, access_token: page.access_token }),
+      });
+      parentData = await res.json();
+      if (!parentData.error) break;
+      if (parentData.error.code === 9007 && attempt < 4) { await new Promise(r=>setTimeout(r, 1500*attempt)); continue; }
+      throw new Error(`Carousel container: ${parentData.error.message} (code ${parentData.error.code})`);
+    }
+    let publishData;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const res = await fetch(`https://graph.facebook.com/v25.0/${page.instagram_id}/media_publish`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ creation_id: parentData.id, access_token: page.access_token }),
+      });
+      publishData = await res.json();
+      if (!publishData.error) break;
+      if (publishData.error.code === 9007 && attempt < 4) { await new Promise(r=>setTimeout(r, 1500*attempt)); continue; }
+      throw new Error(`Carousel publish: ${publishData.error.message} (code ${publishData.error.code})`);
+    }
+    return publishData.id;
+  }
+
   if (!imageUrl) throw new Error("Instagram requires a public image or video URL");
 
   if (mediaType === "video") {
@@ -145,6 +201,12 @@ export default async () => {
           try { imageUrl = await ensurePublicImageUrl(post.imageUrl); }
           catch(e) { console.error(`[scheduler] Image URL failed:`, e.message); }
         }
+        let imageUrls = null;
+        if (Array.isArray(post.imageUrls) && post.imageUrls.length >= 2) {
+          const resolved = await Promise.all(post.imageUrls.map(u => ensurePublicImageUrl(u).catch(() => null)));
+          imageUrls = resolved.filter(Boolean);
+          if (imageUrls.length < 2) imageUrls = null; // fell below carousel minimum after failures
+        }
 
         for (const platId of platforms) {
           try {
@@ -166,15 +228,23 @@ export default async () => {
               : baseHashtags;
             const fullMessage = [caption, hashtagsForPlat].filter(Boolean).join("\n\n").trim();
 
-            if (platId === "facebook" && metaConfig?.pages?.length > 0) {
-              const id = await postToFacebook(metaConfig.pages[0], fullMessage, imageUrl, post.mediaType);
+            // Resolves which Page to publish to — respects the user's explicit
+            // selection (set in Settings → Facebook & Instagram) rather than
+            // just grabbing whichever Page happens to be first/have Instagram
+            // linked, which would silently ignore the choice for anyone whose
+            // Facebook account has access to more than one Page.
+            const resolvedPage = metaConfig?.pages?.length
+              ? (metaConfig.pages.find(p => p.id === metaConfig.selectedPageId) || metaConfig.pages[0])
+              : null;
+
+            if (platId === "facebook" && resolvedPage) {
+              const id = await postToFacebook(resolvedPage, fullMessage, imageUrl, post.mediaType, imageUrls);
               results[platId] = { success: true, id };
               published++;
               console.log(`[scheduler] ✓ Facebook: ${id}`);
 
-            } else if (platId === "instagram" && metaConfig?.pages?.some(p => p.instagram_id)) {
-              const page = metaConfig.pages.find(p => p.instagram_id);
-              const id   = await postToInstagram(page, fullMessage, imageUrl, post.mediaType);
+            } else if (platId === "instagram" && resolvedPage?.instagram_id) {
+              const id   = await postToInstagram(resolvedPage, fullMessage, imageUrl, post.mediaType, imageUrls);
               results[platId] = { success: true, id };
               published++;
               console.log(`[scheduler] ✓ Instagram: ${id}`);

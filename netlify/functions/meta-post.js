@@ -21,8 +21,9 @@ export default async (req) => {
     return new Response(JSON.stringify({ error: "Invalid JSON" }), { status: 400, headers: CORS });
   }
 
-  const { pageId, pageToken, instagramId, message, imageUrl, mediaType = "image", link, platforms = ["facebook"] } = body;
+  const { pageId, pageToken, instagramId, message, imageUrl, imageUrls, mediaType = "image", link, platforms = ["facebook"] } = body;
   const results = {};
+  const isCarousel = Array.isArray(imageUrls) && imageUrls.length > 1;
 
   // Convert data: or blob: URLs to a real hosted https:// URL via Netlify Blobs
   async function ensurePublicUrl(url) {
@@ -48,7 +49,33 @@ export default async (req) => {
   // ── POST TO FACEBOOK PAGE ──────────────────────────────────────────────────
   if (platforms.includes("facebook") && pageId && pageToken) {
     try {
-      if (imageUrl && mediaType === "video") {
+      if (isCarousel) {
+        // Facebook's multi-photo mechanism is different from Instagram's:
+        // upload each photo as unpublished first (published:false gives back
+        // a photo id without posting it standalone), then create one feed
+        // post that references all of them via attached_media.
+        const photoIds = [];
+        for (const url of imageUrls) {
+          const publicUrl = await ensurePublicUrl(url);
+          const res = await fetch(`https://graph.facebook.com/v25.0/${pageId}/photos`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: publicUrl, published: false, access_token: pageToken }),
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(`Facebook (carousel photo): ${data.error.message} (code ${data.error.code})`);
+          photoIds.push(data.id);
+        }
+        const attached_media = photoIds.map(id => ({ media_fbid: id }));
+        const res = await fetch(`https://graph.facebook.com/v25.0/${pageId}/feed`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, attached_media, access_token: pageToken }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(`Facebook (carousel post): ${data.error.message} (code ${data.error.code})`);
+        results.facebook = { success: true, id: data.id };
+      } else if (imageUrl && mediaType === "video") {
         // Video posts use the /videos endpoint with file_url (Facebook fetches
         // and processes the video server-side after accepting the post — this
         // doesn't block the API response the way Instagram's container model
@@ -90,25 +117,70 @@ export default async (req) => {
   // ── POST TO INSTAGRAM ──────────────────────────────────────────────────────
   if (platforms.includes("instagram") && instagramId && pageToken) {
     try {
-      if (!imageUrl) throw new Error("Instagram requires an image or video — generate/select one first.");
+      if (!imageUrl && !isCarousel) throw new Error("Instagram requires an image or video — generate/select one first.");
       if (instagramId === pageId) throw new Error("instagramId appears to be the same as pageId — check Settings → Facebook & Instagram.");
       if (mediaType === "video") throw new Error("Video posts to Instagram should use /api/meta-video-post (video processing takes too long for this endpoint) — this is a client-side routing bug if you're seeing this.");
 
-      const publicUrl = await ensurePublicUrl(imageUrl);
-      console.log("Instagram posting with URL:", publicUrl?.slice(0, 80));
+      let creationId;
 
-      // Step 1: Create media container
-      const containerRes = await fetch(`https://graph.facebook.com/v25.0/${instagramId}/media`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image_url: publicUrl, caption: message, access_token: pageToken }),
-      });
-      const containerData = await containerRes.json();
-      if (containerData.error) {
-        throw new Error(`Instagram container: ${containerData.error.message} (code ${containerData.error.code})`);
+      if (isCarousel) {
+        if (imageUrls.length > 10) throw new Error("Instagram carousels support a maximum of 10 images.");
+
+        // Step 1: create one child item container per image. Each is flagged
+        // is_carousel_item — no caption on these, the caption goes on the
+        // parent container in step 2.
+        const childIds = [];
+        for (const url of imageUrls) {
+          const publicUrl = await ensurePublicUrl(url);
+          const res = await fetch(`https://graph.facebook.com/v25.0/${instagramId}/media`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ image_url: publicUrl, is_carousel_item: true, access_token: pageToken }),
+          });
+          const data = await res.json();
+          if (data.error) throw new Error(`Instagram (carousel item): ${data.error.message} (code ${data.error.code})`);
+          childIds.push(data.id);
+        }
+
+        // Step 2: create the parent carousel container referencing all child
+        // IDs. Retry on the same transient "not ready" error as publishing
+        // below — a child container can still be processing when we try to
+        // reference it here, exactly like the final publish step can hit.
+        let parentData;
+        for (let attempt = 1; attempt <= 4; attempt++) {
+          const res = await fetch(`https://graph.facebook.com/v25.0/${instagramId}/media`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ media_type: "CAROUSEL", children: childIds, caption: message, access_token: pageToken }),
+          });
+          parentData = await res.json();
+          if (!parentData.error) break;
+          if (parentData.error.code === 9007 && attempt < 4) {
+            await new Promise(r => setTimeout(r, 1500 * attempt));
+            continue;
+          }
+          throw new Error(`Instagram (carousel container): ${parentData.error.message} (code ${parentData.error.code})`);
+        }
+        creationId = parentData.id;
+
+      } else {
+        const publicUrl = await ensurePublicUrl(imageUrl);
+        console.log("Instagram posting with URL:", publicUrl?.slice(0, 80));
+
+        // Step 1: Create media container
+        const containerRes = await fetch(`https://graph.facebook.com/v25.0/${instagramId}/media`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image_url: publicUrl, caption: message, access_token: pageToken }),
+        });
+        const containerData = await containerRes.json();
+        if (containerData.error) {
+          throw new Error(`Instagram container: ${containerData.error.message} (code ${containerData.error.code})`);
+        }
+        creationId = containerData.id;
       }
 
-      // Step 2: Publish — retry on the well-documented transient "Media ID is
+      // Step 2/3: Publish — retry on the well-documented transient "Media ID is
       // not available" (code 9007 / subcode 2207027) error, which just means
       // Instagram hasn't finished processing the container yet. Every major
       // social tool (Buffer, Agorapulse, Statusbrew, etc.) handles this the
@@ -121,7 +193,7 @@ export default async (req) => {
         const publishRes = await fetch(`https://graph.facebook.com/v25.0/${instagramId}/media_publish`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ creation_id: containerData.id, access_token: pageToken }),
+          body: JSON.stringify({ creation_id: creationId, access_token: pageToken }),
         });
         publishData = await publishRes.json();
 
