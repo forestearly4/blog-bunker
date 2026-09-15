@@ -1112,10 +1112,10 @@ const SOCIAL_PLATFORMS = [
 const SOCIAL_KEYS_STORAGE = "bb_social_connections";
 
 function loadSocialConnections() {
-  try { return JSON.parse(localStorage.getItem(SOCIAL_KEYS_STORAGE) || "{}"); } catch { return {}; }
+  try { return JSON.parse(localStorage.getItem(scopedKey(SOCIAL_KEYS_STORAGE, "workspace")) || "{}"); } catch { return {}; }
 }
 function saveSocialConnections(data) {
-  try { localStorage.setItem(SOCIAL_KEYS_STORAGE, JSON.stringify(data)); } catch {}
+  try { localStorage.setItem(scopedKey(SOCIAL_KEYS_STORAGE, "workspace"), JSON.stringify(data)); } catch {}
 }
 
 // ─── MULTI-PROVIDER IMAGE GENERATOR ──────────────────────────────────────────
@@ -3364,17 +3364,25 @@ function PipelineProgress({ stage, setStage, completed }) {
 }
 
 const PIPELINE_STORAGE = "bb_pipeline_draft";
+// Same fix as the Social Pipeline's draft below — was a single shared key
+// across every workspace, meaning an in-progress article draft in one
+// workspace would show up in another. Falls back to the unsuffixed key for
+// the default workspace so nothing already in progress is lost.
+function pipelineCloudKey() {
+  const wsId = window.__bbWorkspaceId;
+  return (!wsId || wsId === "default") ? "pipeline_draft" : `pipeline_draft__ws_${wsId}`;
+}
 
 function loadPipelineDraft() {
-  try { return JSON.parse(localStorage.getItem(PIPELINE_STORAGE) || "null"); } catch { return null; }
+  try { return JSON.parse(localStorage.getItem(scopedKey(PIPELINE_STORAGE, "workspace")) || "null"); } catch { return null; }
 }
 function savePipelineDraft(data) {
-  try { localStorage.setItem(PIPELINE_STORAGE, JSON.stringify(data)); } catch {}
+  try { localStorage.setItem(scopedKey(PIPELINE_STORAGE, "workspace"), JSON.stringify(data)); } catch {}
 }
 function clearPipelineDraft() {
-  try { localStorage.removeItem(PIPELINE_STORAGE); } catch {}
+  try { localStorage.removeItem(scopedKey(PIPELINE_STORAGE, "workspace")); } catch {}
   const uid = window.__bbUserId;
-  if (uid) cloudSet("pipeline_draft", uid, null);
+  if (uid) cloudSet(pipelineCloudKey(), uid, null);
 }
 
 function ContentPipeline({ posts, inspiration, competitors, activeProvider, activeModel, apiKeys, dark, wixConnected, onSavePost, onAddInspiration, onAddCalEvent, wsName, wsTagline, onProviderChange, onModelChange, brandGuide = null, initialPost = null, onConsumedInitialPost = null, onSendToSocialPipeline = null, onNavigateToTab = null, onNavigateToPosts = null }) {
@@ -3437,7 +3445,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus(""), 2500);
       const uid = window.__bbUserId;
-      if (uid) cloudSaveDebounced("pipeline_draft", uid, data);
+      if (uid) cloudSaveDebounced(pipelineCloudKey(), uid, data);
     }, 1500);
     return () => clearTimeout(autosaveTimer.current);
   }, [stage, completed, brief, draft, enhance, social.posts, schedule, pipelinePostId]);
@@ -3451,7 +3459,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     const uid = window.__bbUserId;
     if (!uid) return;
     (async () => {
-      const cloud = await cloudGet("pipeline_draft", uid);
+      const cloud = await cloudGet(pipelineCloudKey(), uid);
       if (!cloud) return;
       // A published draft should NEVER be resurrected, no matter what —
       // this guards against a real race where clearPipelineDraft()'s cloud
@@ -3568,26 +3576,26 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     try {
       const brandCtxLocal = buildBrandContext(loadBrandGuide());
       const text = await callAI(activeProvider, activeModel,
-        `${brandCtxLocal}You are an SEO expert for this blog (see brand guide above). Return ONLY valid JSON (no fences):
+        `${brandCtxLocal}You are an SEO expert for this blog (see brand guide above). Score honestly — most real titles and descriptions score 50-75, not 85+; reserve 85+ for something genuinely excellent on both clickability and search fit. Return ONLY valid JSON (no fences):
 {
   "primaryKeyword": "best target keyword",
   "secondaryKeywords": ["kw1","kw2","kw3"],
   "titles": [
-    {"text":"title option 1 (≤60 chars)","ctrScore":85,"seoScore":70,"why":"reason","charCount":52},
-    {"text":"title option 2 (≤60 chars)","ctrScore":78,"seoScore":82,"why":"reason","charCount":48},
-    {"text":"title option 3 (≤60 chars)","ctrScore":72,"seoScore":75,"why":"reason","charCount":55}
+    {"text":"title option 1 (≤60 chars)","ctrScore":62,"seoScore":58,"why":"reason","charCount":52},
+    {"text":"title option 2 (≤60 chars)","ctrScore":55,"seoScore":68,"why":"reason","charCount":48},
+    {"text":"title option 3 (≤60 chars)","ctrScore":48,"seoScore":52,"why":"reason","charCount":55}
   ],
   "descriptions": [
-    {"text":"meta description option 1 (≤160 chars)","score":88,"why":"why this converts","charCount":145},
-    {"text":"meta description option 2 (≤160 chars)","score":80,"why":"reason","charCount":138},
-    {"text":"meta description option 3 (≤160 chars)","score":74,"why":"reason","charCount":152}
+    {"text":"meta description option 1 (≤160 chars)","score":65,"why":"why this converts","charCount":145},
+    {"text":"meta description option 2 (≤160 chars)","score":58,"why":"reason","charCount":138},
+    {"text":"meta description option 3 (≤160 chars)","score":50,"why":"reason","charCount":152}
   ],
-  "readabilityScore": 82,
+  "readabilityScore": 62,
   "readabilityNotes": "brief note on readability",
   "suggestions": ["actionable tip 1","actionable tip 2","actionable tip 3"],
-  "overallScore": 80
+  "overallScore": 58
 }
-Titles and descriptions MUST be under their character limits. EVERY title in the titles array MUST include BOTH a ctrScore AND a seoScore as separate integer fields — never omit either one, even if they're similar or the same value. ctrScore rates how clickable/compelling a title is (curiosity, emotional hook, power words). seoScore rates how well it targets the primary keyword and matches search intent. These two scores often differ from each other — that's expected, not an error.`,
+Titles and descriptions MUST be under their character limits. EVERY title in the titles array MUST include BOTH a ctrScore AND a seoScore as separate integer fields — never omit either one, even if they're similar or the same value. ctrScore rates how clickable/compelling a title is (curiosity, emotional hook, power words). seoScore rates how well it targets the primary keyword and matches search intent. These two scores often differ from each other — that's expected, not an error. The example scores above are illustrations of realistic, honest scoring — not a target to hit; score what's actually in front of you, which may be higher or lower.`,
         `Title: ${draft.title}\n\nBody excerpt:\n${draft.body.slice(0, 1200)}`,
         apiKeys[activeProvider],
         4096
@@ -4663,8 +4671,8 @@ function saveGSCConfig(d) {
   // this is just an in-progress OAuth flow, not something worth syncing yet.
   gscConfigStore.save(d, { debounce: false, skipCloud: !d?.refreshToken });
 }
-function loadGSCData()   { try { return JSON.parse(localStorage.getItem(GSC_DATA_STORAGE) || "null"); } catch { return null; } }
-function saveGSCData(d)  { try { localStorage.setItem(GSC_DATA_STORAGE, JSON.stringify(d)); } catch {} }
+function loadGSCData()   { try { return JSON.parse(localStorage.getItem(scopedKey(GSC_DATA_STORAGE, "workspace")) || "null"); } catch { return null; } }
+function saveGSCData(d)  { try { localStorage.setItem(scopedKey(GSC_DATA_STORAGE, "workspace"), JSON.stringify(d)); } catch {} }
 
 // Get a valid access token — auto-refreshes if expired
 async function getGSCAccessToken(cfg) {
@@ -5190,12 +5198,19 @@ async function ensurePublicImageUrl(imageUrl) {
   return data.url;
 }
 
-async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, mediaType = "image", link, platforms }) {
+async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, imageUrls, mediaType = "image", link, platforms }) {
   let finalImageUrl = imageUrl;
   // Any blob: or data: URL must be uploaded to get a public https:// URL
   // before sending to meta-post.js (server can't fetch browser-local URLs)
   if (imageUrl && (imageUrl.startsWith("blob:") || imageUrl.startsWith("data:"))) {
     finalImageUrl = await ensurePublicImageUrl(imageUrl);
+  }
+
+  let finalImageUrls = imageUrls;
+  if (Array.isArray(imageUrls)) {
+    finalImageUrls = await Promise.all(imageUrls.map(url =>
+      (url.startsWith("blob:") || url.startsWith("data:")) ? ensurePublicImageUrl(url) : url
+    ));
   }
 
   // Instagram video needs the background-job flow — video processing can take
@@ -5224,7 +5239,7 @@ async function metaPost({ pageId, pageToken, instagramId, message, imageUrl, med
   const res = await fetch("/api/meta-post", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pageId, pageToken, instagramId, message, imageUrl: finalImageUrl, mediaType, link, platforms }),
+    body: JSON.stringify({ pageId, pageToken, instagramId, message, imageUrl: finalImageUrl, imageUrls: finalImageUrls, mediaType, link, platforms }),
   });
   return await res.json();
 }
@@ -5935,7 +5950,7 @@ function HashtagOptimizer({ activeProvider, activeModel, apiKeys, brandGuide = n
   "primary": ["#tag1","#tag2"],
   "niche": ["#tag1","#tag2"],
   "trending": ["#tag1","#tag2"],
-  "branded": ["#CaskAndStream","#CastAtDawn"],
+  "branded": ["#YourBrandTag1","#YourBrandTag2"],
   "sets": {
     "max_reach": "full hashtag string for copy-paste",
     "niche_focus": "niche hashtag string",
@@ -6288,12 +6303,22 @@ Mix platforms across instagram, tiktok, facebook, twitter. Be concise — brevit
 // 5-stage workflow: Idea → Caption → Hashtags → Image → Publish
 
 const SOCIAL_PIPELINE_STORAGE = "bb_social_pipeline_draft";
-function loadSocialPipelineDraft() { try { return JSON.parse(localStorage.getItem(SOCIAL_PIPELINE_STORAGE) || "null"); } catch { return null; } }
-function saveSocialPipelineDraft(d) { try { localStorage.setItem(SOCIAL_PIPELINE_STORAGE, JSON.stringify(d)); } catch {} }
+// The in-progress pipeline draft (idea/captions/hashtags/image, mid-flow
+// before a post is actually saved) was previously a single shared key across
+// every workspace — meaning starting a post in one workspace and switching
+// to another would show that same in-progress draft there too. Scoped the
+// same way as everything else: falls back to the unsuffixed key for the
+// default workspace so nothing already in progress is lost.
+function socialPipelineCloudKey() {
+  const wsId = window.__bbWorkspaceId;
+  return (!wsId || wsId === "default") ? "social_pipeline_draft" : `social_pipeline_draft__ws_${wsId}`;
+}
+function loadSocialPipelineDraft() { try { return JSON.parse(localStorage.getItem(scopedKey(SOCIAL_PIPELINE_STORAGE, "workspace")) || "null"); } catch { return null; } }
+function saveSocialPipelineDraft(d) { try { localStorage.setItem(scopedKey(SOCIAL_PIPELINE_STORAGE, "workspace"), JSON.stringify(d)); } catch {} }
 function clearSocialPipelineDraft() {
-  try { localStorage.removeItem(SOCIAL_PIPELINE_STORAGE); } catch {}
+  try { localStorage.removeItem(scopedKey(SOCIAL_PIPELINE_STORAGE, "workspace")); } catch {}
   const uid = window.__bbUserId;
-  if (uid) cloudSet("social_pipeline_draft", uid, null);
+  if (uid) cloudSet(socialPipelineCloudKey(), uid, null);
 }
 
 // ─── SOCIAL POSTS STORE ───────────────────────────────────────────────────────
@@ -6308,7 +6333,7 @@ function saveSocialPostsToStorage(posts) {
   try { localStorage.setItem(scopedKey(SOCIAL_POSTS_STORAGE, "workspace"), JSON.stringify(posts)); } catch {}
 }
 
-function createSocialPost({ id = null, platforms, captions, hashtags, mediaType, imageUrl, imagePrompt, scheduledAt, status = "draft" }) {
+function createSocialPost({ id = null, platforms, captions, hashtags, mediaType, imageUrl, imageUrls = null, imagePrompt, scheduledAt, status = "draft" }) {
   return {
     id:          id || Date.now(),
     platforms,
@@ -6316,6 +6341,7 @@ function createSocialPost({ id = null, platforms, captions, hashtags, mediaType,
     hashtags,
     mediaType,
     imageUrl,
+    imageUrls,      // array of image URLs for carousel posts (2-10 items), null otherwise
     imagePrompt,
     status,         // "draft" | "scheduled" | "published"
     scheduledAt,    // ISO string or null
@@ -6394,6 +6420,10 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   const [captions, setCaptions] = useState(saved?.captions || {});
   const [hashtags, setHashtags] = useState(saved?.hashtags || { sets:null, selected:"", perPlatform:{} });
   const [imageData, setImageData] = useState(saved?.imageData || { prompt:"", url:null, mediaType:"image", imgProvider: resolveImageProvider(apiKeys) });
+  // Only used when idea.type === "carousel" — a carousel needs 2-10 images in
+  // a specific order, so it's a separate array rather than overloading the
+  // single-image imageData used by photo/reel/story posts.
+  const [carouselImages, setCarouselImages] = useState(saved?.carouselImages || []);
   const [schedule, setSchedule] = useState(saved?.schedule || { date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
   const [publishResults, setPublishResults] = useState({});
   const [editingSocialPostId, setEditingSocialPostId] = useState(saved?.editingSocialPostId || null);
@@ -6459,7 +6489,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     const uid = window.__bbUserId;
     if (!uid) return;
     (async () => {
-      const cloud = await cloudGet("social_pipeline_draft", uid);
+      const cloud = await cloudGet(socialPipelineCloudKey(), uid);
       if (!cloud) return;
       // A published post should NEVER be resurrected — see the identical
       // guard and reasoning in ContentPipeline's cloud-pull effect. Robust
@@ -6501,12 +6531,12 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   useEffect(() => {
     if (completed.includes("publish")) return;
     if (!idea.topic && Object.keys(captions).length === 0) return;
-    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url: imageData.url?.startsWith("https://") ? imageData.url : null }, schedule, editingSocialPostId, savedAt:new Date().toISOString() };
+    const data = { stage, completed, idea, captions, hashtags, imageData: { ...imageData, url: imageData.url?.startsWith("https://") ? imageData.url : null }, carouselImages: carouselImages.map(img => ({ ...img, url: img.url?.startsWith("https://") ? img.url : null })), optimization, schedule, editingSocialPostId, savedAt:new Date().toISOString() };
     saveSocialPipelineDraft(data);
     setSavedAt(data.savedAt);
     const uid = window.__bbUserId;
-    if (uid) cloudSaveDebounced("social_pipeline_draft", uid, data);
-  }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, schedule, editingSocialPostId]);
+    if (uid) cloudSaveDebounced(socialPipelineCloudKey(), uid, data);
+  }, [stage, completed, idea, captions, hashtags, imageData.prompt, imageData.imgProvider, optimization, schedule, editingSocialPostId]);
 
   const markDone = (id) => setCompleted(c => c.includes(id) ? c : [...c, id]);
   const advance  = (next) => { setStage(next); setError(""); setSuccess(""); };
@@ -6591,7 +6621,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setLoading(true); setLoadMsg("Optimizing hashtags…"); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
-        `${buildBrandContext(brandGuide)}You are a hashtag strategist for this brand, matching the brand guide above. Return ONLY valid JSON (no fences): {"primary":[{"tag":"#tag1","score":85}],"niche":[{"tag":"#tag1","score":40}],"branded":[{"tag":"#${(brandGuide?.brandName||"YourBrand").replace(/[^a-zA-Z0-9]/g,"")}","score":20}],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags. "score" is your best estimate of reach potential from 1-100 (higher = broader audience but more competition to be seen; lower = smaller but more targeted audience).`,
+        `${buildBrandContext(brandGuide)}You are a hashtag strategist for this brand, matching the brand guide above. Return ONLY valid JSON (no fences): {"primary":[{"tag":"#tag1","score":65}],"niche":[{"tag":"#tag1","score":35}],"branded":[{"tag":"#${(brandGuide?.brandName||"YourBrand").replace(/[^a-zA-Z0-9]/g,"")}","score":15}],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags. "score" is your honest best estimate of reach potential from 1-100 (higher = broader audience but more competition to be seen; lower = smaller but more targeted audience) — most hashtags genuinely score in the 20-60 range once real competition is accounted for; reserve 80+ for a tag that's both high-volume and realistically attainable for a small-to-mid account. The example scores above are illustrations of realistic scoring, not a target.`,
         `Topic: ${idea.topic}\nPlatforms: ${idea.platforms.join(", ")}`,
         apiKeys[activeProvider]
       );
@@ -6611,6 +6641,34 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   // previously-saved in-progress drafts.
   const tagText = (t) => typeof t === "string" ? t : t?.tag;
   const scoreColor = (score) => score == null ? "var(--muted)" : score >= 70 ? "#7a9166" : score >= 40 ? "var(--amber)" : "#7c9ce0";
+
+  // ── OPTIMIZATION SCORE ───────────────────────────────────────────────────────
+  // Not a performance prediction — no tool can actually forecast how a specific
+  // post will do in a platform's algorithm, since that depends on things no
+  // tool can see (audience mood that day, what's competing in the feed,
+  // current trends, timing luck). This checks the post against KNOWN, current
+  // ranking signals instead — the same idea as the SEO score above, which
+  // doesn't predict Google rank either, just checks against best practices.
+  const [optimization, setOptimization] = useState(saved?.optimization || null);
+
+  const runOptimizationCheck = async () => {
+    setLoading(true); setLoadMsg("Checking optimization signals…"); setError("");
+    try {
+      const captionSample = selectedPlatforms.map(p => `${p.label}: "${captions[p.id]?.text || ""}"`).join("\n");
+      const text = await callAI(activeProvider, activeModel,
+        `${buildBrandContext(brandGuide)}You are a social media strategist evaluating a post against CURRENT (2026) platform ranking signals — NOT predicting how it will actually perform, since no one can do that. Score honestly; most real posts score in the 40-75 range, not 90+.
+
+Current signals that matter most across platforms: saves and DM shares are now weighted far more heavily than likes (a save signals real value; a DM share signals a trusted personal recommendation); watch time/completion rate beats raw views for video; genuine back-and-forth comments beat quick likes; repeated low-engagement posting now actively hurts future reach, so quality over frequency; native format for the platform (e.g. Reels over static images on Instagram) gets pushed harder; captions with the actual words people would search for help with in-app search discovery, not just clever phrasing; a clear reason to comment or share matters more than a passive caption.
+
+Return ONLY valid JSON (no fences): {"overallScore":68,"platformScores":{"instagram":72},"signals":[{"key":"hook","label":"Hook Strength","score":70,"note":"one sentence"},{"key":"save","label":"Save-Worthiness","score":55,"note":"one sentence"},{"key":"format","label":"Format Fit","score":80,"note":"one sentence"},{"key":"search","label":"Search-Friendliness","score":60,"note":"one sentence"},{"key":"cta","label":"Engagement Prompt","score":50,"note":"one sentence"},{"key":"hashtags","label":"Hashtag Relevance","score":75,"note":"one sentence"}],"suggestions":["specific actionable tip 1","specific actionable tip 2","specific actionable tip 3"]}. platformScores must have one entry per platform listed below. Every signal needs its own honest score 1-100 and a specific, non-generic note tied to THIS post's actual content.`,
+        `Post type: ${idea.type}\nPlatforms: ${idea.platforms.join(", ")}\n\nCaptions:\n${captionSample}\n\nHashtags: ${hashtags.selected || "(none selected yet)"}`,
+        apiKeys[activeProvider],
+        1800
+      );
+      setOptimization(parseAIJson(text));
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
 
   // ── STAGE 4: IMAGE (shared across platforms) ────────────────────────────────
 
@@ -6647,6 +6705,42 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     setLoading(false); setLoadMsg("");
   };
 
+  // ── CAROUSEL SLIDES (2-10 images, only used when idea.type === "carousel") ──
+
+  const [carouselGeneratingIdx, setCarouselGeneratingIdx] = useState(null);
+  const [carouselError, setCarouselError] = useState("");
+
+  const addCarouselSlide = () => {
+    if (carouselImages.length >= 10) return; // Instagram's hard limit
+    setCarouselImages(list => [...list, { prompt: "", url: null }]);
+  };
+
+  const removeCarouselSlide = (index) => {
+    setCarouselImages(list => list.filter((_, i) => i !== index));
+  };
+
+  const moveCarouselSlide = (index, direction) => {
+    setCarouselImages(list => {
+      const newIndex = index + direction;
+      if (newIndex < 0 || newIndex >= list.length) return list;
+      const copy = [...list];
+      [copy[index], copy[newIndex]] = [copy[newIndex], copy[index]];
+      return copy;
+    });
+  };
+
+  const generateCarouselSlide = async (index, promptOverride = null) => {
+    setCarouselGeneratingIdx(index); setCarouselError("");
+    try {
+      const slide = carouselImages[index];
+      const prompt = promptOverride ?? slide.prompt ?? "";
+      const finalPrompt = prompt.trim() || await generateImagePrompt(idea.topic, selectedPlatforms[0]?.id || "instagram", activeProvider, activeModel, apiKeys[activeProvider]);
+      const url = await generateImage(finalPrompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
+      setCarouselImages(list => list.map((s, i) => i === index ? { ...s, prompt: finalPrompt, url } : s));
+    } catch(e) { setCarouselError(e.message); }
+    setCarouselGeneratingIdx(null);
+  };
+
   // ── STAGE 5: PUBLISH (one pass per selected platform) ───────────────────────
 
   const [scheduleMode, setScheduleMode] = useState("now"); // "now" | "schedule" | "draft"
@@ -6660,7 +6754,8 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
     platforms: idea.platforms,
     captions,
     hashtags: { selected: hashtags.selected, perPlatform: hashtags.perPlatform || {} },
-    imageUrl: imageData.url,
+    imageUrl: idea.type === "carousel" ? null : imageData.url,
+    imageUrls: idea.type === "carousel" && carouselImages.filter(s=>s.url).length >= 2 ? carouselImages.filter(s=>s.url).map(s=>s.url) : null,
     imagePrompt: imageData.prompt,
     mediaType: imageData.mediaType || "image",
     scheduledAt,
@@ -6747,17 +6842,20 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       setLoadMsg(`Publishing to ${plat.label}…`);
 
       try {
+        const isCarouselPost = idea.type === "carousel" && carouselImages.filter(s => s.url).length >= 2;
+        const carouselUrls = isCarouselPost ? carouselImages.filter(s => s.url).map(s => s.url) : null;
+
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
           const page = resolveMetaPage(metaConfig);
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: imageData.url, mediaType: imageData.mediaType, platforms: ["facebook"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: isCarouselPost ? null : imageData.url, imageUrls: carouselUrls, mediaType: imageData.mediaType, platforms: ["facebook"] });
           if (!res.facebook?.success) throw new Error(res.facebook?.error || "Facebook post failed");
           results[plat.id] = { success: true, message: "✓ Posted to Facebook" };
 
         } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
-          if (!imageData.url) throw new Error("Instagram requires an image or video");
+          if (!imageData.url && !isCarouselPost) throw new Error("Instagram requires an image or video");
           const page = resolveMetaInstagramPage(metaConfig);
           if (imageData.mediaType === "video") setLoadMsg(`Uploading video to Instagram — this can take a few minutes while Instagram processes it…`);
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: imageData.url, mediaType: imageData.mediaType, platforms: ["instagram"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: isCarouselPost ? null : imageData.url, imageUrls: carouselUrls, mediaType: imageData.mediaType, platforms: ["instagram"] });
           if (!res.instagram?.success) throw new Error(res.instagram?.error || "Instagram post failed");
           results[plat.id] = { success: true, message: "✓ Posted to Instagram" };
 
@@ -6765,8 +6863,11 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
           if (!tierConfig.buffer) {
             throw new Error(`Buffer integration is available on Operative and above — upgrade in Settings → Billing & Plan to post to ${plat.label}.`);
           }
-          // Buffer platforms — image must be a public https:// URL
-          let publicImageUrl = imageData.url;
+          // Buffer platforms — image must be a public https:// URL. Carousel
+          // support isn't verified across Buffer's platforms yet, so a
+          // carousel post here uses just its first image rather than risking
+          // an unverified multi-image request.
+          let publicImageUrl = isCarouselPost ? carouselUrls[0] : imageData.url;
 
           if (publicImageUrl?.startsWith("blob:") || publicImageUrl?.startsWith("data:")) {
             setLoadMsg(`Uploading image to cloud for ${plat.label}…`);
@@ -7179,6 +7280,77 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 style={{ padding:"5px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start" }}>
                 ↻ Re-generate suggestions
               </button>
+
+              {/* ── Optimization Score ── */}
+              <div style={{ borderTop:"1px solid var(--border)", paddingTop:16, display:"flex", flexDirection:"column", gap:14 }}>
+                {!optimization ? (
+                  <div style={{ textAlign:"center", padding:"20px 16px" }}>
+                    <div style={{ fontSize:24, marginBottom:8 }}>◈</div>
+                    <h4 style={{ fontFamily:"var(--font-display)", fontSize:15, fontWeight:700, margin:"0 0 6px" }}>Optimization Score</h4>
+                    <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 4px", maxWidth:420, marginLeft:"auto", marginRight:"auto", lineHeight:1.6 }}>
+                      Checks this post against current platform ranking signals — hook strength, save-worthiness, format fit, and more.
+                    </p>
+                    <p style={{ fontSize:10, color:"var(--muted)", margin:"0 0 16px" }}>Not a performance prediction — a best-practices check, the same idea as the SEO score.</p>
+                    <button onClick={runOptimizationCheck} disabled={loading || !captions[selectedPlatforms[0]?.id]?.text}
+                      style={{ ...btnA, opacity: !captions[selectedPlatforms[0]?.id]?.text ? 0.5 : 1 }}>
+                      {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{loadMsg}</> : "◈ Run Optimization Check"}
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                      <h4 style={{ fontFamily:"var(--font-display)", fontSize:15, fontWeight:700, margin:0 }}>Optimization Score</h4>
+                      <button onClick={runOptimizationCheck} disabled={loading}
+                        style={{ padding:"4px 10px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:10, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                        ↻ Re-check
+                      </button>
+                    </div>
+
+                    <div style={{ display:"grid", gridTemplateColumns:`repeat(${1 + Object.keys(optimization.platformScores||{}).length}, 1fr)`, gap:10 }}>
+                      <div style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:"12px 14px" }}>
+                        <div style={{ fontSize:9, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>Overall</div>
+                        <div style={{ fontSize:20, fontWeight:700, color: optimization.overallScore>=75?"#7a9166":optimization.overallScore>=50?"var(--amber)":"var(--red)" }}>
+                          {optimization.overallScore}/100
+                        </div>
+                      </div>
+                      {Object.entries(optimization.platformScores||{}).map(([platId, score]) => {
+                        const plat = PLATFORMS.find(p=>p.id===platId);
+                        return (
+                          <div key={platId} style={{ background:"var(--bg-elevated)", border:"1px solid var(--border)", borderRadius:10, padding:"12px 14px" }}>
+                            <div style={{ fontSize:9, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:5 }}>{plat?.icon} {plat?.label || platId}</div>
+                            <div style={{ fontSize:20, fontWeight:700, color: score>=75?"#7a9166":score>=50?"var(--amber)":"var(--red)" }}>{score}/100</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                      {(optimization.signals||[]).map(sig => (
+                        <div key={sig.key} style={{ display:"flex", alignItems:"flex-start", gap:10, padding:"8px 10px", borderRadius:8, background:"var(--bg-elevated)" }}>
+                          <span style={{ fontSize:11, fontWeight:700, padding:"2px 8px", borderRadius:6, color: sig.score>=75?"#7a9166":sig.score>=50?"var(--amber)":"var(--red)", background:(sig.score>=75?"#7a9166":sig.score>=50?"var(--amber)":"var(--red)")+"15", flexShrink:0, minWidth:32, textAlign:"center" }}>
+                            {sig.score}
+                          </span>
+                          <div>
+                            <div style={{ fontSize:12, fontWeight:600 }}>{sig.label}</div>
+                            <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:2 }}>{sig.note}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {optimization.suggestions?.length > 0 && (
+                      <div style={{ padding:"12px 14px", borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)33" }}>
+                        <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--amber)", marginBottom:8 }}>Suggestions</div>
+                        <ul style={{ margin:0, paddingLeft:18, display:"flex", flexDirection:"column", gap:5 }}>
+                          {optimization.suggestions.map((s,i) => (
+                            <li key={i} style={{ fontSize:12, color:"var(--text)" }}>{s}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
           )}
           <div style={{ display:"flex", gap:10 }}>
@@ -7200,6 +7372,56 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
               <ImageProviderPicker apiKeys={apiKeys} value={imageData.imgProvider} onChange={(id)=>{ setImageData(d=>({...d,imgProvider:id})); saveImageProviderPref(id); }} compact />
             </div>
 
+            {idea.type === "carousel" ? (
+              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                <div style={{ fontSize:12, color:"var(--text-secondary)" }}>
+                  Carousels need 2-10 images, shown in this order. Generate each slide separately, or reorder/remove as needed.
+                </div>
+                {carouselError && <div style={{ fontSize:12, color:"var(--red)" }}>{carouselError}</div>}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(180px, 1fr))", gap:12 }}>
+                  {carouselImages.map((slide, i) => (
+                    <div key={i} style={{ border:"1px solid var(--border)", borderRadius:10, overflow:"hidden", background:"var(--bg-elevated)" }}>
+                      <div style={{ position:"relative", aspectRatio:"1", background:"var(--bg-surface)", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                        {slide.url ? (
+                          <img src={slide.url} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+                        ) : (
+                          <span style={{ fontSize:20, opacity:0.3 }}>▣</span>
+                        )}
+                        <div style={{ position:"absolute", top:6, left:6, fontSize:10, fontWeight:700, color:"#fff", background:"rgba(0,0,0,0.6)", borderRadius:99, padding:"2px 8px" }}>
+                          {i + 1}
+                        </div>
+                        <div style={{ position:"absolute", top:6, right:6, display:"flex", gap:4 }}>
+                          <button onClick={()=>moveCarouselSlide(i, -1)} disabled={i===0} title="Move left"
+                            style={{ width:22, height:22, borderRadius:6, border:"none", background:"rgba(0,0,0,0.6)", color:"#fff", fontSize:11, cursor:i===0?"default":"pointer", opacity:i===0?0.3:1 }}>←</button>
+                          <button onClick={()=>moveCarouselSlide(i, 1)} disabled={i===carouselImages.length-1} title="Move right"
+                            style={{ width:22, height:22, borderRadius:6, border:"none", background:"rgba(0,0,0,0.6)", color:"#fff", fontSize:11, cursor:i===carouselImages.length-1?"default":"pointer", opacity:i===carouselImages.length-1?0.3:1 }}>→</button>
+                          <button onClick={()=>removeCarouselSlide(i)} title="Remove slide"
+                            style={{ width:22, height:22, borderRadius:6, border:"none", background:"rgba(0,0,0,0.6)", color:"#fff", fontSize:11, cursor:"pointer" }}>✕</button>
+                        </div>
+                      </div>
+                      <div style={{ padding:8, display:"flex", flexDirection:"column", gap:6 }}>
+                        <input value={slide.prompt} onChange={e=>setCarouselImages(list=>list.map((s,idx)=>idx===i?{...s,prompt:e.target.value}:s))}
+                          placeholder="Describe this slide…" style={{ ...iS, fontSize:11, padding:"6px 8px" }} />
+                        <button onClick={()=>generateCarouselSlide(i)} disabled={carouselGeneratingIdx !== null}
+                          style={{ padding:"6px 10px", borderRadius:6, border:"none", background:carouselGeneratingIdx===i?"var(--bg-elevated)":"#7c3aed", color:carouselGeneratingIdx===i?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:carouselGeneratingIdx!==null?"not-allowed":"pointer", fontFamily:"var(--font-body)" }}>
+                          {carouselGeneratingIdx===i ? "Generating…" : slide.url ? "↻ Regenerate" : "▣ Generate"}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {carouselImages.length < 10 && (
+                    <button onClick={addCarouselSlide}
+                      style={{ aspectRatio:"1", borderRadius:10, border:"1px dashed var(--border)", background:"var(--bg-elevated)", color:"var(--text-secondary)", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      + Add Slide
+                    </button>
+                  )}
+                </div>
+                {carouselImages.length > 0 && carouselImages.length < 2 && (
+                  <div style={{ fontSize:11, color:"var(--amber)" }}>Add at least one more slide — carousels need a minimum of 2 images.</div>
+                )}
+              </div>
+            ) : (
+            <>
             {!imageData.url && !loading && (
               <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:14 }}>
                 {/* Generate option */}
@@ -7258,9 +7480,24 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
                 </div>
               </div>
             )}
+            </>
+            )}
           </div>
-          <div style={{ display:"flex", gap:10 }}>
-            <button onClick={() => { markDone("image"); advance("publish"); }} style={btnA}>Continue to Publish →</button>
+          <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+            {(() => {
+              const carouselReady = idea.type !== "carousel" || carouselImages.filter(s=>s.url).length >= 2;
+              return (
+                <>
+                  <button onClick={() => { markDone("image"); advance("publish"); }} disabled={!carouselReady}
+                    style={{ ...btnA, opacity: carouselReady?1:0.5, cursor: carouselReady?"pointer":"not-allowed" }}>
+                    Continue to Publish →
+                  </button>
+                  {!carouselReady && (
+                    <span style={{ fontSize:11, color:"var(--amber)" }}>Generate at least 2 slide images first</span>
+                  )}
+                </>
+              );
+            })()}
             <button onClick={() => setStage("hashtags")} style={btnS}>← Back to Hashtags</button>
           </div>
         </div>
@@ -8276,6 +8513,17 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
       try { publicImageUrl = await ensurePublicImageUrl(publicImageUrl); }
       catch { publicImageUrl = null; }
     }
+    const isCarouselPost = Array.isArray(post.imageUrls) && post.imageUrls.length >= 2;
+    let publicImageUrls = post.imageUrls;
+    if (isCarouselPost) {
+      publicImageUrls = await Promise.all(post.imageUrls.map(async url => {
+        if (url?.startsWith("blob:") || url?.startsWith("data:")) {
+          try { return await ensurePublicImageUrl(url); } catch { return null; }
+        }
+        return url;
+      }));
+      publicImageUrls = publicImageUrls.filter(Boolean);
+    }
 
     for (const plat of selectedPlats) {
       const captionRaw = post.captions?.[plat.id]; const captionText = typeof captionRaw === "string" ? captionRaw : (captionRaw?.text || "");
@@ -8283,11 +8531,11 @@ function SocialPostsManager({ socialPosts = [], metaConfig, onSave, onDelete, ti
       try {
         if (plat.id === "facebook" && metaConfig?.connected && metaConfig?.pages?.length > 0) {
           const page = resolveMetaPage(metaConfig);
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: publicImageUrl, mediaType: post.mediaType, platforms: ["facebook"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, message: fullMessage, imageUrl: isCarouselPost ? null : publicImageUrl, imageUrls: isCarouselPost ? publicImageUrls : null, mediaType: post.mediaType, platforms: ["facebook"] });
           results[plat.id] = res.facebook?.success ? "✓ Posted" : `Error: ${res.facebook?.error}`;
         } else if (plat.id === "instagram" && metaConfig?.connected && metaConfig?.pages?.some(p=>p.instagram_id)) {
           const page = resolveMetaInstagramPage(metaConfig);
-          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: publicImageUrl, mediaType: post.mediaType, platforms: ["instagram"] });
+          const res = await metaPost({ pageId: page.id, pageToken: page.access_token, instagramId: page.instagram_id, message: fullMessage, imageUrl: isCarouselPost ? null : publicImageUrl, imageUrls: isCarouselPost ? publicImageUrls : null, mediaType: post.mediaType, platforms: ["instagram"] });
           results[plat.id] = res.instagram?.success ? "✓ Posted" : `Error: ${res.instagram?.error}`;
         } else if (bufferCfg?.connected && bufferCfg?.mapping?.[plat.id]) {
           if (!tierConfig.buffer) {
@@ -10389,7 +10637,7 @@ function SEODashboard({ posts, gscData, activeProvider, activeModel, apiKeys, on
       const avgCTR       = totalImpr > 0 ? (totalClicks / totalImpr * 100).toFixed(1) : 0;
 
       const text = await callAI(activeProvider, activeModel,
-        `You are an expert SEO consultant specializing in niche lifestyle blogs. Be specific, actionable, and honest. Return ONLY valid JSON (no fences):
+        `You are an expert SEO consultant specializing in niche lifestyle blogs. Be specific and actionable. Score honestly — most real blogs, especially newer or smaller ones, score 35-65, not 80+; reserve 80+ for a site with genuinely strong technical SEO, content depth, and search performance across the board. A low score paired with concrete next steps is more useful to this person than an inflated one. Return ONLY valid JSON (no fences):
 {
   "health_score": 0-100,
   "health_label": "one word: Excellent/Good/Fair/Needs Work",
