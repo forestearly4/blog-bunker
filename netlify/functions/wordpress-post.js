@@ -86,7 +86,7 @@ export default async (req) => {
 
     // ── CREATE / UPDATE POST ─────────────────────────────────────────────────
     if (action === "createPost" || action === "updatePost") {
-      const { postId, title, contentHtml, status = "draft", categories, featuredMediaId, date } = body;
+      const { postId, title, contentHtml, status = "draft", categories, featuredMediaId, date, metaDescription } = body;
       if (!title || !contentHtml) throw new Error("title and contentHtml are required");
 
       const payload = {
@@ -96,6 +96,28 @@ export default async (req) => {
         ...(categories?.length ? { categories } : {}),
         ...(featuredMediaId ? { featured_media: featuredMediaId } : {}),
         ...(status === "future" && date ? { date } : {}),
+        // WordPress core has no native "meta description" concept at all —
+        // that only exists via SEO plugins (Yoast, Rank Math, etc.), and
+        // BOTH of the two most common ones ship their REST API as read-only
+        // by default: a write silently no-ops (200 OK, field stays blank),
+        // confirmed as a widely-hit, still-open issue for both plugins as of
+        // 2026, not something specific to this integration. The `excerpt`
+        // field below is the one part of this that's actually reliable —
+        // it's native WordPress core, writable via the standard REST API on
+        // every site with no plugin required, and many SEO setups already
+        // fall back to using it as the meta description when nothing more
+        // specific is set. The `meta` fields alongside it are a genuine
+        // best-effort extra: harmless to include (an unrecognized/unregistered
+        // meta key is just silently ignored by WordPress), and will actually
+        // take effect on the minority of sites that happen to have REST
+        // write access enabled for their SEO plugin's fields.
+        ...(metaDescription ? {
+          excerpt: metaDescription,
+          meta: {
+            _yoast_wpseo_metadesc: metaDescription,
+            rank_math_description: metaDescription,
+          },
+        } : {}),
       };
 
       const isUpdate = action === "updatePost" && postId;
