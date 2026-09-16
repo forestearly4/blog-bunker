@@ -6471,6 +6471,12 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   // a specific order, so it's a separate array rather than overloading the
   // single-image imageData used by photo/reel/story posts.
   const [carouselImages, setCarouselImages] = useState(saved?.carouselImages || []);
+  // Optimization Score result — declared here (not down near the rest of that
+  // feature's code) because the draft-save effect below references it in its
+  // dependency array, which is evaluated immediately during render. A dependency
+  // array referencing a variable declared later in the same component throws
+  // "Cannot access before initialization" — this exact bug shipped once already.
+  const [optimization, setOptimization] = useState(saved?.optimization || null);
   const [schedule, setSchedule] = useState(saved?.schedule || { date:new Date().toISOString().split("T")[0], time:"09:00", status:"now" });
   const [publishResults, setPublishResults] = useState({});
   const [editingSocialPostId, setEditingSocialPostId] = useState(saved?.editingSocialPostId || null);
@@ -6696,7 +6702,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
   // current trends, timing luck). This checks the post against KNOWN, current
   // ranking signals instead — the same idea as the SEO score above, which
   // doesn't predict Google rank either, just checks against best practices.
-  const [optimization, setOptimization] = useState(saved?.optimization || null);
+  // (state declared earlier, alongside imageData/carouselImages — see note there)
 
   const runOptimizationCheck = async () => {
     setLoading(true); setLoadMsg("Checking optimization signals…"); setError("");
