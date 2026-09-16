@@ -3394,6 +3394,28 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const [pipelinePostId, setPipelinePostId] = useState(saved?.pipelinePostId || null); // tracks the original post id when editing an existing article, so re-publishing updates it instead of creating a duplicate
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
 
+  // WordPress category picker — fetched live from the connected site, since
+  // categories are specific to each user's own WordPress install and can't
+  // be guessed or hardcoded.
+  const [wpCategories, setWpCategories] = useState([]);
+  const [wpCategoriesLoading, setWpCategoriesLoading] = useState(false);
+  const [selectedWpCategoryId, setSelectedWpCategoryId] = useState(saved?.selectedWpCategoryId || null);
+
+  useEffect(() => {
+    const wpConfig = loadWordPressConfig();
+    if (stage !== "publish" || !wpConfig.connected || wpCategories.length > 0) return;
+    setWpCategoriesLoading(true);
+    fetch("/api/wordpress-post", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "getCategories", ...wpConfig }),
+    })
+      .then(r => r.json())
+      .then(data => { if (data.categories) setWpCategories(data.categories); })
+      .catch(() => {}) // non-fatal — the publish button still works without a category selected
+      .finally(() => setWpCategoriesLoading(false));
+  }, [stage]);
+
   // Shared pipeline state — restored from localStorage if available
   const [brief, setBrief] = useState(saved?.brief || {
     topic: "", angle: "", audience: brandGuide?.audience || "", keywords: "", inspiration: null,
@@ -3439,7 +3461,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     setSaveStatus("saving");
     clearTimeout(autosaveTimer.current);
     autosaveTimer.current = setTimeout(() => {
-      const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, pipelinePostId, savedAt: new Date().toISOString() };
+      const data = { stage, completed, brief, draft, enhance, social: { posts: social.posts, images: {} }, schedule, pipelinePostId, selectedWpCategoryId, savedAt: new Date().toISOString() };
       savePipelineDraft(data);
       setSavedAt(data.savedAt);
       setSaveStatus("saved");
@@ -3448,7 +3470,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       if (uid) cloudSaveDebounced(pipelineCloudKey(), uid, data);
     }, 1500);
     return () => clearTimeout(autosaveTimer.current);
-  }, [stage, completed, brief, draft, enhance, social.posts, schedule, pipelinePostId]);
+  }, [stage, completed, brief, draft, enhance, social.posts, schedule, pipelinePostId, selectedWpCategoryId]);
 
   // Pull the cloud copy of the in-progress article draft on mount — lets
   // work-in-progress resume on a different device. Skipped when an explicit
@@ -3805,6 +3827,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
     setDraft({ title:"", body:"", category:"Culture", tone:"literary" });
     setEnhance({ metaTitle:"", metaDescription:"", primaryKeyword:"", suggestions:[], headlines:[], improved:"" });
     setSocial({ posts:{}, images:{} });
+    setSelectedWpCategoryId(null);
   };
 
   // ── RENDER ──────────────────────────────────────────────────────────────────
@@ -4459,6 +4482,28 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
                             <p style={{ fontSize:12, color:"var(--text-secondary)", margin:"0 0 10px", lineHeight:1.6 }}>
                               Publishes directly to {wpConfig.siteUrl} — with your headline image, formatting, and links, no copy-paste needed. Publishing again after edits updates the same post instead of duplicating it.
                             </p>
+
+                            <div style={{ marginBottom:12 }}>
+                              <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>
+                                Category
+                              </label>
+                              {wpCategoriesLoading ? (
+                                <div style={{ fontSize:12, color:"var(--muted)" }}>Loading your site's categories…</div>
+                              ) : wpCategories.length > 0 ? (
+                                <select value={selectedWpCategoryId || ""} onChange={e => setSelectedWpCategoryId(e.target.value ? Number(e.target.value) : null)}
+                                  style={{ width:"100%", padding:"8px 10px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-surface)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)" }}>
+                                  <option value="">Uncategorized (site default)</option>
+                                  {wpCategories.map(c => (
+                                    <option key={c.id} value={c.id}>{c.name}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <div style={{ fontSize:11, color:"var(--muted)" }}>
+                                  Couldn't load categories from your site — it'll publish as Uncategorized. Create categories in WordPress itself, then come back here.
+                                </div>
+                              )}
+                            </div>
+
                             <button onClick={async () => {
                               setLoading(true); setError(""); setSuccess(""); setLoadMsg("Publishing to WordPress…");
                               try {
@@ -4493,6 +4538,8 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
                                     status: wpStatus,
                                     featuredMediaId,
                                     date: dateIso,
+                                    metaDescription: enhance.metaDescription || undefined,
+                                    categories: selectedWpCategoryId ? [selectedWpCategoryId] : undefined,
                                   }),
                                 });
                                 const data = await res.json();
