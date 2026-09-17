@@ -13562,7 +13562,7 @@ export default function Dashboard({ user, workspace }) {
   // cohort changes — deliberately a simple hardcoded list rather than a
   // real admin system, since the cohort is small and curated by hand.
   const BETA_TESTER_EMAILS = [
-    // "someone@example.com",
+    // "jeffreyburke4@gmail.com",
   ];
   const isBetaTester = BETA_TESTER_EMAILS.includes(userId);
   const effectiveTier = isBetaTester ? "operative" : userTier;
