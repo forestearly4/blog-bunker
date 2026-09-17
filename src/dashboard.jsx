@@ -3510,13 +3510,10 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
 
   // Load an article handed off from the Posts tab ("→ Pipeline" button) — skips
   // straight to the Enhance stage since the brief/draft are already written.
+  // Always loads immediately on request — autosave already protects whatever
+  // was previously in progress here, so there's nothing to actually confirm.
   useEffect(() => {
     if (!initialPost || initialPost.id === pipelinePostId) return;
-    const hasUnsavedWork = (brief.topic || draft.title || draft.body) && pipelinePostId !== initialPost.id;
-    if (hasUnsavedWork && !window.confirm(`Load "${initialPost.title}" into the Pipeline? This will replace what's currently in progress here (your current work is saved separately and won't be lost, but the Pipeline will switch to this article).`)) {
-      if (onConsumedInitialPost) onConsumedInitialPost();
-      return;
-    }
     setDraft({ title: initialPost.title || "", body: initialPost.body || "", category: initialPost.category || "Culture", tone: "literary", headlineImageUrl: initialPost.headlineImageUrl || "" });
     setBrief(b => ({ ...b, topic: initialPost.title || b.topic }));
     setPipelinePostId(initialPost.id);
@@ -13562,7 +13559,7 @@ export default function Dashboard({ user, workspace }) {
   // cohort changes — deliberately a simple hardcoded list rather than a
   // real admin system, since the cohort is small and curated by hand.
   const BETA_TESTER_EMAILS = [
-    // "Katiem1982@gmail.com",
+    // "someone@example.com",
   ];
   const isBetaTester = BETA_TESTER_EMAILS.includes(userId);
   const effectiveTier = isBetaTester ? "operative" : userTier;
