@@ -1,0 +1,39 @@
+# Dependencies — never commit these, npm installs them from package.json
+node_modules/
+
+# Environment variables — this is the important one. Real secrets (API keys,
+# tokens, credentials) belong in Netlify's own Environment Variables settings,
+# never in a file that gets committed. This makes sure a local .env file
+# never accidentally ends up in a commit.
+.env
+.env.local
+.env.*.local
+
+# Build output — Netlify builds this fresh from source on every deploy, so
+# committing it just adds noise and risks a stale build being served if it
+# ever gets out of sync with the actual source.
+dist/
+build/
+
+# Netlify CLI's local cache/state (created when running `netlify dev` locally)
+.netlify/
+
+# Vite's local dev cache
+.vite/
+node_modules/.vite/
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
