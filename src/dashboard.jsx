@@ -5,6 +5,7 @@ import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import Underline from "@tiptap/extension-underline";
+import Image from "@tiptap/extension-image";
 
 // ─── BRAND GUIDE ──────────────────────────────────────────────────────────────
 // Stores voice/tone/image style settings that get injected into every AI call.
@@ -4516,6 +4517,33 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
                                   featuredMediaId = mediaData.mediaId;
                                 }
 
+                                // Images inserted into the body (via the editor's Insert Image
+                                // button) live on GCS at this point, same as any Media Library
+                                // item — upload each one to WordPress's own Media Library too,
+                                // same mechanism as the featured image above, so they end up as
+                                // genuine WordPress media rather than just externally-linked
+                                // images that stop working if this GCS bucket ever changes.
+                                let bodyHtml = markdownToHtml(draft.body);
+                                const imgSrcs = [...bodyHtml.matchAll(/<img[^>]+src="([^"]+)"/g)].map(m => m[1]);
+                                if (imgSrcs.length > 0) {
+                                  setLoadMsg(`Uploading ${imgSrcs.length} image${imgSrcs.length>1?"s":""} to WordPress…`);
+                                  for (const src of imgSrcs) {
+                                    try {
+                                      const imgRes = await fetch("/api/wordpress-post", {
+                                        method:"POST", headers:{"Content-Type":"application/json"},
+                                        body: JSON.stringify({ action:"uploadMedia", ...wpConfig, imageUrl: src, filename: `${(draft.title||"image").slice(0,30).replace(/[^a-z0-9]+/gi,"-")}-${Date.now()}.jpg` }),
+                                      });
+                                      const imgData = await imgRes.json();
+                                      if (imgData.url) {
+                                        bodyHtml = bodyHtml.split(src).join(imgData.url);
+                                      }
+                                      // If a single inline image fails to upload, the post still
+                                      // publishes with that one image left pointing at GCS rather
+                                      // than blocking the whole publish over it.
+                                    } catch { /* leave this one image's src as-is, see above */ }
+                                  }
+                                }
+
                                 const existingWpPostId = posts.find(p => p.id === pipelinePostId)?.wpPostId;
                                 const statusMap = { published:"publish", draft:"draft", scheduled:"future" };
                                 const wpStatus = statusMap[schedule.status] || "draft";
@@ -4531,7 +4559,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
                                     ...wpConfig,
                                     postId: existingWpPostId,
                                     title: enhance.metaTitle || draft.title,
-                                    contentHtml: markdownToHtml(draft.body),
+                                    contentHtml: bodyHtml,
                                     status: wpStatus,
                                     featuredMediaId,
                                     date: dateIso,
@@ -12184,6 +12212,15 @@ function markdownToHtml(md) {
     if (line.startsWith("### "))      { blocks.push(`<h3>${inlineMd(line.slice(4))}</h3>`); i++; continue; }
     if (line.startsWith("## "))       { blocks.push(`<h2>${inlineMd(line.slice(3))}</h2>`); i++; continue; }
     if (line.startsWith("# "))        { blocks.push(`<h1>${inlineMd(line.slice(2))}</h1>`); i++; continue; }
+    // An image on its own line — e.g. ![a fly rod on a river bank](https://...) — is
+    // its own block, not part of a surrounding paragraph, matching how TipTap
+    // itself treats an inserted image as a standalone node.
+    const imgMatch = line.trim().match(/^!\[(.*?)\]\((\S+?)\)$/);
+    if (imgMatch) {
+      const [, alt, src] = imgMatch;
+      blocks.push(`<img src="${src.replace(/"/g,"&quot;")}" alt="${alt.replace(/"/g,"&quot;")}">`);
+      i++; continue;
+    }
     if (/^[-*]\s/.test(line)) {
       const items = [];
       while (i < lines.length && /^[-*]\s/.test(lines[i])) { items.push(`<li>${inlineMd(lines[i].slice(2))}</li>`); i++; }
@@ -12231,6 +12268,7 @@ function htmlToMarkdown(html) {
       else if (tag === "ul") { for (const li of child.children) lines.push(`- ${inlineHtmlToMd(li)}\n`); lines.push(""); }
       else if (tag === "ol") { let n=1; for (const li of child.children) { lines.push(`${n++}. ${inlineHtmlToMd(li)}\n`); } lines.push(""); }
       else if (tag === "br") lines.push("\n");
+      else if (tag === "img") lines.push(`\n![${(child.getAttribute("alt")||"").replace(/\]/g,"")}](${child.getAttribute("src")||""})\n`);
       else walk(child);
     }
   };
@@ -12253,7 +12291,7 @@ function inlineHtmlToMd(node) {
 
 // ─── RICH TEXT EDITOR (TipTap) ────────────────────────────────────────────────
 
-function RichTextToolbar({ editor }) {
+function RichTextToolbar({ editor, onInsertImage }) {
   if (!editor) return null;
   const btn = (active) => ({
     width:32, height:32, borderRadius:6, border:"none",
@@ -12286,6 +12324,7 @@ function RichTextToolbar({ editor }) {
       <button type="button" onClick={() => editor.chain().focus().toggleBlockquote().run()} style={btn(editor.isActive("blockquote"))} title="Quote">"</button>
       <div style={sep} />
       <button type="button" onClick={setLink} style={btn(editor.isActive("link"))} title="Link">🔗</button>
+      <button type="button" onClick={onInsertImage} style={btn(false)} title="Insert Image">🖼</button>
       <button type="button" onClick={() => editor.chain().focus().undo().run()} style={btn(false)} title="Undo">↺</button>
       <button type="button" onClick={() => editor.chain().focus().redo().run()} style={btn(false)} title="Redo">↻</button>
     </div>
@@ -12298,6 +12337,7 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
   const [aiNote,      setAiNote]      = useState("");
   const [aiLoading,   setAiLoading]   = useState(false);
   const [aiResult,    setAiResult]    = useState("");
+  const [imagePickerOpen, setImagePickerOpen] = useState(false);
   const containerRef = useRef(null);
 
   const editor = useEditor({
@@ -12306,6 +12346,7 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
       Underline,
       Link.configure({ openOnClick: false, autolink: true }),
       Placeholder.configure({ placeholder }),
+      Image.configure({ inline: false, HTMLAttributes: { style: "max-width:100%;border-radius:8px;" } }),
     ],
     content: markdownToHtml(value || ""),
     onUpdate: ({ editor }) => {
@@ -12371,7 +12412,7 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
 
   return (
     <div ref={containerRef} style={{ border:"1px solid var(--border)", borderRadius:8, overflow:"visible", background:"var(--bg-elevated)", position:"relative" }}>
-      <RichTextToolbar editor={editor} />
+      <RichTextToolbar editor={editor} onInsertImage={() => setImagePickerOpen(true)} />
 
       {/* AI Rewrite panel — appears when text is selected */}
       {aiPanel && (
@@ -12445,6 +12486,112 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
         .ProseMirror strong { font-weight: 700; }
         .ProseMirror ::selection { background: var(--amber-glow); }
       `}</style>
+
+      {imagePickerOpen && (
+        <ImageInsertModal
+          apiKeys={apiKeys}
+          onClose={() => setImagePickerOpen(false)}
+          onInsert={(url, alt) => {
+            editor?.chain().focus().setImage({ src: url, alt: alt || "" }).run();
+            setImagePickerOpen(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Lets the user insert an image into the article body at the cursor — either
+// picking one already in the Media Library, or uploading a new one on the
+// spot. Reuses the same simple upload path as the rest of the Media Library
+// (saveToMediaLibrary), so a newly uploaded image lands there too, not just
+// in this one post.
+function ImageInsertModal({ apiKeys, onClose, onInsert }) {
+  const [tab,      setTab]      = useState("library"); // "library" | "upload"
+  const [items,    setItems]    = useState(loadMediaLibraryCache);
+  const [uploading, setUploading] = useState(false);
+  const [error,    setError]    = useState("");
+  const fileInputRef = useRef(null);
+
+  // Also pull the live list from the cloud, in case the local cache is stale
+  // or this is a fresh device — non-fatal if it fails, the cache is a
+  // reasonable fallback either way.
+  useEffect(() => {
+    const uid = window.__bbUserId;
+    if (!uid) return;
+    fetch(`/api/gcs?userId=${encodeURIComponent(uid)}&workspaceId=${encodeURIComponent(window.__bbWorkspaceId || "")}`)
+      .then(r => r.json())
+      .then(data => { if (data.items) setItems(data.items); })
+      .catch(() => {});
+  }, []);
+
+  const handleUpload = async (file) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setError("Please choose an image file."); return; }
+    setUploading(true); setError("");
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const item = await saveToMediaLibrary(dataUrl, file.name.replace(/\.[^.]+$/, ""), ["upload"], window.__bbUserId || "anonymous");
+      onInsert(item.url, item.name);
+    } catch(e) {
+      setError(e.message || "Upload failed — try again.");
+    }
+    setUploading(false);
+  };
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.6)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:14, width:"100%", maxWidth:560, maxHeight:"80vh", display:"flex", flexDirection:"column" }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"16px 20px", borderBottom:"1px solid var(--border)" }}>
+          <h3 style={{ fontFamily:"var(--font-display)", fontSize:16, fontWeight:700, margin:0 }}>Insert Image</h3>
+          <button onClick={onClose} style={{ background:"none", border:"none", color:"var(--muted)", fontSize:18, cursor:"pointer", padding:2, lineHeight:1 }}>✕</button>
+        </div>
+
+        <div style={{ display:"flex", gap:4, padding:"12px 20px 0" }}>
+          <button onClick={()=>setTab("library")}
+            style={{ padding:"7px 16px", borderRadius:"8px 8px 0 0", border:"none", borderBottom: tab==="library"?"2px solid var(--amber)":"2px solid transparent", background:"transparent", color: tab==="library"?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            Media Library
+          </button>
+          <button onClick={()=>setTab("upload")}
+            style={{ padding:"7px 16px", borderRadius:"8px 8px 0 0", border:"none", borderBottom: tab==="upload"?"2px solid var(--amber)":"2px solid transparent", background:"transparent", color: tab==="upload"?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+            Upload New
+          </button>
+        </div>
+
+        <div style={{ padding:20, overflowY:"auto", flex:1 }}>
+          {tab === "library" ? (
+            items.length > 0 ? (
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(120px, 1fr))", gap:10 }}>
+                {items.filter(i => i.type?.startsWith("image") || !i.type).map(item => (
+                  <button key={item.id || item.url} onClick={() => onInsert(item.url, item.name)}
+                    style={{ padding:0, border:"1px solid var(--border)", borderRadius:8, overflow:"hidden", cursor:"pointer", background:"var(--bg-elevated)", aspectRatio:"1" }}>
+                    <img src={item.url} alt={item.name || ""} style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div style={{ textAlign:"center", padding:"30px 20px", fontSize:13, color:"var(--text-secondary)" }}>
+                Nothing in your Media Library yet — switch to "Upload New" to add one.
+              </div>
+            )
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:14, padding:"20px 0" }}>
+              <input ref={fileInputRef} type="file" accept="image/*" style={{ display:"none" }}
+                onChange={e => handleUpload(e.target.files?.[0])} />
+              <button onClick={() => fileInputRef.current?.click()} disabled={uploading}
+                style={{ padding:"12px 24px", borderRadius:8, border:"1px dashed var(--border)", background:"var(--bg-elevated)", color:"var(--text-secondary)", fontSize:13, cursor:uploading?"not-allowed":"pointer", fontFamily:"var(--font-body)" }}>
+                {uploading ? "Uploading…" : "Choose an image file…"}
+              </button>
+              {error && <div style={{ fontSize:12, color:"var(--red)" }}>{error}</div>}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

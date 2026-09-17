@@ -192,7 +192,7 @@ export function LoginScreen() {
       <div className="shell">
         <div className="logo">
           Blog Bunker
-          <span>Cast at Dawn. Sip at Dusk.</span>
+          <span>Real tools. Real posts. No fluff.</span>
         </div>
         <div className="card">
           <div>
