@@ -59,6 +59,31 @@ function buildBrandImageContext(guide) {
   return parts.join(", ");
 }
 
+// The brand's own style/palette (above) is meant to stay fixed — that's the
+// whole point of a brand guide. But if that's the ONLY thing driving each
+// image prompt, every generation converges on the same safe, generic
+// composition, since the AI (or a plain string template) has nothing else
+// to vary. This picks one option from each of several independent pools —
+// composition, lighting, and shot distance — fresh on every call, so the
+// specific scene changes each time while the brand's actual visual identity
+// never does. Kept as plain, cheap randomness rather than another AI call:
+// there's no need for the variety itself to be "smart," just genuinely
+// different from last time.
+function randomImageVariety() {
+  const composition = [
+    "close-up, shallow depth of field", "wide establishing shot", "overhead flat-lay angle",
+    "candid mid-action moment", "off-center rule-of-thirds framing", "low angle looking up",
+    "through-foreground framing (shooting past an object in the foreground)", "symmetrical centered composition",
+  ];
+  const lighting = [
+    "golden hour side light", "soft overcast diffused light", "blue hour twilight",
+    "harsh direct midday sun with strong shadows", "warm indoor window light", "backlit with visible rim light",
+  ];
+  const distance = ["extreme close-up detail shot", "medium shot", "wide environmental shot"];
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  return `${pick(composition)}, ${pick(lighting)}, ${pick(distance)}`;
+}
+
 // ─── CLOUD SYNC (Netlify Blobs) ──────────────────────────────────────────────
 // Syncs key data to server-side storage so it survives localStorage clearing.
 // Falls back silently to localStorage-only if the network call fails.
@@ -973,7 +998,7 @@ function saveModels(models) {
 
 // ─── MULTI-PROVIDER AI CALLER ─────────────────────────────────────────────────
 
-async function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 1500) {
+async function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 1500, temperature = undefined) {
   if (providerId === "anthropic") {
     // Route through Netlify proxy if no client key, otherwise call directly
     const useProxy = !apiKey;
@@ -985,6 +1010,7 @@ async function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 15
       method: "POST", headers,
       body: JSON.stringify({
         model, max_tokens: maxTokens, system, messages: [{ role:"user", content: userMsg }],
+        ...(temperature !== undefined ? { temperature } : {}),
         ...(useProxy ? { userId: window.__bbUserId || null } : {}),
       }),
     });
@@ -998,7 +1024,7 @@ async function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 15
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages: [{ role:"system", content: system }, { role:"user", content: userMsg }], max_tokens: maxTokens }),
+      body: JSON.stringify({ model, messages: [{ role:"system", content: system }, { role:"user", content: userMsg }], max_tokens: maxTokens, ...(temperature !== undefined ? { temperature } : {}) }),
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error.message || "OpenAI error");
@@ -1012,7 +1038,7 @@ async function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 15
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: `${system}\n\n${userMsg}` }] }],
-        generationConfig: { maxOutputTokens: maxTokens },
+        generationConfig: { maxOutputTokens: maxTokens, ...(temperature !== undefined ? { temperature } : {}) },
       }),
     });
     const data = await res.json();
@@ -1473,12 +1499,14 @@ function ImageProviderPicker({ apiKeys, value, onChange, compact = false }) {
 async function generateImagePrompt(topic, platId, activeProvider, activeModel, apiKey, brandGuideOverride = null) {
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
   const brandImgCtx = buildBrandImageContext(brandGuideOverride || loadBrandGuide());
-  const styleNote = brandImgCtx ? `Brand visual style: ${brandImgCtx}.` : "Style: moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones.";
+  const styleNote = brandImgCtx ? `Brand visual style (keep this fixed): ${brandImgCtx}.` : "Style: moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones.";
   const text = await callAI(
     activeProvider, activeModel,
-    `You generate image prompts for a blog/brand. ${styleNote} Format: ${spec.style}. Return ONLY a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
+    `You generate image prompts for a blog/brand. ${styleNote} Format: ${spec.style}. This specific one should use: ${randomImageVariety()}. Vary the actual scene, subject framing, and specific visual details each time you're asked — never default to the same setup twice in a row, even for a similar topic. The brand's style/palette above stays consistent; everything else about the composition should feel fresh. Return ONLY a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
     `Write an image prompt for a ${platId} post (${spec.label}) about: ${topic}`,
-    apiKey
+    apiKey,
+    1500,
+    1.0
   );
   return text.trim();
 }
@@ -6159,8 +6187,8 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys, brandGuide = 
     if (!topic.trim() || !provider) return;
     setLoading(true); setError("");
     try {
-      const aiPrompt = `Generate an image prompt for a ${platform} post for this brand: ${buildBrandImageContext(brandGuide) || "a lifestyle brand"}. Style: ${styleMap[style]}. Topic: ${topic}. Return ONLY the prompt, no explanation.`;
-      const generatedPrompt = await callAI(activeProvider, activeModel, "You generate concise, vivid image prompts. Return only the prompt string.", aiPrompt, apiKeys[activeProvider]);
+      const aiPrompt = `Generate an image prompt for a ${platform} post for this brand: ${buildBrandImageContext(brandGuide) || "a lifestyle brand"}. Style (keep fixed): ${styleMap[style]}. This one should use: ${randomImageVariety()}. Topic: ${topic}. Return ONLY the prompt, no explanation.`;
+      const generatedPrompt = await callAI(activeProvider, activeModel, "You generate concise, vivid image prompts. Vary the specific scene and composition each time — never repeat the same setup twice in a row. Return only the prompt string.", aiPrompt, apiKeys[activeProvider], 1500, 1.0);
       setDraftPrompt(generatedPrompt.trim());
       setPreviewOpen(true);
     } catch(e) { setError(e.message); }
@@ -12027,7 +12055,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
         const guide = loadBrandGuide();
         const style = guide?.imageStyle || "cinematic editorial photography, moody atmospheric, professional lighting";
         const topic = (title || "").replace(/[#*\n]/g, " ").trim();
-        draftedPrompt = `${topic}, ${style}, wide landscape banner, professional photography, golden hour lighting, 16:9 aspect ratio`;
+        draftedPrompt = `${topic}, ${style}, ${randomImageVariety()}, wide landscape banner, professional photography, 16:9 aspect ratio`;
       }
       setDraftPrompt(draftedPrompt);
       setPreviewOpen(true);
