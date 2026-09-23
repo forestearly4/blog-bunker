@@ -2859,6 +2859,22 @@ async function saveLogo(data) {
   logoStore.save(data, { debounce: false });
 }
 
+// Post categories differ per workspace/brand — Cask & Stream uses Culture/
+// Whiskey/Gear/etc, but a different blog in a different workspace (e.g. the
+// Field Manual / Dispatches split) needs its own list entirely. Used to be
+// one hardcoded array shared by every workspace's New Post modal and Article
+// Pipeline draft stage. Now workspace-scoped and editable in Settings, with
+// the original Cask & Stream list as the fallback so existing workspaces
+// aren't disrupted.
+const CATEGORIES_STORAGE = "bb_categories";
+const categoriesStore = createPersistedStore(CATEGORIES_STORAGE, "categories", null, { scope: "workspace" });
+const DEFAULT_CATEGORIES = ["Culture", "Whiskey", "Gear", "Destinations", "Technique", "Lifestyle", "Reviews", "News"];
+function loadCategories() {
+  const saved = categoriesStore.load();
+  return (Array.isArray(saved) && saved.length) ? saved : DEFAULT_CATEGORIES;
+}
+function saveCategories(list) { categoriesStore.save(list, { debounce: false }); }
+
 function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
   const [form,       setForm]       = useState({ name:wsName, url:wsUrl, tagline:wsTagline });
   const [saved,      setSaved]      = useState(false);
@@ -2866,10 +2882,23 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
   const [logoStatus, setLogoStatus] = useState("");
   const logoInput = useRef(null);
 
+  // Post categories — this workspace's own list (New Post modal, Article
+  // Pipeline draft stage), kept separate from other workspaces.
+  const [categoriesText, setCategoriesText] = useState(() => loadCategories().join(", "));
+  const [categoriesSaved, setCategoriesSaved] = useState(false);
+
   const handleSave = () => {
     onSave(form);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const handleSaveCategories = () => {
+    const list = categoriesText.split(",").map(c => c.trim()).filter(Boolean);
+    saveCategories(list.length ? list : DEFAULT_CATEGORIES);
+    setCategoriesText((list.length ? list : DEFAULT_CATEGORIES).join(", "));
+    setCategoriesSaved(true);
+    setTimeout(() => setCategoriesSaved(false), 2000);
   };
 
   const handleLogoUpload = (file) => {
@@ -2949,6 +2978,21 @@ function GeneralSettings({ wsName, wsUrl, wsTagline, onSave, btnP, inputSt }) {
         <div style={{ display:"flex", alignItems:"center", gap:12 }}>
           <button onClick={handleSave} style={{ ...btnP, alignSelf:"flex-start" }}>Save Changes</button>
           {saved && <span style={{ fontSize:12, color:"var(--green)" }}>✓ Saved</span>}
+        </div>
+      </div>
+
+      <div style={{ borderTop:"1px solid var(--border)", paddingTop:24 }}>
+        <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>Post Categories</h3>
+        <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 16px" }}>
+          The categories offered in New Post and the Article Pipeline for this workspace only. Comma-separated.
+        </p>
+        <div style={{ marginBottom:14 }}>
+          <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Categories</label>
+          <input style={inputSt} value={categoriesText} onChange={e => setCategoriesText(e.target.value)} placeholder="e.g. Field Manual, Dispatches" />
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+          <button onClick={handleSaveCategories} style={{ ...btnP, alignSelf:"flex-start" }}>Save Categories</button>
+          {categoriesSaved && <span style={{ fontSize:12, color:"var(--green)" }}>✓ Saved</span>}
         </div>
       </div>
     </div>
@@ -3449,8 +3493,9 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const [brief, setBrief] = useState(saved?.brief || {
     topic: "", angle: "", audience: brandGuide?.audience || "", keywords: "", inspiration: null,
   });
+  const [categories] = useState(loadCategories);
   const [draft, setDraft] = useState(saved?.draft || {
-    title: "", body: "", category: "Culture", tone: "literary",
+    title: "", body: "", category: categories[0] || "", tone: "literary",
   });
   const [enhance, setEnhance] = useState(saved?.enhance || {
     metaTitle: "", metaDescription: "", primaryKeyword: "", suggestions: [], headlines: [], improved: "",
@@ -3533,10 +3578,10 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       setCompleted(cloud.completed || []);
       setPipelinePostId(cloud.pipelinePostId || null);
       setBrief(cloud.brief || { topic:"", angle:"", audience:brandGuide?.audience || "", keywords:"", inspiration:null });
-      setDraft(cloud.draft || { title:"", body:"", category:"Culture", tone:"literary" });
+      setDraft(cloud.draft || { title:"", body:"", category:categories[0] || "", tone:"literary" });
       setEnhance(cloud.enhance || { metaTitle:"", metaDescription:"", primaryKeyword:"", suggestions:[], headlines:[], improved:"" });
       setSocial(cloud.social || { posts:{}, images:{} });
-      setSchedule(cloud.schedule || { publishDate:new Date(Date.now()+86400000).toISOString().split("T")[0], publishTime:"09:00", publishToWix:wixConnected, addToCalendar:true, status:"scheduled" });
+      setSchedule(cloud.schedule || { publishDate:new Date().toISOString().split("T")[0], publishTime:"09:00", publishToWix:wixConnected, addToCalendar:true, status:"published" });
       savePipelineDraft(cloud); // keep local copy in sync too
       setSavedAt(cloud.savedAt);
     })();
@@ -3549,7 +3594,7 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   // was previously in progress here, so there's nothing to actually confirm.
   useEffect(() => {
     if (!initialPost || initialPost.id === pipelinePostId) return;
-    setDraft({ title: initialPost.title || "", body: initialPost.body || "", category: initialPost.category || "Culture", tone: "literary", headlineImageUrl: initialPost.headlineImageUrl || "" });
+    setDraft({ title: initialPost.title || "", body: initialPost.body || "", category: initialPost.category || categories[0] || "", tone: "literary", headlineImageUrl: initialPost.headlineImageUrl || "" });
     setBrief(b => ({ ...b, topic: initialPost.title || b.topic }));
     setPipelinePostId(initialPost.id);
     setCompleted(c => [...new Set([...c, "brief", "draft"])]);
@@ -3856,7 +3901,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
     clearPipelineDraft();
     setStage("brief"); setCompleted([]); setError(""); setSuccess(""); setSavedAt(null);
     setBrief({ topic:"", angle:"", audience:brandGuide?.audience || "", keywords:"", inspiration:null });
-    setDraft({ title:"", body:"", category:"Culture", tone:"literary" });
+    setDraft({ title:"", body:"", category:categories[0] || "", tone:"literary" });
     setEnhance({ metaTitle:"", metaDescription:"", primaryKeyword:"", suggestions:[], headlines:[], improved:"" });
     setSocial({ posts:{}, images:{} });
     setSelectedWpCategoryId(null);
@@ -4015,7 +4060,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
               <div>
                 <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Category</label>
                 <select style={{ ...iS, cursor:"pointer" }} value={draft.category} onChange={e=>setDraft(d=>({...d,category:e.target.value}))}>
-                  {CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+                  {categories.map(c=><option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
               <div>
@@ -12727,14 +12772,13 @@ async function wixVeloPush(form, publishNow = false, cfg = {}) {
 
 // ─── POST EDITOR MODAL ────────────────────────────────────────────────────────
 
-const CATEGORIES = ["Culture", "Whiskey", "Gear", "Destinations", "Technique", "Lifestyle", "Reviews", "News"];
-
 function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {}, activeProvider = "anthropic", activeModel = "claude-sonnet-4-6" }) {
   const isNew = !post?.id;
+  const [categories] = useState(loadCategories);
   const [form, setForm] = useState({
     title:    post?.title    || "",
     body:     post?.body     || "",
-    category: post?.category || "Culture",
+    category: post?.category || categories[0] || "",
     status:   post?.status   || "draft",
     date:     post?.date     || new Date().toISOString().split("T")[0],
     url:      post?.url      || "",
@@ -12828,7 +12872,7 @@ function PostEditor({ post, onSave, onClose, onDelete, wixConnected, apiKeys = {
           <div>
             <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Category</label>
             <select value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))} style={{ ...iS, cursor:"pointer" }}>
-              {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </div>
           <div>
@@ -13565,7 +13609,7 @@ export default function Dashboard({ user, workspace }) {
         id: Date.now(),
         title: workspace.firstIdea.title,
         body: "",
-        category: "Culture",
+        category: loadCategories()[0] || "",
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -13606,7 +13650,7 @@ export default function Dashboard({ user, workspace }) {
   const saveSocialInspiration = (item) => setSocialInspiration(all => [item, ...all]);
   const deleteSocialInspiration = (id) => setSocialInspiration(all => all.filter(i => i.id !== id));
   const inspirationToDraft = (item) => {
-    const newPost = { id:Date.now(), title:item.title, body:`Source: ${item.source}\n\nNotes: ${item.notes}\n\n`, category:"Culture", status:"draft", date:new Date().toISOString().split("T")[0], views:0 };
+    const newPost = { id:Date.now(), title:item.title, body:`Source: ${item.source}\n\nNotes: ${item.notes}\n\n`, category:loadCategories()[0] || "", status:"draft", date:new Date().toISOString().split("T")[0], views:0 };
     setPosts(all => [newPost, ...all]);
     setEditingPost(newPost);
     setPostEditorOpen(true);
