@@ -3462,11 +3462,17 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
   const [linkInserted,    setLinkInserted]    = useState(false);
   const [social, setSocial] = useState(saved?.social || { posts: {}, images: {} });
   const [schedule, setSchedule] = useState(saved?.schedule || {
-    publishDate: new Date(Date.now() + 86400000).toISOString().split("T")[0],
+    // Default to publishing immediately with today's date — this stage used
+    // to default to "scheduled" with tomorrow's date pre-filled, so hitting
+    // "Publish to WordPress" without first explicitly clicking the
+    // "Published" pill silently sent status:"future" with a next-day date,
+    // which WordPress's REST API honors even when the user believed they'd
+    // chosen to publish now.
+    publishDate: new Date().toISOString().split("T")[0],
     publishTime: "09:00",
     publishToWix: wixConnected,
     addToCalendar: true,
-    status: "scheduled",
+    status: "published",
   });
 
   const [loading, setLoading]   = useState(false);
@@ -4432,8 +4438,8 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
                   <div style={{ display:"flex", gap:8 }}>
                     {["published","draft","scheduled"].map(s=>(
                       <button key={s} onClick={()=>setSchedule(sc=>({...sc,status:s}))}
-                        style={{ padding:"7px 16px", borderRadius:8, border:schedule.status===s?"1px solid var(--amber)":"1px solid var(--border)", background:schedule.status===s?"var(--amber-glow)":"transparent", color:schedule.status===s?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textTransform:"capitalize" }}>
-                        {s}
+                        style={{ padding:"7px 16px", borderRadius:8, border:schedule.status===s?"1px solid var(--amber)":"1px solid var(--border)", background:schedule.status===s?"var(--amber-glow)":"transparent", color:schedule.status===s?"var(--amber)":"var(--text-secondary)", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>
+                        {s === "published" ? "Publish Now" : s === "draft" ? "Draft" : "Scheduled"}
                       </button>
                     ))}
                   </div>
