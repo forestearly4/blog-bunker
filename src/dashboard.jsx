@@ -3596,6 +3596,15 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
     if (!initialPost || initialPost.id === pipelinePostId) return;
     setDraft({ title: initialPost.title || "", body: initialPost.body || "", category: initialPost.category || categories[0] || "", tone: "literary", headlineImageUrl: initialPost.headlineImageUrl || "" });
     setBrief(b => ({ ...b, topic: initialPost.title || b.topic }));
+    // Reset Enhance/Social/category state too — otherwise a leftover
+    // enhance.metaTitle (or metaDescription) from whatever was previously in
+    // progress here silently wins over THIS post's title when publishing
+    // (title: enhance.metaTitle || draft.title), even though the Draft stage
+    // correctly shows the new post's own title. This was the actual bug
+    // behind "published to WordPress under the wrong title."
+    setEnhance({ metaTitle: "", metaDescription: "", primaryKeyword: "", suggestions: [], headlines: [], improved: "" });
+    setSocial({ posts: {}, images: {} });
+    setSelectedWpCategoryId(null);
     setPipelinePostId(initialPost.id);
     setCompleted(c => [...new Set([...c, "brief", "draft"])]);
     setStage("enhance");
