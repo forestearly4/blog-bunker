@@ -193,6 +193,8 @@ const WORKSPACE_SCOPED_KEYS = [
   { local: "bb_competitors",         cloud: "competitors" },
   { local: "bb_social_competitors",  cloud: "social_competitors" },
   { local: "bb_social_inspiration",  cloud: "social_inspiration" },
+  { local: "bb_categories",          cloud: "categories" },
+  { local: "bb_competitor_insights", cloud: "competitor_insights" },
 ];
 
 function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cloud-wins", scope = "account" } = {}) {
@@ -3193,6 +3195,10 @@ const COMP_TRACKER_STORAGE = "bb_comp_tracker";
 const compTrackerStore = createPersistedStore(COMP_TRACKER_STORAGE, "comp_tracker", {}, { scope: "workspace" });
 
 function loadTrackerData() { return compTrackerStore.load(); }
+
+// Competitor Landscape insights (Content Gap / Untapped Format) — per-workspace,
+// generated from that workspace's own added competitors. See generateCompetitorInsights().
+const competitorInsightsStore = createPersistedStore("bb_competitor_insights", "competitor_insights", null, { scope: "workspace" });
 function saveTrackerData(data) { compTrackerStore.save(data, { debounce: false }); }
 
 function CompetitorTracker({ competitors, onAddInspiration, activeProvider, activeModel, apiKeys, dark, onProviderChange, onModelChange }) {
@@ -13660,6 +13666,47 @@ export default function Dashboard({ user, workspace }) {
   const [calModalDay,       setCalModalDay]       = useState(null);
   const [calModalOpen,      setCalModalOpen]      = useState(false);
 
+  // Competitor Landscape insights (Content Gap / Untapped Format) — used to
+  // be one hardcoded Cask & Stream-specific set ("Whiskey + Fishing", "Video
+  // Pairing Guides") shown identically to every workspace regardless of who
+  // its actual competitors were. Now generated per-workspace from the
+  // competitors actually added here plus this workspace's own brand guide,
+  // and cached in workspace-scoped storage so it isn't regenerated on every
+  // visit — only when competitors change or the user asks to refresh.
+  const [competitorInsights, setCompetitorInsights] = useState(() => competitorInsightsStore.load());
+  const [competitorInsightsLoading, setCompetitorInsightsLoading] = useState(false);
+  const [competitorInsightsError, setCompetitorInsightsError] = useState("");
+  const generateCompetitorInsights = async () => {
+    if (competitors.length === 0) return;
+    setCompetitorInsightsLoading(true); setCompetitorInsightsError("");
+    try {
+      const text = await callAI(activeProvider, activeModel,
+        `You are a competitive content strategist for bloggers. Given a brand guide and a list of its competitors, find ONE specific content-topic intersection none of the listed competitors own, and ONE specific content format none of them are using. Return ONLY valid JSON (no fences):
+{
+  "content_gap": "short topic phrase, e.g. 'Whiskey + Fishing'",
+  "content_gap_why": "one sentence on why this is an opportunity",
+  "untapped_format": "short format phrase, e.g. 'Video Pairing Guides'",
+  "untapped_format_why": "one sentence on why this is an opportunity"
+}
+Be specific to the actual competitors listed — do not invent generic advice.`,
+        `${buildBrandContext(brandGuide)}Competitors:\n${competitors.map(c => `- ${c.name} (${c.url}) — posts ${c.posts || "unknown frequency"}, strengths: ${c.strengths || "unspecified"}`).join("\n")}`,
+        apiKeys[activeProvider],
+        600
+      );
+      const parsed = parseAIJson(text);
+      const data = {
+        contentGap: parsed.content_gap || "",
+        contentGapWhy: parsed.content_gap_why || "",
+        untappedFormat: parsed.untapped_format || "",
+        untappedFormatWhy: parsed.untapped_format_why || "",
+        generatedAt: new Date().toISOString(),
+      };
+      setCompetitorInsights(data);
+      competitorInsightsStore.save(data, { debounce: false });
+    } catch(e) { setCompetitorInsightsError(e.message); }
+    setCompetitorInsightsLoading(false);
+  };
+
   // ── Handlers
   const openNewPost   = ()  => { setEditingPost(null); setPostEditorOpen(true); };
   const openEditPost  = (p) => { setEditingPost(p);    setPostEditorOpen(true); };
@@ -14191,19 +14238,54 @@ export default function Dashboard({ user, workspace }) {
                       </tbody>
                     </table>
                   </div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:16,marginTop:16}}>
-                    {[
-                      {title:"Content Gap",             value:"Whiskey + Fishing",    detail:"Zero competitors own this intersection — you do",                color:fixedGreen},
-                      {title:"Avg Competitor Frequency", value:"3.0/wk",              detail:"You're at 2/wk — room to increase without diluting quality",    color:"var(--amber)"},
-                      {title:"Untapped Format",          value:"Video Pairing Guides", detail:"No competitor is doing video whiskey × fishing content",        color:"var(--amber)"},
-                    ].map((ins,i)=>(
-                      <div key={i} style={card}>
-                        <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:8}}>{ins.title}</div>
-                        <div style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,color:ins.color,marginBottom:4}}>{ins.value}</div>
-                        <div style={{fontSize:12,color:"var(--text-secondary)"}}>{ins.detail}</div>
+                  {(() => {
+                    const freqs = competitors.map(c => parseFloat(c.posts)).filter(n => !isNaN(n));
+                    const avgFreq = freqs.length ? (freqs.reduce((a,b)=>a+b,0)/freqs.length).toFixed(1)+"/wk" : "—";
+                    const fourWeeksAgo = Date.now() - 28*24*60*60*1000;
+                    const recentCount = posts.filter(p => p.date && new Date(p.date).getTime() >= fourWeeksAgo).length;
+                    const yourFreq = recentCount ? (recentCount/4).toFixed(1)+"/wk" : null;
+                    return (
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:16,marginTop:16}}>
+                        <div style={card}>
+                          <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:8}}>Avg Competitor Frequency</div>
+                          <div style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,color:"var(--amber)",marginBottom:4}}>{avgFreq}</div>
+                          <div style={{fontSize:12,color:"var(--text-secondary)"}}>
+                            {competitors.length===0 ? "Add competitors above to see this" : yourFreq ? `You're at ${yourFreq} — based on your last 4 weeks of posts` : "Based on the competitors added above"}
+                          </div>
+                        </div>
+                        <div style={card}>
+                          <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:8}}>Content Gap</div>
+                          {competitorInsights?.contentGap ? (
+                            <>
+                              <div style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,color:fixedGreen,marginBottom:4}}>{competitorInsights.contentGap}</div>
+                              <div style={{fontSize:12,color:"var(--text-secondary)"}}>{competitorInsights.contentGapWhy}</div>
+                            </>
+                          ) : (
+                            <div style={{fontSize:12,color:"var(--muted)"}}>{competitors.length===0 ? "Add competitors to generate this" : "Not generated yet — see below"}</div>
+                          )}
+                        </div>
+                        <div style={card}>
+                          <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--muted)",marginBottom:8}}>Untapped Format</div>
+                          {competitorInsights?.untappedFormat ? (
+                            <>
+                              <div style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700,color:"var(--amber)",marginBottom:4}}>{competitorInsights.untappedFormat}</div>
+                              <div style={{fontSize:12,color:"var(--text-secondary)"}}>{competitorInsights.untappedFormatWhy}</div>
+                            </>
+                          ) : (
+                            <div style={{fontSize:12,color:"var(--muted)"}}>{competitors.length===0 ? "Add competitors to generate this" : "Not generated yet — see below"}</div>
+                          )}
+                        </div>
                       </div>
-                    ))}
+                    );
+                  })()}
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginTop:10}}>
+                    <button onClick={generateCompetitorInsights} disabled={competitors.length===0||competitorInsightsLoading}
+                      style={{...btnS, opacity: competitors.length===0?0.5:1, cursor: competitors.length===0?"not-allowed":"pointer"}}>
+                      {competitorInsightsLoading ? "Analyzing…" : competitorInsights ? "↻ Refresh Insights" : "✦ Generate Content Gap & Format Insights"}
+                    </button>
+                    {competitorInsights?.generatedAt && <span style={{fontSize:11,color:"var(--muted)"}}>Generated {new Date(competitorInsights.generatedAt).toLocaleDateString()}</span>}
                   </div>
+                  {competitorInsightsError && <div style={{fontSize:12,color:"var(--red)",marginTop:8}}>{competitorInsightsError}</div>}
                 </div>
               )}
               {researchTab==="inspiration"&&(
