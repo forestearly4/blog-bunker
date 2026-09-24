@@ -12095,8 +12095,20 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ userId, workspaceId: window.__bbWorkspaceId, dataUrl, name: safeName, tags: ["blog headline", "generated"], notes: prompt ? `Prompt: ${prompt.slice(0, 100)}` : "", source: "generated" }),
       });
-      if (!res.ok) throw new Error(`Upload failed (${res.status})`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `Upload failed (${res.status})`);
       window.dispatchEvent(new CustomEvent("bb-media-updated"));
+      // This button exists specifically to recover from the automatic
+      // GCS upload in generate() failing (network hiccup, etc.) — that
+      // failure left draft.headlineImageUrl permanently unset with only a
+      // console.warn, so the post would silently publish to WordPress with
+      // no featured image even though this panel still showed the preview.
+      // Without wiring this success back to onImageSaved/cloudUrl too, this
+      // button looked like a fix but never actually was one.
+      if (data.url) {
+        setCloudUrl(data.url);
+        if (onImageSaved) onImageSaved(data.url);
+      }
       setSavedToLib(true);
       setTimeout(() => setSavedToLib(false), 3000);
     } catch(e) {
@@ -12164,10 +12176,18 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
         if (uploadData.url) {
           setCloudUrl(uploadData.url);
           if (onImageSaved) onImageSaved(uploadData.url); // notify parent post record
+        } else {
+          throw new Error(uploadData?.error || "Upload returned no URL");
         }
       } catch(e) {
-        console.warn("Auto-upload to GCS failed:", e.message);
-        // Not fatal — blob URL still works for display
+        // Not fatal for VIEWING the image — the blob: preview below still
+        // works — but it's fatal for anything downstream that reads
+        // draft.headlineImageUrl (WordPress publish, Social Pipeline
+        // hand-off, the saved post record), since that never got set. A
+        // console.warn here was invisible, so the image looked fully
+        // attached right up until it silently didn't carry over to
+        // WordPress. Surface it and point at the recovery button below.
+        setSaveError(`Image generated but couldn't save to the cloud (${e.message}) — click "Save to Library" below before publishing, or it won't be included.`);
       }
       setUploading(false);
 
