@@ -195,6 +195,7 @@ const WORKSPACE_SCOPED_KEYS = [
   { local: "bb_social_inspiration",  cloud: "social_inspiration" },
   { local: "bb_categories",          cloud: "categories" },
   { local: "bb_competitor_insights", cloud: "competitor_insights" },
+  { local: "bb_pinterest_config",    cloud: "pinterest_config" },
 ];
 
 function createPersistedStore(localKey, cloudKey, defaultValue, { strategy = "cloud-wins", scope = "account" } = {}) {
@@ -5551,6 +5552,162 @@ function MetaConnectPanel({ onConnected }) {
   );
 }
 
+// ─── PINTEREST INTEGRATION ────────────────────────────────────────────────────
+// Direct Pinterest connection (native OAuth), separate from the Buffer-routed
+// path used for TikTok/X/Reddit. One centrally registered Blog Bunker
+// Pinterest app (PINTEREST_APP_ID/SECRET, platform env vars) is authorized
+// per-workspace, same shape as the Search Console integration — this is the
+// correct multi-tenant OAuth pattern and doesn't require each blogger to
+// register their own Pinterest developer app the way Meta currently does.
+
+const PINTEREST_STORAGE = "bb_pinterest_config";
+const pinterestConfigStore = createPersistedStore(PINTEREST_STORAGE, "pinterest_config", {}, { scope: "workspace" });
+function loadPinterestConfig() { return pinterestConfigStore.load(); }
+function savePinterestConfig(d) {
+  // Only push to cloud once actually connected — matches the Meta pattern.
+  pinterestConfigStore.save(d, { debounce: false, skipCloud: !d?.connected });
+}
+
+// Get a valid Pinterest access token — auto-refreshes if expired
+async function getPinterestAccessToken(cfg) {
+  if (!cfg?.refreshToken) throw new Error("Not connected — please reconnect Pinterest.");
+  if (cfg.accessToken && cfg.expiry && Date.now() < cfg.expiry - 300_000) return cfg.accessToken;
+
+  const res  = await fetch("/api/pinterest-refresh", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ refreshToken: cfg.refreshToken }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+
+  const updated = { ...cfg, accessToken: data.access_token, refreshToken: data.refresh_token || cfg.refreshToken, expiry: data.expiry };
+  savePinterestConfig(updated);
+  return { accessToken: data.access_token, updated };
+}
+
+// Publishes a single Pin. imageUrl may be a blob:/data: URL (from a
+// generated image) — reuses the same public-URL upload path Meta posting
+// uses, since Pinterest also needs a real https:// URL it can fetch server-side.
+async function pinterestCreatePin({ cfg, boardId, title, description, link, imageUrl }) {
+  const { accessToken } = await getPinterestAccessToken(cfg);
+  let finalImageUrl = imageUrl;
+  if (imageUrl && (imageUrl.startsWith("blob:") || imageUrl.startsWith("data:"))) {
+    finalImageUrl = await ensurePublicImageUrl(imageUrl);
+  }
+  const res = await fetch("/api/pinterest-post", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ action: "createPin", accessToken, boardId, title, description, link, imageUrl: finalImageUrl }),
+  });
+  return await res.json();
+}
+
+function PinterestConnectPanel({ onConnected }) {
+  const [cfg,       setCfg]       = useState(loadPinterestConfig);
+  const [clientId,  setClientId]  = useState(null);
+  const [log,       setLog]       = useState("");
+  const [loading,   setLoading]   = useState(false);
+
+  useEffect(() => {
+    fetch("/api/pinterest-post", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"getConfig" }) })
+      .then(r => r.json()).then(d => setClientId(d.clientId || ""))
+      .catch(() => setClientId(""));
+  }, []);
+
+  const loadBoardsAndAccount = async (newCfg) => {
+    try {
+      const [boardsRes, acctRes] = await Promise.all([
+        fetch("/api/pinterest-post", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"getBoards", accessToken: newCfg.accessToken }) }),
+        fetch("/api/pinterest-post", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ action:"getAccount", accessToken: newCfg.accessToken }) }),
+      ]);
+      const boardsData = await boardsRes.json();
+      const acctData   = await acctRes.json();
+      const updated = { ...newCfg, boards: boardsData.boards || [], username: acctData.username || newCfg.username };
+      savePinterestConfig(updated); setCfg(updated);
+      if (onConnected) onConnected(updated);
+    } catch (e) { setLog(`Connected, but couldn't load boards yet: ${e.message}`); }
+  };
+
+  useEffect(() => {
+    const handleMsg = async (e) => {
+      if (e.data?.type === "pinterest-auth-error") { setLog(e.data.error); return; }
+      if (e.data?.type !== "pinterest-auth-success") return;
+      const t = e.data.tokens;
+      const newCfg = { ...cfg, accessToken: t.access_token, refreshToken: t.refresh_token, expiry: t.expiry, username: t.username, connected: true, connectedAt: new Date().toISOString() };
+      savePinterestConfig(newCfg); setCfg(newCfg);
+      setLog(`✓ Connected${t.username ? ` as @${t.username}` : ""}! Loading your boards…`);
+      await loadBoardsAndAccount(newCfg);
+      setLog("");
+    };
+    window.addEventListener("message", handleMsg);
+    return () => window.removeEventListener("message", handleMsg);
+  }, [cfg]);
+
+  const connect = () => {
+    if (!clientId) { setLog("Pinterest isn't configured yet — add PINTEREST_APP_ID / PINTEREST_APP_SECRET in Netlify env vars first."); return; }
+    setLoading(true);
+    const scope = "boards:read,boards:write,pins:read,pins:write,user_accounts:read";
+    const params = new URLSearchParams({
+      client_id:     clientId,
+      redirect_uri:  "https://blogbunker.netlify.app/api/pinterest-callback",
+      response_type: "code",
+      scope,
+    });
+    const popup = window.open(`https://www.pinterest.com/oauth/?${params}`, "pinterest_auth", "width=650,height=700,scrollbars=yes");
+    if (!popup) setLog("Popup blocked — allow popups for blogbunker.netlify.app and try again.");
+    setLoading(false);
+  };
+
+  const disconnect = () => { savePinterestConfig({}); setCfg({}); setLog(""); if (onConnected) onConnected({}); };
+
+  const selectBoard = (boardId) => {
+    const updated = { ...cfg, selectedBoardId: boardId };
+    savePinterestConfig(updated); setCfg(updated);
+    if (onConnected) onConnected(updated);
+  };
+
+  if (cfg.connected) {
+    return (
+      <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+        <div style={{ padding:14, borderRadius:10, border:"1px solid #7a916644", background:"#7a91660a", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <div>
+            <div style={{ fontWeight:700, fontSize:14 }}>✓ Pinterest Connected{cfg.username ? ` — @${cfg.username}` : ""}</div>
+            <div style={{ fontSize:11, color:"var(--text-secondary)", marginTop:3 }}>{cfg.boards?.length || 0} board{cfg.boards?.length!==1?"s":""} found</div>
+          </div>
+          <button onClick={disconnect} style={{ padding:"6px 14px", borderRadius:7, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>Disconnect</button>
+        </div>
+        {cfg.boards?.length > 0 && (
+          <div>
+            <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:8 }}>Default board to pin to</div>
+            <select value={cfg.selectedBoardId || ""} onChange={e => selectBoard(e.target.value)}
+              style={{ width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)" }}>
+              <option value="">— select a board —</option>
+              {cfg.boards.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
+            <div style={{ fontSize:11, color:"var(--muted)", marginTop:6 }}>You can still pick a different board per-pin in Pinterest Studio.</div>
+          </div>
+        )}
+        {cfg.boards?.length === 0 && <div style={{ fontSize:12, color:"var(--amber)" }}>No boards found — create one on Pinterest first, then reconnect.</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+      <div style={{ padding:"14px 16px", borderRadius:10, background:"var(--amber-glow)", border:"1px solid var(--amber)33", fontSize:12, color:"var(--text-secondary)", lineHeight:1.8 }}>
+        Connect your Pinterest account to publish pins straight from Blog Bunker — no Buffer required. Pinterest is a search engine, and pins keep driving traffic to a post for years.
+      </div>
+      <button onClick={connect} disabled={loading || clientId === null}
+        style={{ padding:"11px 24px", borderRadius:8, border:"none", background:clientId?"#e60023":"var(--bg-elevated)", color:clientId?"#fff":"var(--muted)", fontSize:13, fontWeight:700, cursor:clientId?"pointer":"not-allowed", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:10, alignSelf:"flex-start" }}>
+        📌 Connect with Pinterest
+      </button>
+      {clientId === "" && <div style={{ fontSize:12, color:"var(--amber)" }}>Pinterest isn't set up on this deployment yet — add PINTEREST_APP_ID / PINTEREST_APP_SECRET in Netlify env vars.</div>}
+      {log && <div style={{ fontSize:12, color:"var(--text-secondary)", padding:"8px 12px", borderRadius:6, background:"var(--bg-elevated)", border:"1px solid var(--border)" }}>{log}</div>}
+    </div>
+  );
+}
+
 // ─── SOCIAL STUDIO ────────────────────────────────────────────────────────────
 // Full standalone social media creation studio with sub-tabs
 
@@ -5576,7 +5733,7 @@ class MarketingErrorBoundary extends React.Component {
   }
 }
 
-function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null, wsUrl = "" }) {
+function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfig, pinterestConfig, posts, inspiration, competitors, onAddInspiration, handleProviderChange, handleModelChange, brandGuide, socialPosts = [], onSaveSocialPost, onDeleteSocialPost, userId = "anonymous", socialInspiration = [], onAddSocialInspiration, onDeleteSocialInspiration, socialCompetitors = [], onAddSocialCompetitor, onDeleteSocialCompetitor, externalInitialIdea = null, onConsumedExternalInitialIdea = null, tierConfig = TIER_CONFIG.operative, onAddCalEvent = null, wsUrl = "" }) {
   const [tab, setTab] = useState("pipeline");
   const [editPostForPipeline, setEditPostForPipeline] = useState(null);
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
@@ -5604,6 +5761,7 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
     { id:"seo",        label:"Keyword Research",  icon:"◎" },
     { id:"research",   label:"Research",          icon:"⊕" },
     { id:"image",      label:"Image Studio",      icon:"▣" },
+    { id:"pinterest",  label:"Pinterest",         icon:"📌" },
   ];
   const [researchSubTab, setResearchSubTab] = useState("research");
 
@@ -5676,6 +5834,18 @@ function MarketingStudio({ activeProvider, activeModel, apiKeys, dark, metaConfi
           editPost={editPostForPipeline}
           onConsumedEditPost={() => setEditPostForPipeline(null)}
           brandGuide={brandGuide}
+        />
+      )}
+
+      {/* ── PINTEREST ── */}
+      {tab === "pinterest" && (
+        <PinterestStudio
+          activeProvider={activeProvider}
+          activeModel={activeModel}
+          apiKeys={apiKeys}
+          posts={posts}
+          brandGuide={brandGuide}
+          pinterestConfig={pinterestConfig}
         />
       )}
 
@@ -8257,7 +8427,7 @@ function EmailNewsletterStudio({ activeProvider, activeModel, apiKeys, posts, br
 
 // ─── PINTEREST STUDIO ─────────────────────────────────────────────────────────
 
-function PinterestStudio({ activeProvider, activeModel, apiKeys, posts, brandGuide }) {
+function PinterestStudio({ activeProvider, activeModel, apiKeys, posts, brandGuide, pinterestConfig = {} }) {
   const [mode,    setMode]   = useState("from-post");
   const [postId,  setPostId] = useState("");
   const [topic,   setTopic]  = useState("");
@@ -8265,11 +8435,33 @@ function PinterestStudio({ activeProvider, activeModel, apiKeys, posts, brandGui
   const [loading, setLoading] = useState(false);
   const [error,   setError]  = useState("");
   const [copied,  setCopied] = useState("");
+  const [publishState, setPublishState] = useState({}); // { [pinIndex]: "publishing"|"done"|error string }
+  const [pinBoards, setPinBoards] = useState({}); // { [pinIndex]: boardId } — defaults to pinterestConfig.selectedBoardId
   const provider = AI_PROVIDERS.find(p => p.id === activeProvider) || AI_PROVIDERS[0];
   const brandCtx = buildBrandContext(brandGuide || loadBrandGuide());
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
 
   const selectedPost = posts.find(p => p.id === Number(postId));
+
+  const publishPin = async (pin, i) => {
+    const boardId = pinBoards[i] || pinterestConfig.selectedBoardId;
+    if (!boardId) { setPublishState(s => ({ ...s, [i]: "Pick a board first" })); return; }
+    const imageUrl = selectedPost?.headlineImageUrl;
+    if (!imageUrl) { setPublishState(s => ({ ...s, [i]: "This post has no headline image — add one in the Article Pipeline first, Pinterest requires an image." })); return; }
+    setPublishState(s => ({ ...s, [i]: "publishing" }));
+    try {
+      const result = await pinterestCreatePin({
+        cfg: pinterestConfig,
+        boardId,
+        title: pin.title,
+        description: pin.description,
+        link: selectedPost?.wpUrl || selectedPost?.url || undefined,
+        imageUrl,
+      });
+      if (result.error) throw new Error(result.error);
+      setPublishState(s => ({ ...s, [i]: "done" }));
+    } catch (e) { setPublishState(s => ({ ...s, [i]: e.message })); }
+  };
 
   const generate = async () => {
     setLoading(true); setError(""); setPins(null);
@@ -8295,6 +8487,12 @@ function PinterestStudio({ activeProvider, activeModel, apiKeys, posts, brandGui
         <h2 style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, margin:"0 0 4px" }}>Pinterest Studio</h2>
         <p style={{ fontSize:13, color:"var(--text-secondary)", margin:0 }}>Pinterest is a search engine — pins drive traffic for years, not hours. Create SEO-optimized pins for every post.</p>
       </div>
+
+      {!pinterestConfig.connected && (
+        <div style={{ padding:"12px 16px", borderRadius:10, background:"#e6002310", border:"1px solid #e6002333", fontSize:12, color:"var(--text-secondary)", display:"flex", justifyContent:"space-between", alignItems:"center", gap:12 }}>
+          <span>Connect Pinterest in <strong style={{color:"var(--text)"}}>Settings → Pinterest</strong> to publish pins straight from here — until then you can still generate ideas and copy them manually.</span>
+        </div>
+      )}
 
       <div style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:12, padding:20 }}>
         <div style={{ display:"flex", gap:6, marginBottom:16 }}>
@@ -8351,10 +8549,28 @@ function PinterestStudio({ activeProvider, activeModel, apiKeys, posts, brandGui
                 {pin.keywords?.map((kw,j) => <span key={j} style={{ fontSize:11, padding:"2px 8px", borderRadius:99, background:"var(--amber-glow)", color:"var(--amber)", border:"1px solid var(--amber)33" }}>{kw}</span>)}
               </div>
 
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:11, color:"var(--muted)" }}>
-                <div><span style={{ color:"var(--amber)", fontWeight:600 }}>Board:</span> {pin.board}</div>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:11, color:"var(--muted)", marginBottom: pinterestConfig.connected ? 14 : 0 }}>
+                <div><span style={{ color:"var(--amber)", fontWeight:600 }}>Suggested board:</span> {pin.board}</div>
                 <div><span style={{ color:"var(--amber)", fontWeight:600 }}>Image:</span> {pin.imageDescription}</div>
               </div>
+
+              {pinterestConfig.connected && (
+                <div style={{ borderTop:"1px solid var(--border)", paddingTop:14, display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+                  <select value={pinBoards[i] || pinterestConfig.selectedBoardId || ""} onChange={e => setPinBoards(b => ({ ...b, [i]: e.target.value }))}
+                    style={{ padding:"7px 12px", borderRadius:7, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)" }}>
+                    <option value="">— select your board —</option>
+                    {(pinterestConfig.boards || []).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                  </select>
+                  <button onClick={() => publishPin(pin, i)} disabled={publishState[i]==="publishing" || publishState[i]==="done" || mode!=="from-post"}
+                    style={{ padding:"7px 16px", borderRadius:7, border:"none", background:publishState[i]==="done"?"var(--green)":"#e60023", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)" }}>
+                    {publishState[i]==="publishing" ? "Publishing…" : publishState[i]==="done" ? "✓ Published" : "📌 Publish to Pinterest"}
+                  </button>
+                  {mode!=="from-post" && <span style={{fontSize:11,color:"var(--muted)"}}>Switch to "From a Blog Post" to publish — pins need a post's headline image.</span>}
+                  {publishState[i] && publishState[i]!=="publishing" && publishState[i]!=="done" && (
+                    <span style={{ fontSize:11, color:"var(--red)" }}>{publishState[i]}</span>
+                  )}
+                </div>
+              )}
             </div>
           ))}
 
@@ -13552,6 +13768,9 @@ export default function Dashboard({ user, workspace }) {
       // Pull Meta config
       const cloudMeta = await metaConfigStore.pullFromCloud(userId, loadMetaConfig());
       if (cloudMeta) setMetaConfig(cloudMeta);
+      // Pull Pinterest config
+      const cloudPinterest = await pinterestConfigStore.pullFromCloud(userId, loadPinterestConfig());
+      if (cloudPinterest) setPinterestConfig(cloudPinterest);
       // Pull Buffer config
       const cloudBuffer = await bufferStore.pullFromCloud(userId, loadBufferConfig());
       if (cloudBuffer?.apiKey) { /* already saved locally by pullFromCloud */ }
@@ -13768,6 +13987,7 @@ Be specific to the actual competitors listed — do not invent generic advice.`,
 
   const [gscData,     setGscData]     = useState(loadGSCData);
   const [metaConfig,   setMetaConfig]   = useState(loadMetaConfig);
+  const [pinterestConfig, setPinterestConfig] = useState(loadPinterestConfig);
   const [brandGuide,   setBrandGuide]   = useState(loadBrandGuide);
   const [socialPosts,  setSocialPosts]  = useState(loadSocialPosts);
 
@@ -13917,6 +14137,7 @@ Be specific to the actual competitors listed — do not invent generic advice.`,
     { id:"apikeys",    label:"API Keys"             },
     { id:"gsc",        label:"Search Console"       },
     { id:"meta",       label:"Facebook & Instagram" },
+    { id:"pinterest",  label:"Pinterest"            },
     { id:"wordpress",  label:"WordPress"            },
     { id:"buffer",     label:"Buffer (Social)"      },
     { id:"social",     label:"Social Media"         },
@@ -14375,6 +14596,7 @@ Be specific to the actual competitors listed — do not invent generic advice.`,
                 apiKeys={apiKeys}
                 dark={dark}
                 metaConfig={metaConfig}
+                pinterestConfig={pinterestConfig}
                 posts={posts}
                 inspiration={inspiration}
                 competitors={competitors}
@@ -14465,7 +14687,15 @@ Be specific to the actual competitors listed — do not invent generic advice.`,
                 )}
 
                 {settingsSection==="tiktok"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="TikTok posting (via Buffer)" /> )}
-                {settingsSection==="pinterest"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="Pinterest posting (via Buffer)" /> )}
+                {settingsSection==="pinterest"&&(
+                  <div>
+                    <h3 style={{ fontFamily:"var(--font-display)", fontSize:18, fontWeight:700, margin:"0 0 4px" }}>📌 Pinterest</h3>
+                    <p style={{ fontSize:13, color:"var(--text-secondary)", margin:"0 0 20px", lineHeight:1.6 }}>
+                      Connects directly — no Buffer needed. Publish pins for your posts from Marketing → Pinterest.
+                    </p>
+                    <PinterestConnectPanel onConnected={(cfg) => setPinterestConfig(cfg)} />
+                  </div>
+                )}
                 {settingsSection==="twitter"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="X posting (via Buffer)" /> )}
                 {settingsSection==="reddit"&&( tierConfig.buffer ? <BufferSettings /> : <TierLockedNotice feature="Reddit posting (via Buffer)" /> )}
 
