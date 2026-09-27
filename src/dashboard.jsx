@@ -11030,12 +11030,13 @@ function SEODashboard({ posts, gscData, activeProvider, activeModel, apiKeys, on
   "health_score": 0-100,
   "health_label": "one word: Excellent/Good/Fair/Needs Work",
   "summary": "2-3 sentence overall assessment",
+  "biggest_opportunity": "single most impactful thing to do right now in 1-2 sentences",
   "quick_wins": [{"action":"specific action","impact":"High/Medium/Low","effort":"Easy/Medium/Hard","detail":"why this works","how_to":"concrete step-by-step on actually doing this — where relevant, reference the actual Blog Bunker feature to use (e.g. Article Pipeline's Enhance stage, Link Finder, Media Library)"}],
   "title_rewrites": [{"current":"...","suggested":"...","reason":"..."}],
   "content_gaps": [{"topic":"...","why":"...","angle":"..."}],
-  "technical_tips": [{"tip":"short tip","how_to":"concrete step-by-step on actually doing this"}],
-  "biggest_opportunity": "single most impactful thing to do right now in 1-2 sentences"
+  "technical_tips": [{"tip":"short tip","how_to":"concrete step-by-step on actually doing this"}]
 }
+Put fields in exactly this order in your response.
 quick_wins = 5 items. title_rewrites = 3 items using actual post titles provided. content_gaps = 4 items. technical_tips = 3 items.`,
         `${buildBrandContext(brandGuide)}Site: ${wsUrl || "this blog"}.
 Published posts: ${postTitles || "none yet"}
@@ -11046,11 +11047,24 @@ Total impressions: ${totalImpr}
 Avg CTR: ${avgCTR}%
 Site age: relatively new, building domain authority`,
         apiKeys[activeProvider],
-        2000
+        // The requested schema is large — 5 quick wins + 3 title rewrites +
+        // 4 content gaps + 3 technical tips, each with multi-sentence
+        // "how_to" detail, plus biggest_opportunity coming LAST in the
+        // response. At 2000 tokens the response was getting cut off before
+        // finishing, so parseAIJson's truncation-repair logic kept only
+        // whatever came first (health_score/summary) and silently dropped
+        // every field after the cut point — showing a score with empty
+        // Quick Wins/Title Rewrites/Content Gaps/Biggest Opportunity
+        // sections, with no visible error since the JSON still parsed.
+        4000
       );
 
       setLoadMsg("Parsing recommendations…");
-      setAnalysis(parseAIJson(text));
+      const parsed = parseAIJson(text);
+      if (!parsed?.quick_wins?.length && !parsed?.biggest_opportunity) {
+        throw new Error("The AI response was incomplete — try running the analysis again.");
+      }
+      setAnalysis(parsed);
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
