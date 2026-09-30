@@ -5,7 +5,16 @@ import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import Underline from "@tiptap/extension-underline";
-import Image from "@tiptap/extension-image";
+// Named TiptapImage (not "Image") — importing it as "Image" shadowed the
+// browser's native window.Image constructor for the entire rest of this
+// file's module scope, silently breaking every `new Image()` call site
+// (image loading/canvas work in Media Library, AI Restyle, the Filters &
+// Text overlay editor, screenshot generation, etc). Dev mode showed a clear
+// "Image is not a constructor" error; the production build renamed the
+// shadowing import to a short minified name (e.g. "fr"), which is why the
+// same crash showed up there as the much more confusing "fr is not a
+// constructor".
+import TiptapImage from "@tiptap/extension-image";
 
 // ─── BRAND GUIDE ──────────────────────────────────────────────────────────────
 // Stores voice/tone/image style settings that get injected into every AI call.
@@ -858,6 +867,23 @@ const INSPIRATION = [
   { id:3, source:"Whisky Advocate",     title:"The 10 Best Sherried Single Malts of 2026",  type:"article", notes:"Pair each with a river destination — killer concept" },
   { id:4, source:"Instagram @drakemag", title:"Golden hour on the Madison",                 type:"visual",  notes:""                                                    },
 ];
+
+// Two separate bugs in the Inspiration Boards, both fixed by routing them
+// through the same createPersistedStore factory as everything else:
+//  - Marketing/Social's board never synced to the cloud in either
+//    direction — new items only ever landed in localStorage, so the board
+//    looked empty on any other device/browser (or after a cache clear)
+//    even though nothing saved locally was actually lost. This is the bug
+//    Forest reported.
+//  - Blog's board DID pull from the cloud on mount, but its save effect
+//    wrote to the unscoped "bb_inspiration" key (while reads used the
+//    workspace-scoped key) and never pushed to the cloud at all — so new
+//    items could silently vanish after a workspace switch, and never
+//    synced to other devices either.
+// The factory also gives both an array-safe merge (an empty cloud copy
+// never wipes out non-empty local data).
+const inspirationStore = createPersistedStore("bb_inspiration", "inspiration", INSPIRATION, { scope: "workspace" });
+const socialInspirationStore = createPersistedStore("bb_social_inspiration", "social_inspiration", [], { scope: "workspace" });
 
 const PLANS = [
   { name:"Scout",     price:"$19/mo", byokPrice:"$16/mo", features:["1 Workspace","15,000 AI words/mo","20 AI images/mo","Meta (Facebook & Instagram) posting only","Bring your own AI key (BYOK)","Community Support"] },
@@ -12690,7 +12716,7 @@ function RichTextEditor({ value, onChange, placeholder = "Write your post here�
       Underline,
       Link.configure({ openOnClick: false, autolink: true }),
       Placeholder.configure({ placeholder }),
-      Image.configure({ inline: false, HTMLAttributes: { style: "max-width:100%;border-radius:8px;" } }),
+      TiptapImage.configure({ inline: false, HTMLAttributes: { style: "max-width:100%;border-radius:8px;" } }),
     ],
     content: markdownToHtml(value || ""),
     onUpdate: ({ editor }) => {
@@ -13747,8 +13773,8 @@ export default function Dashboard({ user, workspace }) {
   const [posts,       setPosts]       = usePersistedState(postsStore);
   const [competitors, setCompetitors] = useState(() => { try { const s = localStorage.getItem(scopedKey("bb_competitors", "workspace")); return s ? JSON.parse(s) : COMPETITORS; } catch { return COMPETITORS; } });
   const [socialCompetitors, setSocialCompetitors] = useState(() => { try { const s = localStorage.getItem(scopedKey("bb_social_competitors", "workspace")); return s ? JSON.parse(s) : []; } catch { return []; } });
-  const [inspiration, setInspiration] = useState(() => { try { const s = localStorage.getItem(scopedKey("bb_inspiration", "workspace")); return s ? JSON.parse(s) : INSPIRATION; } catch { return INSPIRATION; } });
-  const [socialInspiration, setSocialInspiration] = useState(() => { try { const s = localStorage.getItem(scopedKey("bb_social_inspiration", "workspace")); return s ? JSON.parse(s) : []; } catch { return []; } });
+  const [inspiration, setInspiration] = useState(() => inspirationStore.load());
+  const [socialInspiration, setSocialInspiration] = useState(() => socialInspirationStore.load());
   const [calEvents,   setCalEvents]   = usePersistedState(calEventsStore);
   const [wsSettings,  setWsSettings]  = usePersistedState(wsSettingsStore);
 
@@ -13816,6 +13842,11 @@ export default function Dashboard({ user, workspace }) {
       await socialPlatformsStore.pullFromCloud(userId, loadSocialPlatforms());
       await compTrackerStore.pullFromCloud(userId, loadTrackerData());
       await videoPlansStore.pullFromCloud(userId, loadVideoPlans());
+      // Pull the Marketing/Social Inspiration Board — unlike the Blog one
+      // (pulled above via cloudGet), this one never synced from the cloud
+      // at all, which is the empty-board bug this fixes.
+      const cloudSocialInspiration = await socialInspirationStore.pullFromCloud(userId, socialInspiration);
+      if (cloudSocialInspiration) setSocialInspiration(cloudSocialInspiration);
       setCloudSynced(true);
     })();
   }, []);
@@ -13852,15 +13883,24 @@ export default function Dashboard({ user, workspace }) {
   useEffect(() => { if (cloudSynced) cloudSaveDebounced(scopedKey("competitors", "workspace"), userId, competitors); }, [competitors, cloudSynced]);
   // Push API keys to cloud (debounced — they change when user adds a key in settings)
   useEffect(() => { if (cloudSynced && Object.keys(apiKeys).length > 0) cloudSaveDebounced("api_keys", userId, apiKeys, 2000); }, [apiKeys, cloudSynced]);
-  // Push GSC + Meta configs whenever they change (triggered manually after connect/save)
-  const syncGSCToCloud  = (cfg)  => { if (cfg?.refreshToken) cloudSet("gsc_config",  userId, cfg);  };
-  const syncMetaToCloud = (cfg)  => { if (cfg?.connected)    cloudSet("meta_config",  userId, cfg);  };
+  // Push GSC + Meta configs whenever they change (triggered manually after connect/save).
+  // Both stores are workspace-scoped (createPersistedStore(..., {scope:"workspace"})
+  // above), so the cloud key MUST go through scopedKey() too — writing to the bare,
+  // unscoped key here was the root cause of a real cross-workspace bug: Forest's
+  // "default" workspace (Cask & Stream) resolves to that same unscoped key (see
+  // scopedKey()'s fallback), so any OTHER workspace calling this with its own Meta
+  // connection silently overwrote Cask & Stream's cloud-stored Meta config with
+  // whichever Facebook Page that other workspace (e.g. Blog Bunker) was connected
+  // to — which is exactly why Settings showed the wrong Page selected and a Social
+  // Pipeline post from Cask & Stream actually went out through Blog Bunker's account.
+  const syncGSCToCloud  = (cfg)  => { if (cfg?.refreshToken) cloudSet(scopedKey("gsc_config",  "workspace"), userId, cfg);  };
+  const syncMetaToCloud = (cfg)  => { if (cfg?.connected)    cloudSet(scopedKey("meta_config",  "workspace"), userId, cfg);  };
 
   // Persist whenever data changes
   useEffect(() => { try { localStorage.setItem("bb_posts",       JSON.stringify(posts));       } catch {} }, [posts]);
   useEffect(() => { try { localStorage.setItem("bb_competitors", JSON.stringify(competitors)); } catch {} }, [competitors]);
-  useEffect(() => { try { localStorage.setItem("bb_inspiration", JSON.stringify(inspiration)); } catch {} }, [inspiration]);
-  useEffect(() => { try { localStorage.setItem(scopedKey("bb_social_inspiration", "workspace"), JSON.stringify(socialInspiration)); } catch {} }, [socialInspiration]);
+  useEffect(() => { inspirationStore.save(inspiration); }, [inspiration]);
+  useEffect(() => { socialInspirationStore.save(socialInspiration); }, [socialInspiration]);
   useEffect(() => { try { localStorage.setItem(scopedKey("bb_social_competitors", "workspace"), JSON.stringify(socialCompetitors)); } catch {} }, [socialCompetitors]);
   // ── Modal state
   const [postEditorOpen,    setPostEditorOpen]    = useState(false);
@@ -14016,9 +14056,21 @@ Be specific to the actual competitors listed — do not invent generic advice.`,
         imageUrl: p.imageUrl?.startsWith("blob:") ? null : p.imageUrl,
       }));
       cloudSet(scopedKey("social_posts", "workspace"), userId, forCloud);
-      // Also sync Meta credentials alongside so the scheduler can publish
+      // Also sync Meta credentials alongside so the scheduler can publish.
+      // THIS WAS THE BUG: meta_config is a workspace-scoped store (see
+      // metaConfigStore above), but this push used the bare unscoped
+      // "meta_config" cloud key instead of scopedKey("meta_config","workspace").
+      // The "default" workspace (Cask & Stream) itself resolves to that same
+      // unscoped key (scopedKey's fallback for the default workspace), so
+      // saving/scheduling a social post from ANY OTHER workspace (e.g. Blog
+      // Bunker) clobbered Cask & Stream's cloud-stored Meta config with that
+      // other workspace's connected Facebook Page. The next time Cask & Stream
+      // loaded (cloud-wins pull on mount), it silently adopted the wrong
+      // workspace's Page — which is exactly why Settings showed the wrong
+      // Page selected there and a Social Pipeline post from Cask & Stream
+      // actually published through Blog Bunker's account.
       const meta = loadMetaConfig();
-      if (meta?.connected) cloudSet("meta_config", userId, meta);
+      if (meta?.connected) cloudSet(scopedKey("meta_config", "workspace"), userId, meta);
       return next;
     });
   };
