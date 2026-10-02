@@ -25,10 +25,76 @@
         -webkit-font-smoothing: antialiased;
         overflow-x: hidden;
       }
+      /* Covers the blank moment between a hard reload (workspace switch,
+         first load, manual refresh) and React actually painting content —
+         plain inline CSS/JS only, since it has to work before any bundle
+         has loaded. #bb-splash sits OUTSIDE #root so React never touches
+         it; the script at the bottom removes it once #root has content. */
+      #bb-splash {
+        position: fixed; inset: 0; z-index: 9999;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 14px; padding: 32px; text-align: center;
+        background: #0e0f11;
+        transition: opacity 0.4s ease;
+      }
+      #bb-splash .bb-splash-mark { font-size: 13px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #d4a054; }
+      #bb-splash .bb-splash-quote { max-width: 480px; font-family: Georgia, serif; font-size: 19px; line-height: 1.5; color: #e8e6e1; }
+      #bb-splash .bb-splash-attr { font-size: 12px; color: #888; }
     </style>
   </head>
   <body>
+    <div id="bb-splash">
+      <div class="bb-splash-mark">Blog Bunker</div>
+      <div class="bb-splash-quote" id="bb-splash-quote">Cast at dawn. Sip at dusk.</div>
+      <div class="bb-splash-attr" id="bb-splash-attr"></div>
+    </div>
     <div id="root"></div>
+    <script>
+      // A short rotation of quotes in the Cask & Stream voice (fishing,
+      // whiskey, and the patient/creative work of building something) —
+      // picked fresh on every load, so switching workspaces (which does a
+      // full reload to re-hydrate every workspace-scoped store) shows a
+      // different one each time instead of the same static screen.
+      (function () {
+        var quotes = [
+          ["Cast at dawn. Sip at dusk.", ""],
+          ["The river doesn't rush, and neither should a good pour.", ""],
+          ["Patience is a fly line laid out just right.", ""],
+          ["Good things happen on their own schedule — the fish, the barrel, the draft.", ""],
+          ["Some days you fish. Some days you build the boat.", ""],
+          ["A slow morning on the water beats a fast one anywhere else.", ""],
+          ["Every great pour started as someone's patient experiment.", ""],
+          ["The best ideas surface when you stop forcing the cast.", ""],
+          ["Small, steady work — like aging in the barrel — is still work.", ""],
+          ["Read the water first. Everything else follows.", ""],
+        ];
+        var pick = quotes[Math.floor(Math.random() * quotes.length)];
+        var q = document.getElementById("bb-splash-quote");
+        var a = document.getElementById("bb-splash-attr");
+        if (q) q.textContent = pick[0];
+        if (a) a.textContent = pick[1] || "";
+
+        // Fade the splash out once React has actually painted something
+        // into #root, then remove it from the DOM. Falls back to a fixed
+        // timeout so a slow/failed boot never leaves it stuck forever.
+        var root = document.getElementById("root");
+        var splash = document.getElementById("bb-splash");
+        var removed = false;
+        function removeSplash() {
+          if (removed || !splash) return;
+          removed = true;
+          splash.style.opacity = "0";
+          setTimeout(function () { splash.remove(); }, 400);
+        }
+        if (root && splash) {
+          var obs = new MutationObserver(function () {
+            if (root.childNodes.length > 0) { obs.disconnect(); removeSplash(); }
+          });
+          obs.observe(root, { childList: true });
+        }
+        setTimeout(removeSplash, 6000);
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
     <script>
       if ('serviceWorker' in navigator) {
