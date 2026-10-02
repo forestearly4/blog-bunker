@@ -78,6 +78,18 @@ function buildBrandImageContext(guide) {
 // never does. Kept as plain, cheap randomness rather than another AI call:
 // there's no need for the variety itself to be "smart," just genuinely
 // different from last time.
+//
+// RECENT_VARIETY_HISTORY: picking independently-random each call can still
+// land on the SAME combo twice (or more) in a row by pure chance — with 8
+// compositions × 6 lighting × 3 distances that's an 1-in-144 chance per
+// repeat, not rare enough over a session's worth of generations to explain
+// away as "basically never happens." This tracks the last few combos actually
+// handed out (module-level — shared across every caller in the tab) and
+// re-rolls until it finds one that wasn't just used, so back-to-back images
+// are GUARANTEED to differ in composition/lighting/distance, not just likely
+// to by the odds.
+const RECENT_VARIETY_HISTORY = [];
+const RECENT_VARIETY_MAX = 6;
 function randomImageVariety() {
   const composition = [
     "close-up, shallow depth of field", "wide establishing shot", "overhead flat-lay angle",
@@ -90,7 +102,40 @@ function randomImageVariety() {
   ];
   const distance = ["extreme close-up detail shot", "medium shot", "wide environmental shot"];
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  return `${pick(composition)}, ${pick(lighting)}, ${pick(distance)}`;
+  let combo, attempts = 0;
+  do {
+    combo = `${pick(composition)}, ${pick(lighting)}, ${pick(distance)}`;
+    attempts++;
+  } while (RECENT_VARIETY_HISTORY.includes(combo) && attempts < 20);
+  RECENT_VARIETY_HISTORY.push(combo);
+  if (RECENT_VARIETY_HISTORY.length > RECENT_VARIETY_MAX) RECENT_VARIETY_HISTORY.shift();
+  return combo;
+}
+
+// Plain-text excerpt of a post/caption body, for grounding an image prompt
+// in what the content actually SAYS rather than just its topic/title. Strips
+// markdown syntax and trims to a clean word boundary so it reads naturally
+// when dropped into a prompt.
+function contentExcerptFor(text, maxLen = 220) {
+  if (!text) return "";
+  const clean = text.replace(/[#*`_>\[\]]/g, "").replace(/\s+/g, " ").trim();
+  if (clean.length <= maxLen) return clean;
+  const cut = clean.slice(0, maxLen);
+  const lastSpace = cut.lastIndexOf(" ");
+  return (lastSpace > 40 ? cut.slice(0, lastSpace) : cut) + "…";
+}
+
+// Guardrails appended to EVERY text-to-image prompt right before it's sent to
+// whichever provider (Stability/DALL-E/Gemini), regardless of whether the
+// prompt was AI-written or hand-typed/edited in Image Studio — these are
+// generic AI-image failure modes (garbled embedded text, watermark-looking
+// artifacts, mangled hands) that have nothing to do with the brand's actual
+// visual style, so they don't belong in the brand guide and shouldn't need
+// to be remembered every time someone writes or edits a prompt by hand.
+const IMAGE_QUALITY_GUARDRAILS = "no embedded text or lettering, no watermark, no logo, no signature, anatomically correct hands, no distortion, photorealistic quality";
+function withImageGuardrails(prompt) {
+  if (!prompt) return prompt;
+  return `${prompt}. ${IMAGE_QUALITY_GUARDRAILS}.`;
 }
 
 // ─── CLOUD SYNC (Netlify Blobs) ──────────────────────────────────────────────
@@ -1239,6 +1284,11 @@ function getAvailableImageProviders(apiKeys) {
 }
 
 async function generateImage(prompt, platId, apiKeys, forceProvider = null) {
+  // Applied centrally, here, rather than in each caller — so it's genuinely
+  // always-on (an AI-written prompt, a hand-typed one in Image Studio, or one
+  // edited by hand before hitting Generate all pass through this one spot)
+  // instead of something each new image-generating flow has to remember to add.
+  prompt = withImageGuardrails(prompt);
   const provider = forceProvider || getImageProvider(apiKeys);
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
   const keyMap = { stability:"stability", dalle:"openai", "gemini-image":"gemini" };
@@ -1551,14 +1601,23 @@ function ImageProviderPicker({ apiKeys, value, onChange, compact = false }) {
     </div>
   );
 }
-async function generateImagePrompt(topic, platId, activeProvider, activeModel, apiKey, brandGuideOverride = null) {
+async function generateImagePrompt(topic, platId, activeProvider, activeModel, apiKey, brandGuideOverride = null, contentExcerpt = "") {
   const spec = PLATFORM_IMAGE_SPECS[platId] || PLATFORM_IMAGE_SPECS.instagram;
   const brandImgCtx = buildBrandImageContext(brandGuideOverride || loadBrandGuide());
   const styleNote = brandImgCtx ? `Brand visual style (keep this fixed): ${brandImgCtx}.` : "Style: moody and cinematic, Pacific Northwest or Appalachian wilderness, amber tones.";
+  // Without real content to draw on, every image for a similar topic (e.g.
+  // several different "Newsletter" posts, or posts that share a keyword)
+  // converges on the same generic illustration of that topic — the random
+  // composition/lighting/distance variety above changes HOW it's shot, but
+  // not WHAT's actually in the frame. Grounding in an excerpt of the real
+  // post/caption text gives the AI an actual scene or detail to depict
+  // instead of illustrating the topic phrase in the abstract.
+  const excerpt = contentExcerptFor(contentExcerpt);
+  const contentNote = excerpt ? `\n\nExcerpt of the actual content this image is for — pull a specific scene, moment, or detail from it rather than illustrating the topic generically:\n"${excerpt}"` : "";
   const text = await callAI(
     activeProvider, activeModel,
     `You generate image prompts for a blog/brand. ${styleNote} Format: ${spec.style}. This specific one should use: ${randomImageVariety()}. Vary the actual scene, subject framing, and specific visual details each time you're asked — never default to the same setup twice in a row, even for a similar topic. The brand's style/palette above stays consistent; everything else about the composition should feel fresh. Return ONLY a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
-    `Write an image prompt for a ${platId} post (${spec.label}) about: ${topic}`,
+    `Write an image prompt for a ${platId} post (${spec.label}) about: ${topic}${contentNote}`,
     apiKey,
     1500,
     1.0
@@ -1568,7 +1627,7 @@ async function generateImagePrompt(topic, platId, activeProvider, activeModel, a
 
 // ─── IMAGE PANEL (per platform) ───────────────────────────────────────────────
 
-function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platColor }) {
+function ImagePanel({ platId, topic, contentExcerpt = "", activeProvider, activeModel, apiKeys, platColor }) {
   const [imgPrompt,  setImgPrompt]  = useState("");
   const [imageUrl,   setImageUrl]   = useState(null);
   const [genLoading, setGenLoading] = useState(false);
@@ -1598,7 +1657,7 @@ function ImagePanel({ platId, topic, activeProvider, activeModel, apiKeys, platC
     if (!imgPrompt) {
       setPromptLoad(true);
       try {
-        const p = await generateImagePrompt(topic, platId, activeProvider, activeModel, apiKeys[activeProvider]);
+        const p = await generateImagePrompt(topic, platId, activeProvider, activeModel, apiKeys[activeProvider], null, contentExcerpt);
         setImgPrompt(p); setPromptLoad(false);
         await runGenerate(p);
       } catch(e) { setError(e.message); setPromptLoad(false); setGenLoading(false); }
@@ -1896,6 +1955,7 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig 
                 <ImagePanel
                   platId={plat.id}
                   topic={input}
+                  contentExcerpt={posts[plat.id] || ""}
                   activeProvider={activeProvider}
                   activeModel={activeModel}
                   apiKeys={apiKeys}
@@ -3914,7 +3974,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
     if (!provider) { setError("Add a Stability AI, OpenAI, or Gemini key in Settings → API Keys for image generation."); return; }
     setLoading(true); setLoadMsg(`Generating ${platId} image via ${getImageProviderLabel(provider)}…`); setError("");
     try {
-      const prompt = await generateImagePrompt(draft.topic || brief.topic || draft.title, platId, activeProvider, activeModel, apiKeys[activeProvider]);
+      const prompt = await generateImagePrompt(draft.topic || brief.topic || draft.title, platId, activeProvider, activeModel, apiKeys[activeProvider], null, draft.body);
       const url = await generateImage(prompt, platId, apiKeys);
       setSocial(s => ({ ...s, images: { ...s.images, [platId]: url } }));
     } catch(e) { setError(e.message); }
@@ -7072,7 +7132,7 @@ Return ONLY valid JSON (no fences): {"overallScore":68,"platformScores":{"instag
   const openImagePromptPreview = async () => {
     setLoading(true); setLoadMsg("Writing image prompt…"); setError("");
     try {
-      const aiPrompt = imageData.prompt || await generateImagePrompt(idea.topic, selectedPlatforms[0]?.id || "instagram", activeProvider, activeModel, apiKeys[activeProvider]);
+      const aiPrompt = imageData.prompt || await generateImagePrompt(idea.topic, selectedPlatforms[0]?.id || "instagram", activeProvider, activeModel, apiKeys[activeProvider], null, captions[selectedPlatforms[0]?.id]?.text || "");
       setImageDraftPrompt(aiPrompt);
       setImagePreviewOpen(true);
     } catch(e) { setError(e.message); }
@@ -7128,7 +7188,7 @@ Return ONLY valid JSON (no fences): {"overallScore":68,"platformScores":{"instag
     try {
       const slide = carouselImages[index];
       const prompt = promptOverride ?? slide.prompt ?? "";
-      const finalPrompt = prompt.trim() || await generateImagePrompt(idea.topic, selectedPlatforms[0]?.id || "instagram", activeProvider, activeModel, apiKeys[activeProvider]);
+      const finalPrompt = prompt.trim() || await generateImagePrompt(idea.topic, selectedPlatforms[0]?.id || "instagram", activeProvider, activeModel, apiKeys[activeProvider], null, captions[selectedPlatforms[0]?.id]?.text || "");
       const url = await generateImage(finalPrompt, selectedPlatforms[0]?.id || "instagram", apiKeys, imageData.imgProvider);
       setCarouselImages(list => list.map((s, i) => i === index ? { ...s, prompt: finalPrompt, url } : s));
     } catch(e) { setCarouselError(e.message); }
@@ -12412,11 +12472,18 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
     try {
       let draftedPrompt = prompt;
       if (!draftedPrompt) {
-        // Build a prompt directly from the title — no extra AI call needed
+        // Built directly from the title + an excerpt of the actual post body
+        // — no extra AI call needed. The title alone was the real cause of
+        // same-looking headline images: two posts with similar titles (or
+        // the same recurring series name) produced nearly the same prompt
+        // every time, since nothing besides the random composition/lighting
+        // pick ever varied. Pulling in a slice of the real body gives each
+        // post's own specifics a chance to show up in the image.
         const guide = loadBrandGuide();
         const style = guide?.imageStyle || "cinematic editorial photography, moody atmospheric, professional lighting";
         const topic = (title || "").replace(/[#*\n]/g, " ").trim();
-        draftedPrompt = `${topic}, ${style}, ${randomImageVariety()}, wide landscape banner, professional photography, 16:9 aspect ratio`;
+        const excerpt = contentExcerptFor(body, 180);
+        draftedPrompt = `${topic}${excerpt ? ` — specifically: ${excerpt}` : ""}, ${style}, ${randomImageVariety()}, wide landscape banner, professional photography, 16:9 aspect ratio`;
       }
       setDraftPrompt(draftedPrompt);
       setPreviewOpen(true);
