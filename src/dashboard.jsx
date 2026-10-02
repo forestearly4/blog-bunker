@@ -824,29 +824,55 @@ const DEFAULT_ANALYTICS = {
 };
 
 const CALENDAR_EVENTS = [
-  { day:1,  title:"Matching the Hatch",           type:"scheduled"  },
-  { day:3,  title:"Spring Runoff — Madison",       type:"scheduled"  },
-  { day:7,  title:"Newsletter: Cast & Cask Weekly",type:"newsletter" },
-  { day:10, title:"Bourbon Comparison Post",       type:"idea"       },
-  { day:14, title:"Newsletter: Cast & Cask Weekly",type:"newsletter" },
-  { day:18, title:"Smoky Mtns Feature",            type:"draft"      },
-  { day:21, title:"Newsletter: Cast & Cask Weekly",type:"newsletter" },
-  { day:25, title:"Summer River Preview",          type:"idea"       },
-  { day:28, title:"Newsletter: Cast & Cask Weekly",type:"newsletter" },
+  { id:"demo-1", day:1,  title:"Matching the Hatch",           type:"scheduled"  },
+  { id:"demo-2", day:3,  title:"Spring Runoff — Madison",       type:"scheduled"  },
+  { id:"demo-3", day:7,  title:"Newsletter: Cast & Cask Weekly",type:"newsletter" },
+  { id:"demo-4", day:10, title:"Bourbon Comparison Post",       type:"idea"       },
+  { id:"demo-5", day:14, title:"Newsletter: Cast & Cask Weekly",type:"newsletter" },
+  { id:"demo-6", day:18, title:"Smoky Mtns Feature",            type:"draft"      },
+  { id:"demo-7", day:21, title:"Newsletter: Cast & Cask Weekly",type:"newsletter" },
+  { id:"demo-8", day:25, title:"Summer River Preview",          type:"idea"       },
+  { id:"demo-9", day:28, title:"Newsletter: Cast & Cask Weekly",type:"newsletter" },
 ];
+
+// Stable identity for a calendar event, used to decide whether a new/edited
+// event REPLACES an existing one or is a separate entry. THIS WAS THE ROOT
+// CAUSE of calendar entries vanishing: saveCalEvent used to match purely by
+// `title`, with no day/month/year in the key at all — so any two events that
+// happened to share a title (a recurring "Newsletter: Cast & Cask Weekly"
+// entry on four different dates, two unrelated posts both called "Draft",
+// etc.) silently overwrote each other the instant either one was re-saved,
+// no matter how far apart their dates were. A post-linked event now keys off
+// the post's own id (`post-<id>`), so rescheduling/republishing THE SAME
+// post still correctly replaces its own old calendar entry (the original
+// intent) even if its title changes — while a manually-added event gets its
+// own one-off id and never collides with anything else. Legacy events saved
+// before this fix have no id, so they fall back to a title+day+month+year
+// key — specific enough that only genuine duplicates of the exact same
+// occurrence collapse together.
+const calEventKey = (ev) => ev?.id || `legacy-${ev?.title}-${ev?.day}-${ev?.month}-${ev?.year}`;
+const postCalEventId = (postId) => `post-${postId}`;
 // Custom strategy — events don't have one shared "last modified" timestamp
 // to compare like a draft does, so cloud wins only if it strictly has more
 // entries than what's already local (a simple, safe heuristic).
 const calEventsStore = createPersistedStore("bb_cal_events", "cal_events", CALENDAR_EVENTS, {
   strategy: (cloudValue, localValue) => {
     if (!Array.isArray(cloudValue)) return false;
-    // Never let a cloud copy that still has duplicate titles win, no matter
-    // how many events it has — that's exactly the stale, un-cleaned-up data
-    // this is trying to avoid resurrecting. A plain "more events wins" count
-    // is backwards here: cleaning up duplicates SHRINKS the list, so it was
-    // silently losing to an older, dirtier, larger cloud copy every reload.
-    const titles = cloudValue.map(e => e.title);
-    const hasDuplicates = new Set(titles).size !== titles.length;
+    // Never let a cloud copy that still has duplicate OCCURRENCES win, no
+    // matter how many events it has — that's exactly the stale,
+    // un-cleaned-up data this is trying to avoid resurrecting. A plain
+    // "more events wins" count is backwards here: cleaning up duplicates
+    // SHRINKS the list, so it was silently losing to an older, dirtier,
+    // larger cloud copy every reload.
+    // NOTE: this used to check duplicate TITLES, which is wrong now that
+    // saveCalEvent correctly keys events by calEventKey() (id, or a
+    // day/month/year-qualified fallback) instead of by title alone —
+    // several genuinely distinct events (a recurring "Newsletter" entry on
+    // different dates, two unrelated posts with the same name) can validly
+    // share a title. Checking calEventKey() duplicates instead still catches
+    // the real problem (two entries for the very same occurrence).
+    const keys = cloudValue.map(calEventKey);
+    const hasDuplicates = new Set(keys).size !== keys.length;
     if (hasDuplicates) return false;
     return cloudValue.length > (localValue?.length || 0);
   },
@@ -3921,7 +3947,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
       // Add to calendar
       if (schedule.addToCalendar) {
         const pubDate = new Date(schedule.publishDate);
-        onAddCalEvent({ title: finalPost.title, type: schedule.status === "published" ? "published" : schedule.status === "scheduled" ? "scheduled" : "draft", day: pubDate.getDate(), month: pubDate.getMonth(), year: pubDate.getFullYear() });
+        onAddCalEvent({ id: postCalEventId(finalPost.id), title: finalPost.title, type: schedule.status === "published" ? "published" : schedule.status === "scheduled" ? "scheduled" : "draft", day: pubDate.getDate(), month: pubDate.getMonth(), year: pubDate.getFullYear() });
       }
 
       // Push to Wix via Velo HTTP function
@@ -4572,7 +4598,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
                         onSavePost(finalPost);
                         if (schedule.addToCalendar) {
                           const pubDate = new Date(finalPost.date);
-                          onAddCalEvent({ title: finalPost.title, type: finalPost.status, day: pubDate.getDate(), month: pubDate.getMonth(), year: pubDate.getFullYear() });
+                          onAddCalEvent({ id: postCalEventId(finalPost.id), title: finalPost.title, type: finalPost.status, day: pubDate.getDate(), month: pubDate.getMonth(), year: pubDate.getFullYear() });
                         }
                         markDone("publish");
                         clearPipelineDraft();
@@ -4710,7 +4736,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
                                 onSavePost(finalPost);
                                 if (schedule.addToCalendar) {
                                   const pubDate = new Date(finalPost.date);
-                                  onAddCalEvent({ title: finalPost.title, type: finalPost.status, day: pubDate.getDate(), month: pubDate.getMonth(), year: pubDate.getFullYear() });
+                                  onAddCalEvent({ id: postCalEventId(finalPost.id), title: finalPost.title, type: finalPost.status, day: pubDate.getDate(), month: pubDate.getMonth(), year: pubDate.getFullYear() });
                                 }
                                 markDone("publish");
                                 clearPipelineDraft();
@@ -4837,7 +4863,7 @@ function CalendarTab({ calEvents, posts = [], deleteCalEvent, cleanUpCalendar, s
               </div>
               {evs.map((ev,ei)=>(
                 <div key={ei}
-                  onClick={e=>{e.stopPropagation();deleteCalEvent(calEvents.findIndex(c=>c.day===day&&c.title===ev.title));}}
+                  onClick={e=>{e.stopPropagation();deleteCalEvent(calEvents.findIndex(c=>calEventKey(c)===calEventKey(ev)));}}
                   title="Click to remove"
                   style={{fontSize:10,padding:"2px 6px",borderRadius:4,background:(tc[ev.type]||"var(--muted)")+"22",color:tc[ev.type]||"var(--muted)",fontWeight:600,marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer",maxWidth:"100%"}}>
                   {ev.title}
@@ -7186,6 +7212,7 @@ Return ONLY valid JSON (no fences): {"overallScore":68,"platformScores":{"instag
       const d = new Date(scheduleDate);
       const platformIcons = selectedPlatforms.map(p => p.icon).join("");
       onAddCalEvent({
+        id: postCalEventId(post.id),
         title: `${platformIcons} ${(captions[selectedPlatforms[0]?.id]?.text || idea.topic || "Social post").slice(0, 60)}`,
         type: "scheduled",
         day: d.getDate(),
@@ -13662,7 +13689,7 @@ function AddCalendarEventModal({ day, month, year, onSave, onClose }) {
         </div>
         <div style={{ display:"flex", justifyContent:"flex-end", gap:8, marginTop:4 }}>
           <button onClick={onClose} style={{ padding:"9px 18px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" }}>Cancel</button>
-          <button onClick={()=>{ if(valid){ onSave({ ...form, day: day||form.day, month: m, year: y }); onClose(); }}} disabled={!valid}
+          <button onClick={()=>{ if(valid){ onSave({ ...form, id: `manual-${Date.now()}-${Math.random().toString(36).slice(2,8)}`, day: day||form.day, month: m, year: y }); onClose(); }}} disabled={!valid}
             style={{ padding:"9px 24px", borderRadius:8, border:"none", background:valid?"var(--amber)":"var(--bg-elevated)", color:valid?"#0e0f11":"var(--muted)", fontSize:13, fontWeight:700, cursor:valid?"pointer":"not-allowed", fontFamily:"'DM Sans',sans-serif" }}>
             Add Event
           </button>
@@ -13752,7 +13779,16 @@ export default function Dashboard({ user, workspace }) {
   };
 
   const [dark,            setDark]           = useState(true);
-  const [activeTab,       setActiveTab]      = useState("posts");
+  // Default must be a real TABS id ("blog","social","analytics","calendar",
+  // "settings" — see the TABS array below). This used to default to "posts",
+  // a leftover from before that nav was renamed to "blog"; since activeTab
+  // isn't persisted, EVERY fresh load and every workspace switch (which does
+  // a full window.location.reload()) started from this default, so the main
+  // content area matched none of the `activeTab==="..."` render blocks and
+  // rendered nothing — a blank content pane every time, with only the "Blog"
+  // nav item looking selected (it's actually just styled amber because of
+  // its unrelated `highlight:true` "NEW" flag, not because it was active).
+  const [activeTab,       setActiveTab]      = useState("blog");
   // Scroll to top on every top-level tab switch — without this, if the user
   // was scrolled down on one tab, switching to a shorter/differently-laid-out
   // tab (e.g. Marketing) could leave them stranded mid-page, below the nav.
@@ -14007,36 +14043,56 @@ Be specific to the actual competitors listed — do not invent generic advice.`,
     setBlogTab("posts");
   };
 
-  // Replaces any existing event for the same post (matched by title) rather
-  // than blindly appending — otherwise every time a post moves through
-  // another save/publish action (e.g. first scheduled, later actually
-  // published, or republished via a different button), it adds a brand-new
-  // entry without removing the old one. That's what caused BOTH duplicate
-  // calendar entries AND stale "scheduled" labels that never updated to
-  // "published" — the original scheduled entry just sat there forever
-  // alongside a newer one instead of being replaced by it.
-  const saveCalEvent = (ev) => setCalEvents(all => [...all.filter(e => e.title !== ev.title), ev]);
+  // Replaces any existing event for the SAME occurrence (matched by the
+  // stable id from calEventKey — see its definition above) rather than
+  // blindly appending — otherwise every time a post moves through another
+  // save/publish action (e.g. first scheduled, later actually published, or
+  // republished via a different button), it adds a brand-new entry without
+  // removing the old one. That's what caused BOTH duplicate calendar entries
+  // AND stale "scheduled" labels that never updated to "published" — the
+  // original scheduled entry just sat there forever alongside a newer one
+  // instead of being replaced by it.
+  //
+  // THIS USED TO MATCH BY TITLE ALONE, with no day/month/year or post
+  // identity in the key at all — so any two events that happened to share a
+  // title (a recurring "Newsletter" entry posted on several different dates,
+  // two unrelated posts that both happened to be called the same thing)
+  // silently wiped each other out the instant either was re-saved, no matter
+  // how far apart their actual dates were. That's the calendar bug Forest
+  // was still seeing after the earlier fixes — this closes it properly by
+  // keying on identity instead of the display text.
+  const saveCalEvent = (ev) => setCalEvents(all => {
+    const key = calEventKey(ev);
+    return [...all.filter(e => calEventKey(e) !== key), ev];
+  });
   const navigateToPosts = () => { setActiveTab("blog"); setBlogTab("posts"); };
   const deleteCalEvent = (idx) => setCalEvents(all => all.filter((_, i) => i !== idx));
   // One-time cleanup for calendar entries that accumulated duplicates/stale
   // statuses before saveCalEvent started replacing instead of appending —
-  // corrects each event's type against its matching post's ACTUAL current
-  // status, then deduplicates by title (keeping the most authoritative type:
-  // published > scheduled > draft > idea).
+  // corrects each event's type (and title, in case the post was renamed)
+  // against its matching post's ACTUAL current status, then deduplicates by
+  // the same stable identity saveCalEvent uses (keeping the most
+  // authoritative type: published > scheduled > draft > idea). Matching a
+  // post by its linked id (post-<id>) rather than by title means a renamed
+  // post no longer breaks the link or creates an orphaned duplicate.
   const cleanUpCalendar = () => {
     const priority = { published: 3, scheduled: 2, draft: 1, idea: 0 };
     const corrected = calEvents.map(ev => {
-      const match = posts.find(p => p.title === ev.title);
-      return match ? { ...ev, type: match.status } : ev;
+      const linkedPostId = typeof ev.id === "string" && ev.id.startsWith("post-") ? ev.id.slice(5) : null;
+      const match = linkedPostId
+        ? posts.find(p => String(p.id) === linkedPostId)
+        : posts.find(p => p.title === ev.title);
+      return match ? { ...ev, type: match.status, title: match.title } : ev;
     });
-    const byTitle = {};
+    const byKey = {};
     for (const ev of corrected) {
-      const existing = byTitle[ev.title];
+      const key = calEventKey(ev);
+      const existing = byKey[key];
       if (!existing || (priority[ev.type] ?? 0) >= (priority[existing.type] ?? 0)) {
-        byTitle[ev.title] = ev;
+        byKey[key] = ev;
       }
     }
-    setCalEvents(Object.values(byTitle));
+    setCalEvents(Object.values(byKey));
   };
 
   const [gscData,     setGscData]     = useState(loadGSCData);
