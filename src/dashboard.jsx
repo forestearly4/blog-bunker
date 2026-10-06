@@ -2248,6 +2248,134 @@ function AIQuickSwitcher({ activeProvider, activeModel, onProviderChange, onMode
   );
 }
 
+// ─── IN-APP ASSISTANT (help chat) ─────────────────────────────────────────────
+// Lets users ask "how do I…" questions without leaving the app. Routed through
+// the same callAI() as everything else, so on the platform-managed key the
+// server-side metering in claude-proxy.js counts it against the user's monthly
+// word allowance automatically (BYOK users spend their own key instead) — no
+// separate tracking needed. Replies are deliberately capped short (low
+// maxTokens + a strict brevity instruction) to keep the allowance cost small,
+// and the panel says up front that it spends words.
+const ASSISTANT_MAX_TOKENS = 350;       // hard cap on a reply — ~250 words max
+const ASSISTANT_HISTORY_TURNS = 4;      // prior exchanges sent back for context
+
+const ASSISTANT_APP_KNOWLEDGE = `Blog Bunker is a blogging + marketing dashboard. Left sidebar modules:
+- Blog: "Article Pipeline" (brief → draft → enhance/SEO → social → publish), "Posts" list, "Research".
+- Marketing (Marketing Studio): Social Pipeline (create/schedule/publish posts to Facebook & Instagram), Social Posts, Media Library, Video Planning, Email (drafts newsletters to copy into Mailchimp/ConvertKit/Beehiiv — it does not send), Keyword Research, Research, Image Studio, Pinterest.
+- Analytics: traffic/Search Console data.
+- Calendar: content calendar (add events, click an event to remove, Clean Up fixes stale statuses).
+- Settings sections: General, Brand Guide, API Keys, Search Console, Facebook & Instagram, Pinterest, WordPress, Buffer, Social Media, Publishing, Billing & Plan, Account.
+Other facts: each workspace (switcher in the sidebar) has its own brand guide, connections, posts and calendar; switching reloads the app. The ✦ button (bottom right) switches the text AI provider/model. AI usage is limited by a monthly word allowance and image allowance shown in Settings → Billing & Plan, where more words can be added; adding your own API key in Settings → API Keys removes the platform limit. Facebook/Instagram connect under Settings → Facebook & Instagram (pick which Page each workspace posts to). WordPress publishing needs the site URL, username and an application password under Settings → WordPress. A "Report a Bug" button is at the bottom of the sidebar.`;
+
+function buildAssistantSystem({ wsName, activeTab, settingsSection, connections }) {
+  return `You are the built-in help assistant for Blog Bunker.
+
+${ASSISTANT_APP_KNOWLEDGE}
+
+User context: workspace "${wsName || "unknown"}", currently viewing the "${activeTab || "unknown"}" module${activeTab === "settings" && settingsSection ? ` (Settings → ${settingsSection})` : ""}. Connected: ${connections.length ? connections.join(", ") : "nothing yet"}.
+
+RULES:
+- Be extremely succinct: 1–3 short sentences, or a short numbered list of at most 4 steps. Never exceed 80 words. No preamble, no restating the question, no closing offers.
+- Give exact locations ("Settings → WordPress"), not generic advice.
+- Scope: how to use Blog Bunker, plus blogging, SEO, social and email marketing questions. For anything unrelated, reply in one sentence that you only help with Blog Bunker and blogging/marketing.
+- If you are not sure how the app does something, say so plainly and point to the "Report a Bug" button at the bottom of the sidebar. Never invent features or settings.`;
+}
+
+function AppAssistant({ activeProvider, activeModel, apiKeys, wsName, activeTab, settingsSection, connections = [] }) {
+  const [open,     setOpen]     = useState(false);
+  const [messages, setMessages] = useState([]);   // { role: "user"|"assistant", text, error? }
+  const [input,    setInput]    = useState("");
+  const [loading,  setLoading]  = useState(false);
+  const [wordsSpent, setWordsSpent] = useState(0); // rough running total for this chat session
+  const endRef = useRef(null);
+
+  const usingOwnKey = activeProvider !== "anthropic" || !!apiKeys?.[activeProvider];
+  const countWords = (s) => (s || "").trim().split(/\s+/).filter(Boolean).length;
+
+  useEffect(() => { if (open) endRef.current?.scrollIntoView({ block: "end" }); }, [messages, loading, open]);
+
+  const send = async () => {
+    const q = input.trim();
+    if (!q || loading) return;
+    setInput("");
+    const history = messages.filter(m => !m.error).slice(-ASSISTANT_HISTORY_TURNS * 2);
+    setMessages(m => [...m, { role: "user", text: q }]);
+    setLoading(true);
+    try {
+      // callAI takes a single user message, so prior turns are folded in as a
+      // compact transcript — only the last few, to keep each call cheap.
+      const transcript = history.map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`).join("\n");
+      const userMsg = transcript ? `${transcript}\nUser: ${q}` : q;
+      const system  = buildAssistantSystem({ wsName, activeTab, settingsSection, connections });
+      const reply   = (await callAI(activeProvider, activeModel, system, userMsg, apiKeys?.[activeProvider], ASSISTANT_MAX_TOKENS, 0.3)).trim();
+      setMessages(m => [...m, { role: "assistant", text: reply || "No answer came back — try rephrasing." }]);
+      setWordsSpent(w => w + countWords(userMsg) + countWords(reply));
+    } catch (e) {
+      setMessages(m => [...m, { role: "assistant", text: e.message || "Something went wrong.", error: true }]);
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="bb-help-chat" style={{ position:"fixed", bottom:24, right:84, zIndex:998, display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
+      {open && (
+        <div className="bb-help-panel" style={{ background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:14, width:340, maxWidth:"calc(100vw - 24px)", height:460, maxHeight:"calc(100vh - 120px)", boxShadow:"0 8px 40px rgba(0,0,0,0.4)", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+          <div style={{ padding:"12px 14px", borderBottom:"1px solid var(--border)" }}>
+            <div style={{ fontSize:13, fontWeight:700 }}>Ask Blog Bunker</div>
+            <div style={{ fontSize:10.5, color:"var(--text-secondary)", marginTop:3, lineHeight:1.5 }}>
+              {usingOwnKey
+                ? "Answers are kept short. This uses your own API key, so it's billed to your provider account — not your Blog Bunker word allowance."
+                : "Heads up: every question and answer counts against your monthly AI word allowance. Answers are kept short to save words."}
+            </div>
+          </div>
+
+          <div style={{ flex:1, overflowY:"auto", padding:"12px 14px", display:"flex", flexDirection:"column", gap:10 }}>
+            {messages.length === 0 && (
+              <div style={{ fontSize:12, color:"var(--text-secondary)", lineHeight:1.6 }}>
+                Ask how to do something in Blog Bunker — for example “How do I connect Instagram?” or “Where do I change my brand voice?”
+              </div>
+            )}
+            {messages.map((m, i) => (
+              <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth:"88%", padding:"8px 12px", borderRadius:10, fontSize:12.5, lineHeight:1.55, whiteSpace:"pre-wrap", wordBreak:"break-word",
+                background: m.role === "user" ? "var(--amber)" : m.error ? "var(--red)11" : "var(--bg-elevated)",
+                color: m.role === "user" ? "#0e0f11" : m.error ? "var(--red)" : "var(--text)",
+                border: m.error ? "1px solid var(--red)33" : "none" }}>
+                {m.text}
+              </div>
+            ))}
+            {loading && <div style={{ alignSelf:"flex-start", fontSize:12, color:"var(--muted)" }}>Thinking…</div>}
+            <div ref={endRef} />
+          </div>
+
+          <div style={{ padding:"10px 12px", borderTop:"1px solid var(--border)" }}>
+            <div style={{ display:"flex", gap:8 }}>
+              <input value={input} onChange={e => setInput(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+                placeholder="Ask a question…" maxLength={500}
+                style={{ flex:1, padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12.5, fontFamily:"var(--font-body)", outline:"none" }} />
+              <button onClick={send} disabled={loading || !input.trim()}
+                style={{ padding:"8px 14px", borderRadius:8, border:"none", background:loading||!input.trim()?"var(--bg-elevated)":"var(--amber)", color:loading||!input.trim()?"var(--muted)":"#0e0f11", fontSize:12, fontWeight:700, cursor:loading||!input.trim()?"not-allowed":"pointer", fontFamily:"var(--font-body)" }}>
+                Send
+              </button>
+            </div>
+            {!usingOwnKey && wordsSpent > 0 && (
+              <div style={{ fontSize:10, color:"var(--muted)", marginTop:6 }}>
+                ≈ {wordsSpent.toLocaleString()} words used in this chat (plus a small amount of built-in instructions)
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <button onClick={() => setOpen(o => !o)}
+        style={{ width:48, height:48, borderRadius:99, background:open?"var(--amber)":"var(--bg-surface)", color:open?"#0e0f11":"var(--amber)", fontSize:20, fontWeight:700, cursor:"pointer", boxShadow:"0 4px 20px rgba(0,0,0,0.4)", border:`1px solid ${open?"transparent":"var(--amber)44"}`, display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.2s", fontFamily:"var(--font-body)" }}
+        title="Ask Blog Bunker (uses your AI word allowance)">
+        {open ? "✕" : "?"}
+      </button>
+    </div>
+  );
+}
+
 // ─── AI TOOLS ─────────────────────────────────────────────────────────────────
 
 function AIWriter({ wsName, activeProvider, activeModel, apiKeys }) {
@@ -11637,7 +11765,8 @@ const MOBILE_CSS = `
     .bb-sidebar { display: none !important; }
     .bb-main-content { padding: 16px 14px 72px !important; overflow-x: hidden !important; max-width: 100vw !important; }
     .bb-root { flex-direction: column !important; }
-    .bb-ai-switcher { bottom: 72px !important; right: 12px !important; } /* clear the 56px mobile nav — was overlapping the Settings tab */
+    .bb-ai-switcher { bottom: 72px !important; right: 12px !important; }
+    .bb-help-chat { bottom: 72px !important; right: 68px !important; } /* clear the 56px mobile nav — was overlapping the Settings tab */
   }
 `;
 
@@ -14348,6 +14477,20 @@ Be specific to the actual competitors listed — do not invent generic advice.`,
         onProviderChange={handleProviderChange}
         onModelChange={handleModelChange}
         apiKeys={apiKeys}
+      />
+      <AppAssistant
+        activeProvider={activeProvider}
+        activeModel={activeModel}
+        apiKeys={apiKeys}
+        wsName={wsName}
+        activeTab={activeTab}
+        settingsSection={settingsSection}
+        connections={[
+          metaConfig?.connected && "Facebook/Instagram",
+          loadWordPressConfig()?.connected && "WordPress",
+          loadGSCConfig()?.refreshToken && "Search Console",
+          pinterestConfig?.connected && "Pinterest",
+        ].filter(Boolean)}
       />
       {postEditorOpen && (
         <PostEditor
