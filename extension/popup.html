@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blog Bunker</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header><span class="mark">Blog Bunker</span><button id="disconnect" class="link" hidden>Disconnect</button></header>
+
+  <!-- Not connected -->
+  <section id="view-connect" hidden>
+    <p>Paste the pairing code from <strong>Blog Bunker → Settings → Chrome Extension</strong>.</p>
+    <textarea id="code" rows="4" placeholder="bbpair:…" aria-label="Pairing code"></textarea>
+    <button id="connect" class="primary">Connect</button>
+  </section>
+
+  <!-- Connected -->
+  <section id="view-main" hidden>
+    <div id="page" class="page"></div>
+    <label>Save to workspace<select id="workspace"></select></label>
+    <label>Save as<select id="target">
+      <option value="blog">Blog inspiration</option>
+      <option value="social">Marketing inspiration</option>
+    </select></label>
+    <button id="summarize" class="primary">✂ Summarize this page</button>
+
+    <div id="result" hidden>
+      <p id="tldr" class="tldr"></p>
+      <ul id="points"></ul>
+      <div id="angles-box" class="angles" hidden><strong>Angles you could take</strong><div id="angles"></div></div>
+      <button id="save" class="primary">Save to Blog Bunker</button>
+    </div>
+  </section>
+
+  <p id="status" role="status"></p>
+  <p class="fine">Summaries use your Blog Bunker word allowance. Only the page you click this on is read.</p>
+  <script src="popup.js"></script>
+</body>
+</html>

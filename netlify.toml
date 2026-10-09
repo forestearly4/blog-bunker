@@ -127,6 +127,16 @@
   to     = "/.netlify/functions/get-image"
   status = 200
 
+[[redirects]]
+  from   = "/api/extract"
+  to     = "/.netlify/functions/extract-url"
+  status = 200
+
+[[redirects]]
+  from   = "/api/ext"
+  to     = "/.netlify/functions/ext"
+  status = 200
+
 # SPA fallback — MUST be last so it doesn't swallow API routes above
 [[redirects]]
   from   = "/*"
