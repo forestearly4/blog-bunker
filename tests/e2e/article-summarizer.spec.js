@@ -86,3 +86,35 @@ test("items saved by the Chrome extension are collected into this workspace's In
   await expect(page.getByText("Saved from Chrome")).toBeVisible();
   await expect.poll(() => acks).toEqual(["ext-1"]);
 });
+
+test("leaving the Summarize tab and coming back shows the saved summary without another AI call", async ({ page }) => {
+  await seedApp(page, { data: { bb_user_tier: "operative" } });
+  let claudeCalls = 0;
+  await page.route("**/api/extract", (route) => route.fulfill({ json: { title: "Why Euro Nymphing", siteName: "Hatch", url: "https://example.com/euro", text: "word ".repeat(300), wordCount: 300 } }));
+  await page.route("**/api/claude", async (route) => {
+    claudeCalls++;
+    await route.fulfill({ json: { content: [{ type: "text", text: JSON.stringify(SUMMARY) }], usage: { input_tokens: 400, output_tokens: 120 } } });
+  });
+  await gotoDashboard(page);
+  await openSummarize(page);
+  await page.getByLabel("Article link").fill("https://example.com/euro?utm_source=newsletter");
+  await page.getByTestId("summarize-run").click();
+  await expect(page.getByText("Euro nymphing wins on tight lines.")).toBeVisible();
+  expect(claudeCalls).toBe(1);
+
+  // Leave for another sub-tab and return
+  await page.getByRole("button", { name: /Inspiration/ }).first().click();
+  await openSummarize(page);
+  await expect(page.getByText("Euro nymphing wins on tight lines.")).toBeVisible();
+  await expect(page.getByText(/no words used/)).toBeVisible();
+
+  // Same article again (different tracking params) is served from the cache too
+  await page.getByLabel("Article link").fill("https://example.com/euro?utm_source=twitter#comments");
+  await page.getByTestId("summarize-run").click();
+  await expect(page.getByText(/no words used/)).toBeVisible();
+  expect(claudeCalls).toBe(1);
+
+  // Only the explicit button spends words again
+  await page.getByRole("button", { name: /Re-summarize/ }).click();
+  await expect.poll(() => claudeCalls).toBe(2);
+});

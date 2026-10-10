@@ -23,6 +23,8 @@ export default async (req) => {
     // can check/track platform-managed usage — stripped out before forwarding
     // to Anthropic, which doesn't expect it.
     const { userId, ...anthropicBody } = parsed;
+    // Hard ceiling on output so a buggy/abusive request can't burn a month of words in one call.
+    if (userId && !(anthropicBody.max_tokens <= 4096)) anthropicBody.max_tokens = 4096;
     const store  = getStore("blog-bunker-data");
     const period = new Date().toISOString().slice(0, 7); // YYYY-MM
 

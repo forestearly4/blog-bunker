@@ -54,13 +54,17 @@ test("extension pairs, summarizes the page being read, and saves to the chosen w
     const articlePage = await ctx.newPage();
     await articlePage.goto(`${base}/article`);
 
-    const popup = await ctx.newPage();
-    await popup.exposeFunction("__readArticle", (src) => articlePage.evaluate(src));
-    await popup.addInitScript(() => {
-      chrome.tabs.query = async () => [{ id: 1, url: "https://stand-in.example/article" }];
-      chrome.scripting.executeScript = async ({ func }) => [{ result: await window.__readArticle("(" + func.toString() + ")()") }];
-    });
-    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    const openPopup = async () => {
+      const pg = await ctx.newPage();
+      await pg.exposeFunction("__readArticle", (src) => articlePage.evaluate(src));
+      await pg.addInitScript(() => {
+        chrome.tabs.query = async () => [{ id: 1, url: "https://stand-in.example/article" }];
+        chrome.scripting.executeScript = async ({ func }) => [{ result: await window.__readArticle("(" + func.toString() + ")()") }];
+      });
+      await pg.goto(`chrome-extension://${extId}/popup.html`);
+      return pg;
+    };
+    let popup = await openPopup();
 
     // Pair
     await popup.getByLabel("Pairing code").fill(pairing);
@@ -76,6 +80,15 @@ test("extension pairs, summarizes the page being read, and saves to the chosen w
     expect(aiCalls[0]).toContain("Tight line nymphing");
     expect(aiCalls[0]).not.toContain("SITE MENU JUNK");
     expect(aiCalls[0]).not.toContain("FOOTER JUNK");
+
+    // Leaving the tab closes the popup. Coming back must show the SAME summary
+    // from storage — no second AI call, no extra words.
+    await popup.close();
+    popup = await openPopup();
+    await expect(popup.locator("#tldr")).toHaveText("Tight lines win.");
+    await expect(popup.locator("#status")).toContainText("no words used");
+    await expect(popup.getByRole("button", { name: /Summarize again/ })).toBeVisible();
+    expect(aiCalls).toHaveLength(1);
 
     // Save into the Blog Bunker workspace as Marketing inspiration
     await popup.locator("#workspace").selectOption("ws_bb");
@@ -94,9 +107,16 @@ test("extension pairs, summarizes the page being read, and saves to the chosen w
     const period = new Date().toISOString().slice(0, 7);
     expect(JSON.parse(mem.get(`demo@blogbunker.app:usage_text_${period}`)).tokens).toBe(300);
 
-    // A reopened popup is still connected (token persisted in extension storage)
-    await popup.reload();
+    // A reopened popup is still connected and remembers it was already saved
+    await popup.close();
+    popup = await openPopup();
     await expect(popup.locator("#view-main")).toBeVisible();
+    await expect(popup.getByRole("button", { name: "✓ Saved to Blog Bunker" })).toBeDisabled();
+    expect(aiCalls).toHaveLength(1);
+
+    // Only the explicit "Summarize again" button spends words again
+    await popup.getByRole("button", { name: /Summarize again/ }).click();
+    await expect.poll(() => aiCalls.length).toBe(2);
   } finally {
     await ctx.close();
     server.close();

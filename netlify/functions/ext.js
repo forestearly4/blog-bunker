@@ -31,6 +31,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 const TOKEN_TTL_MS = 90 * 24 * 3600 * 1000;
 const DAILY_SUMMARY_LIMIT = 60;
 const MAX_INBOX = 200;
+const SUMMARY_CACHE_MS = 7 * 24 * 3600 * 1000;
 const MODEL = "claude-haiku-4-5-20251001";
 const sha = (t) => createHash("sha256").update(t).digest("hex");
 const clip = (s, n) => String(s ?? "").slice(0, n);
@@ -123,6 +124,15 @@ export async function handle(req, deps = {}) {
       if (action === "whoami") return json({ workspaces: await workspacesFor(store, userId), expiresAt: rec.expiresAt });
 
       if (action === "summarize") {
+        // Same article text already summarized for this user in the last week:
+        // hand back the stored summary instead of paying for the AI again
+        // (covers re-opening the popup, a second browser, or a second click).
+        const textForHash = clip(body.text, 80000);
+        const contentKey = `${userId}:ext_sum_${sha(clip(body.title, 300) + "\n" + textForHash.slice(0, 20000)).slice(0, 32)}`;
+        if (!body.fresh) {
+          const hit = await store.get(contentKey, { type: "json" });
+          if (hit && hit.summary && Date.now() - hit.at < SUMMARY_CACHE_MS) return json({ summary: hit.summary, cached: true });
+        }
         const day = new Date().toISOString().slice(0, 10);
         const rateKey = `${userId}:ext_rate_${day}`;
         const n = ((await store.get(rateKey, { type: "json" })) || { n: 0 }).n;
@@ -135,7 +145,9 @@ export async function handle(req, deps = {}) {
         const { text: raw, tokens } = await ai(SUMMARY_SYSTEM, buildSummaryUser({ title: clip(body.title, 300), siteName: clip(body.siteName, 100), text: trimWords(text) }));
         await recordUsage(store, userId, tokens);
         await store.setJSON(rateKey, { n: n + 1 });
-        return json({ summary: parseSummary(raw) });
+        const summary = parseSummary(raw);
+        await store.setJSON(contentKey, { summary, at: Date.now() });
+        return json({ summary });
       }
 
       if (action === "save") {

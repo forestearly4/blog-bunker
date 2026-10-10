@@ -68,48 +68,130 @@ function buildBrandImageContext(guide) {
   return parts.join(", ");
 }
 
-// The brand's own style/palette (above) is meant to stay fixed — that's the
-// whole point of a brand guide. But if that's the ONLY thing driving each
-// image prompt, every generation converges on the same safe, generic
-// composition, since the AI (or a plain string template) has nothing else
-// to vary. This picks one option from each of several independent pools —
-// composition, lighting, and shot distance — fresh on every call, so the
-// specific scene changes each time while the brand's actual visual identity
-// never does. Kept as plain, cheap randomness rather than another AI call:
-// there's no need for the variety itself to be "smart," just genuinely
-// different from last time.
-//
-// RECENT_VARIETY_HISTORY: picking independently-random each call can still
-// land on the SAME combo twice (or more) in a row by pure chance — with 8
-// compositions × 6 lighting × 3 distances that's an 1-in-144 chance per
-// repeat, not rare enough over a session's worth of generations to explain
-// away as "basically never happens." This tracks the last few combos actually
-// handed out (module-level — shared across every caller in the tab) and
-// re-rolls until it finds one that wasn't just used, so back-to-back images
-// are GUARANTEED to differ in composition/lighting/distance, not just likely
-// to by the odds.
-const RECENT_VARIETY_HISTORY = [];
-const RECENT_VARIETY_MAX = 6;
-function randomImageVariety() {
-  const composition = [
-    "close-up, shallow depth of field", "wide establishing shot", "overhead flat-lay angle",
-    "candid mid-action moment", "off-center rule-of-thirds framing", "low angle looking up",
-    "through-foreground framing (shooting past an object in the foreground)", "symmetrical centered composition",
-  ];
-  const lighting = [
+// The brand's own style/palette is meant to stay fixed — that's the point of
+// a brand guide. But the brand guide describes the LOOK, and when it is also
+// the only thing driving each prompt, every image converges on the same
+// subject too (the brand's two or three most obvious props, over and over).
+// Three things fix that, working together:
+//   1. A "shot plan" built from FIVE independent axes — subject focus,
+//      season/weather, composition, lighting and lens — where each axis
+//      avoids its own last several picks (remembered across reloads), so
+//      the thing actually in the frame changes, not just the camera angle.
+//   2. The AI is shown the last few prompts it already wrote and told not to
+//      reuse their subject/setting/props (it has no memory of them
+//      otherwise, so "don't repeat yourself" was an instruction it could
+//      not follow).
+//   3. A similarity check on the result, with one rewrite if it still
+//      comes out too close to a recent prompt.
+const VARIETY_POOLS = {
+  subject: [
+    "the hands and tools mid-activity, no face shown",
+    "a single hero object isolated in its environment",
+    "an empty scene suggesting someone has just stepped away",
+    "a small human figure dwarfed by a vast landscape",
+    "an extreme macro of textures and materials",
+    "two people sharing a quiet moment, seen from behind",
+    "a flat-lay arrangement of related items on a textured surface",
+    "the wider environment as the star, no people",
+    "a reflection in water, glass or a polished surface",
+    "a process in progress with a softly blurred foreground element",
+    "a profile or silhouette portrait of one person",
+    "a symbolic still life that hints at the topic instead of showing it literally",
+  ],
+  setting: [
+    "early spring mist", "deep autumn color", "winter frost and low sun", "rain-soaked and glistening",
+    "summer haze and long days", "pre-dawn quiet", "late evening dusk", "clearing sky after a storm",
+  ],
+  composition: [
+    "off-center rule-of-thirds framing", "symmetrical centered composition", "low angle looking up",
+    "overhead flat-lay angle", "diagonal leading lines", "framed through a doorway or window",
+    "shooting past an object in the foreground", "negative space with the subject tucked in a corner",
+    "candid mid-action moment", "layered foreground, midground and background",
+  ],
+  lighting: [
     "golden hour side light", "soft overcast diffused light", "blue hour twilight",
     "harsh direct midday sun with strong shadows", "warm indoor window light", "backlit with visible rim light",
-  ];
-  const distance = ["extreme close-up detail shot", "medium shot", "wide environmental shot"];
-  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  let combo, attempts = 0;
-  do {
-    combo = `${pick(composition)}, ${pick(lighting)}, ${pick(distance)}`;
-    attempts++;
-  } while (RECENT_VARIETY_HISTORY.includes(combo) && attempts < 20);
-  RECENT_VARIETY_HISTORY.push(combo);
-  if (RECENT_VARIETY_HISTORY.length > RECENT_VARIETY_MAX) RECENT_VARIETY_HISTORY.shift();
-  return combo;
+    "campfire or lantern glow", "dappled light through leaves",
+  ],
+  lens: [
+    "24mm wide-angle", "35mm documentary", "50mm natural perspective",
+    "85mm compressed telephoto", "macro lens, very shallow depth of field", "wide environmental shot from far back",
+  ],
+};
+const VARIETY_HISTORY_KEY = "bb_image_variety_history";
+function randomImageVariety() {
+  let hist = {};
+  try { hist = JSON.parse(localStorage.getItem(VARIETY_HISTORY_KEY) || "{}") || {}; } catch {}
+  const picks = [];
+  for (const [axis, pool] of Object.entries(VARIETY_POOLS)) {
+    const recent = Array.isArray(hist[axis]) ? hist[axis] : [];
+    const avoid = recent.slice(-Math.max(1, Math.min(5, pool.length - 3)));
+    const options = pool.filter(x => !avoid.includes(x));
+    const choice = (options.length ? options : pool)[Math.floor(Math.random() * (options.length || pool.length))];
+    hist[axis] = [...recent, choice].slice(-6);
+    picks.push(choice);
+  }
+  try { localStorage.setItem(VARIETY_HISTORY_KEY, JSON.stringify(hist)); } catch {}
+  const [subject, setting, composition, lighting, lens] = picks;
+  return `subject: ${subject}; setting: ${setting}; composition: ${composition}; lighting: ${lighting}; lens: ${lens}`;
+}
+
+// The last few image prompts written for THIS workspace — shown to the AI so
+// it can avoid repeating itself, and compared against each new result.
+const IMAGE_PROMPT_HISTORY_KEY = "bb_image_prompt_history";
+function recentImagePrompts(n = 6) {
+  try {
+    const a = JSON.parse(localStorage.getItem(scopedKey(IMAGE_PROMPT_HISTORY_KEY, "workspace")) || "[]");
+    return Array.isArray(a) ? a.slice(-n) : [];
+  } catch { return []; }
+}
+function recordImagePrompt(prompt) {
+  if (!prompt) return;
+  try {
+    const a = recentImagePrompts(8);
+    a.push(String(prompt).slice(0, 400));
+    localStorage.setItem(scopedKey(IMAGE_PROMPT_HISTORY_KEY, "workspace"), JSON.stringify(a.slice(-8)));
+  } catch {}
+}
+// Words that appear in nearly every prompt (style filler) must not count as
+// "similar" or every pair would look alike.
+const PROMPT_FILLER = new Set(("photorealistic cinematic evocative lighting light shot photography photograph depth field shallow focus composition frame framing background foreground detail details with that this from into over under very soft warm moody golden hour atmospheric professional quality image scene style wide close high resolution aspect ratio landscape").split(" "));
+function promptWords(p) {
+  return new Set(String(p).toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/).filter(w => w.length > 3 && !PROMPT_FILLER.has(w)));
+}
+function promptSimilarity(a, b) {
+  const A = promptWords(a), B = promptWords(b);
+  if (!A.size || !B.size) return 0;
+  let shared = 0; for (const w of A) if (B.has(w)) shared++;
+  return shared / (A.size + B.size - shared);
+}
+function mostSimilarRecentPrompt(p) {
+  let best = { score: 0, prompt: "" };
+  for (const r of recentImagePrompts(8)) { const score = promptSimilarity(p, r); if (score > best.score) best = { score, prompt: r }; }
+  return best;
+}
+const IMAGE_PROMPT_SIMILARITY_RETRY = 0.4;
+function avoidRecentClause() {
+  const r = recentImagePrompts(5);
+  return r.length
+    ? `\n\nRecent images already made for this brand — the new prompt must NOT reuse their main subject, setting, props or framing (these are what keeps getting repeated):\n${r.map((p, i) => `${i + 1}. ${p.slice(0, 180)}`).join("\n")}`
+    : "";
+}
+// Writes ONE image prompt with the variety machinery above, rewriting once if
+// the first attempt is still too close to something recent. Records the final
+// prompt so the next call can avoid it.
+async function aiWriteImagePrompt({ provider, model, apiKey, system, user }) {
+  const run = async (extra, plan) => (await callAI(provider, model, `${system}\n\nShot plan for this one — follow it: ${plan}.${avoidRecentClause()}${extra}`, user, apiKey, 500, 1.0)).trim();
+  let text = await run("", randomImageVariety());
+  const sim = mostSimilarRecentPrompt(text);
+  if (sim.score >= IMAGE_PROMPT_SIMILARITY_RETRY) {
+    try {
+      const again = await run(`\nYour previous attempt was too close to an earlier image ("${sim.prompt.slice(0, 200)}"). Start over with a completely different main subject, setting and props.`, randomImageVariety());
+      if (again) text = again;
+    } catch { /* keep the first attempt */ }
+  }
+  recordImagePrompt(text);
+  return text;
 }
 
 // Plain-text excerpt of a post/caption body, for grounding an image prompt
@@ -1127,7 +1209,18 @@ function saveModels(models) {
 
 // ─── MULTI-PROVIDER AI CALLER ─────────────────────────────────────────────────
 
-async function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 1500, temperature = undefined) {
+// Identical requests fired while the first is still running (double-clicks,
+// two panels asking at once) share ONE call instead of each spending words.
+const _aiInFlight = new Map();
+function callAI(providerId, model, system, userMsg, apiKey, maxTokens = 1000, temperature = undefined) {
+  const k = [providerId, model, maxTokens, temperature, system, userMsg].join("\u0001");
+  if (_aiInFlight.has(k)) return _aiInFlight.get(k);
+  const p = _callAI(providerId, model, system, userMsg, apiKey, maxTokens, temperature)
+    .finally(() => _aiInFlight.delete(k));
+  _aiInFlight.set(k, p);
+  return p;
+}
+async function _callAI(providerId, model, system, userMsg, apiKey, maxTokens, temperature) {
   if (providerId === "anthropic") {
     // Route through Netlify proxy if no client key, otherwise call directly
     const useProxy = !apiKey;
@@ -1643,15 +1736,11 @@ async function generateImagePrompt(topic, platId, activeProvider, activeModel, a
   // instead of illustrating the topic phrase in the abstract.
   const excerpt = contentExcerptFor(contentExcerpt);
   const contentNote = excerpt ? `\n\nExcerpt of the actual content this image is for — pull a specific scene, moment, or detail from it rather than illustrating the topic generically:\n"${excerpt}"` : "";
-  const text = await callAI(
-    activeProvider, activeModel,
-    `You generate image prompts for a blog/brand. ${styleNote} Format: ${spec.style}. This specific one should use: ${randomImageVariety()}. Vary the actual scene, subject framing, and specific visual details each time you're asked — never default to the same setup twice in a row, even for a similar topic. The brand's style/palette above stays consistent; everything else about the composition should feel fresh. Return ONLY a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
-    `Write an image prompt for a ${platId} post (${spec.label}) about: ${topic}${contentNote}`,
-    apiKey,
-    1500,
-    1.0
-  );
-  return text.trim();
+  return aiWriteImagePrompt({
+    provider: activeProvider, model: activeModel, apiKey,
+    system: `You generate image prompts for a blog/brand. ${styleNote} Format: ${spec.style}. The brand style above is the LOOK — palette, mood, texture — it is NOT the subject: do not fall back on the brand's most obvious props every time; show what the shot plan calls for and tie it to the topic. Return ONLY a single descriptive prompt string, no explanation, no quotes, no labels. Photorealistic and evocative.`,
+    user: `Write an image prompt for a ${platId} post (${spec.label}) about: ${topic}${contentNote}`,
+  });
 }
 
 // ─── IMAGE PANEL (per platform) ───────────────────────────────────────────────
@@ -1663,6 +1752,7 @@ function ImagePanel({ platId, topic, contentExcerpt = "", activeProvider, active
   const [promptLoad, setPromptLoad] = useState(false);
   const [error,      setError]      = useState("");
   const [showPrompt, setShowPrompt] = useState(false);
+  const [promptEdited, setPromptEdited] = useState(false); // true once the user hand-edits the prompt
 
   const [imgProvider, setImgProvider] = useState(() => resolveImageProvider(apiKeys));
   const provider    = imgProvider;
@@ -1681,13 +1771,17 @@ function ImagePanel({ platId, topic, contentExcerpt = "", activeProvider, active
     setGenLoading(false);
   };
 
-  const handleGenerate = async () => {
+  // A new image gets a NEW prompt. Regenerating used to re-run the previous
+  // prompt verbatim (both "↻ Regenerate" and "↻ New"), which is why repeated
+  // generations looked nearly identical. The only time the existing prompt is
+  // reused is when the user has hand-edited it (use "Run →" or Regenerate).
+  const handleGenerate = async ({ forceNew = false } = {}) => {
     setError("");
-    if (!imgPrompt) {
+    if (!imgPrompt || forceNew || !promptEdited) {
       setPromptLoad(true);
       try {
         const p = await generateImagePrompt(topic, platId, activeProvider, activeModel, apiKeys[activeProvider], null, contentExcerpt);
-        setImgPrompt(p); setPromptLoad(false);
+        setImgPrompt(p); setPromptEdited(false); setPromptLoad(false);
         await runGenerate(p);
       } catch(e) { setError(e.message); setPromptLoad(false); setGenLoading(false); }
     } else {
@@ -1720,7 +1814,7 @@ function ImagePanel({ platId, topic, contentExcerpt = "", activeProvider, active
               {showPrompt ? "Hide" : "Edit"} Prompt
             </button>
           )}
-          <button onClick={handleGenerate} disabled={isLoading || !topic.trim() || !provider}
+          <button onClick={() => handleGenerate()} disabled={isLoading || !topic.trim() || !provider}
             style={{ padding:"5px 14px", borderRadius:6, border:"none", background:isLoading||!topic.trim()||!provider?"var(--bg-elevated)":"#7c3aed", color:isLoading||!topic.trim()||!provider?"var(--muted)":"#fff", fontSize:11, fontWeight:700, cursor:isLoading||!topic.trim()||!provider?"not-allowed":"pointer", fontFamily:"var(--font-body)", display:"flex", alignItems:"center", gap:6 }}>
             {isLoading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>{promptLoad?"Writing prompt…":"Generating…"}</> : imageUrl ? "↻ Regenerate" : "▣ Generate Image"}
           </button>
@@ -1731,7 +1825,7 @@ function ImagePanel({ platId, topic, contentExcerpt = "", activeProvider, active
         <div style={{ marginBottom:12 }}>
           <div style={{ fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:"var(--muted)", marginBottom:4 }}>Prompt (editable)</div>
           <div style={{ display:"flex", gap:8 }}>
-            <textarea value={imgPrompt} onChange={e=>setImgPrompt(e.target.value)} rows={2}
+            <textarea value={imgPrompt} onChange={e=>{ setImgPrompt(e.target.value); setPromptEdited(true); }} rows={2}
               style={{ flex:1, padding:"8px 12px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:12, fontFamily:"var(--font-body)", outline:"none", resize:"vertical", lineHeight:1.5 }} />
             <button onClick={()=>runGenerate(imgPrompt)} disabled={genLoading}
               style={{ padding:"8px 14px", borderRadius:8, border:"none", background:"#7c3aed", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", alignSelf:"flex-start", whiteSpace:"nowrap" }}>
@@ -1751,7 +1845,7 @@ function ImagePanel({ platId, topic, contentExcerpt = "", activeProvider, active
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.7)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↓ Download
             </button>
-            <button onClick={handleGenerate}
+            <button onClick={() => handleGenerate({ forceNew: true })}
               style={{ padding:"6px 14px", borderRadius:6, border:"none", background:"rgba(0,0,0,0.7)", color:"#fff", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"var(--font-body)", backdropFilter:"blur(4px)" }}>
               ↻ New
             </button>
@@ -1843,7 +1937,7 @@ function SocialPostTab({ activeProvider, activeModel, apiKeys, dark, metaConfig 
         const userMsg = inputMode === "topic"
           ? `Write a ${plat.name} post for Cask & Stream about: ${input}`
           : `Adapt this blog post content into a ${plat.name} post for Cask & Stream:\n\n${input.slice(0, 1500)}`;
-        results[plat.id] = await callAI(activeProvider, activeModel, system, userMsg, apiKeys[activeProvider]);
+        results[plat.id] = await callAI(activeProvider, activeModel, system, userMsg, apiKeys[activeProvider], 600);
       }
       setPosts(results);
       setActivePlat(targets[0].id);
@@ -2428,7 +2522,8 @@ function AIWriter({ wsName, activeProvider, activeModel, apiKeys }) {
         activeProvider, activeModel,
         `You are a writer for Cask & Stream — a fly fishing and whiskey lifestyle blog. Tagline: "Cast at Dawn. Sip at Dusk." Voice: literary, evocative, unhurried. Write markdown with a # title, ## sections, ~${length} words.`,
         `Write a ${tone} blog post about: ${topic}`,
-        apiKeys[activeProvider]
+        apiKeys[activeProvider],
+        Math.min(4000, Math.round(Number(length) * 1.8) + 300)
       );
       setOutput(text);
     } catch(e) { setError(e.message || "Generation failed."); }
@@ -2493,8 +2588,7 @@ function HeadlineGenerator({ activeProvider, activeModel, apiKeys }) {
         activeProvider, activeModel,
         `You generate headlines for Cask & Stream — a fly fishing and whiskey lifestyle blog. Return ONLY a JSON array of 6 headline strings. No explanation, no markdown fences. Raw JSON array only.`,
         `Topic: ${topic}`,
-        apiKeys[activeProvider]
-      );
+        apiKeys[activeProvider], 300);
       setHeadlines(parseAIJson(text));
     } catch(e) { setError(e.message || "Could not generate headlines. Try again."); }
     setLoading(false);
@@ -2541,8 +2635,7 @@ function SEOOptimizer({ activeProvider, activeModel, apiKeys }) {
         activeProvider, activeModel,
         `You are an SEO expert for Cask & Stream, a fly fishing and whiskey lifestyle blog. Analyze blog drafts and return ONLY valid JSON (no fences) with: {"metaTitle":"...","metaDescription":"...","primaryKeyword":"...","secondaryKeywords":["..."],"suggestions":["..."]}. metaTitle ≤60 chars, metaDescription ≤160 chars.`,
         `Analyze:\n\n${draft.slice(0,1500)}`,
-        apiKeys[activeProvider]
-      );
+        apiKeys[activeProvider], 700);
       setResult(parseAIJson(text));
     } catch(e) { setError(e.message || "Could not parse SEO analysis. Try again."); }
     setLoading(false);
@@ -2614,7 +2707,7 @@ function APIKeysSettings({ apiKeys, onSave, byokEnabled = true }) {
     setTestResult(r => ({ ...r, [providerId]: null }));
     try {
       const model = models[providerId] || provider.defaultModel;
-      const text = await callAI(providerId, model, "You are a test assistant.", "Reply with just the word: connected", key || null);
+      const text = await callAI(providerId, model, "You are a test assistant.", "Reply with just the word: connected", key || null, 10);
       setTestResult(r => ({ ...r, [providerId]: { ok: true, msg: `Connected — ${provider.name} responded` } }));
     } catch(e) {
       setTestResult(r => ({ ...r, [providerId]: { ok: false, msg: e.message } }));
@@ -3978,9 +4071,58 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
       const titleLine = lines.find(l => l.startsWith("# "));
       const title  = titleLine ? titleLine.slice(2).trim() : brief.topic;
       const body   = text.replace(/^#[^#].*\n/, "").trim();
-      setDraft(d => ({ ...d, title, body }));
+      setDraft(d => ({ ...d, title, body, outline: false }));
       markDone("brief");
       advanceTo("draft");
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // ── OUTLINE MODE ────────────────────────────────────────────────────────────
+  // A cheap alternative to a full draft (~a tenth of the words): the AI plans
+  // the post and the writer fills it in by hand — or expands it later.
+  const outlinePrompts = () => {
+    const existingTitles = posts.slice(0,10).map(p=>p.title).join("\n");
+    const system = `${brandCtx}You are a professional blog editor. Create a detailed OUTLINE for a blog post that matches the brand guide above — do NOT write the article. Format as markdown: "# " working title, then 5-7 "## " section headings, each followed by 2-4 short bullet points ("- ") saying what that section should cover (key point, example, or detail to include). Add a final "## Conclusion" with a one-line takeaway. Keep every bullet under 20 words. Specific to the brand, never generic.`;
+    const user = `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to work in: ${brief.keywords || "none specified"}\n\nAvoid these already-covered angles:\n${existingTitles}\n\nWrite the outline now.`;
+    return { system, user };
+  };
+
+  const openOutlinePromptPreview = () => {
+    if (!brief.topic.trim()) return;
+    const { system, user } = outlinePrompts();
+    setPromptPreview({ title:"Review Outline Prompt", system, user, confirmLabel:"Generate Outline", accentColor:"var(--amber)", mode:"outline" });
+  };
+
+  const generateOutline = async (overridePrompt = null) => {
+    if (!brief.topic.trim()) return;
+    setLoading(true); setLoadMsg("Building your outline…"); setError(""); setPromptPreview(null);
+    try {
+      const base = outlinePrompts();
+      const text = await callAI(activeProvider, activeModel, overridePrompt?.system ?? base.system, overridePrompt?.user ?? base.user, apiKeys[activeProvider], 700);
+      const titleLine = text.split("\n").find(l => l.startsWith("# "));
+      const title = titleLine ? titleLine.slice(2).trim() : brief.topic;
+      const body  = text.replace(/^#[^#].*\n/, "").trim();
+      setDraft(d => ({ ...d, title, body, outline: true }));
+      markDone("brief");
+      advanceTo("draft");
+    } catch(e) { setError(e.message); }
+    setLoading(false); setLoadMsg("");
+  };
+
+  // Turns the (possibly hand-edited) outline into the full article. The
+  // writer's edits to the outline are the source of truth.
+  const expandOutline = async () => {
+    if (!draft.body.trim()) return;
+    setLoading(true); setLoadMsg("Writing the article from your outline…"); setError("");
+    try {
+      const system = `${brandCtx}You are a professional blog writer. Write the complete, publication-ready blog post in markdown that follows the OUTLINE below exactly — keep its section order and headings, cover every bullet, and keep any text the writer has already written under a heading. Use # for the title and ## for sections. Aim for 800+ words. Match the brand guide above; never generic.`;
+      const user = `Topic: ${brief.topic}\nAngle: ${brief.angle || "your best judgment"}\nTarget audience: ${brief.audience}\nKeywords to include: ${brief.keywords || "none specified"}\n\nOUTLINE:\n# ${draft.title}\n${draft.body}\n\nWrite the full post now.`;
+      const text = await callAI(activeProvider, activeModel, system, user, apiKeys[activeProvider], 4000);
+      const titleLine = text.split("\n").find(l => l.startsWith("# "));
+      const title = titleLine ? titleLine.slice(2).trim() : draft.title;
+      const body  = text.replace(/^#[^#].*\n/, "").trim();
+      setDraft(d => ({ ...d, title, body, outline: false }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
   };
@@ -3989,12 +4131,13 @@ function ContentPipeline({ posts, inspiration, competitors, activeProvider, acti
 
   const proceedToDraft = () => {
     if (!draft.title.trim() || !draft.body.trim()) return;
-    markDone("draft");
+    markDone("draft"); setDraft(d => d.outline ? { ...d, outline: false } : d);
     advanceTo("enhance");
   };
 
   const regenerateDraft = async () => {
     if (!brief.topic.trim()) return;
+    if (draft.outline) return generateOutline();
     setLoading(true); setLoadMsg("Regenerating draft…"); setError("");
     try {
       const text = await callAI(activeProvider, activeModel,
@@ -4176,8 +4319,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
         const system = `${brandCtx}You are a social media manager for this brand, matching the brand guide above. Voice: ${plat.tone}. Format: ${plat.format}. ${plat.urlNote}. Write ONLY the post content.`;
         results[plat.id] = await callAI(activeProvider, activeModel, system,
           `Write a ${plat.name} post based on this blog post:\nTitle: ${draft.title}\n\n${draft.body.slice(0,800)}`,
-          apiKeys[activeProvider]
-        );
+          apiKeys[activeProvider], 600);
       }
       setSocial(s => ({ ...s, posts: results }));
       markDone("social");
@@ -4361,6 +4503,9 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
             <button onClick={openBriefPromptPreview} disabled={!brief.topic.trim() || loading} style={{ ...btnA, background:brief.topic.trim()&&!loading?provider.color:"var(--bg-elevated)", color:brief.topic.trim()&&!loading?"#0e0f11":"var(--muted)", cursor:brief.topic.trim()&&!loading?"pointer":"not-allowed" }}>
               {loading ? <><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>Writing…</> : <>{provider.logo} Generate Draft</>}
             </button>
+            <button onClick={openOutlinePromptPreview} disabled={!brief.topic.trim() || loading} data-testid="generate-outline" title="AI plans the post; you write it (or expand it later) — uses about a tenth of the words of a full draft" style={btnS}>
+              📋 Generate Outline
+            </button>
             <button onClick={() => { markDone("brief"); advanceTo("draft"); }} style={btnS}>Write Manually →</button>
           </div>
         </div>
@@ -4395,6 +4540,13 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
                 </button>
               </div>
             </div>
+            {draft.outline && (
+              <div data-testid="outline-banner" style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap", padding:"10px 14px", marginBottom:14, borderRadius:8, background:"var(--amber-glow)", border:"1px solid var(--amber)44", fontSize:12, color:"var(--text-secondary)" }}>
+                <span style={{ flex:1, minWidth:200 }}>📋 <strong style={{color:"var(--text)"}}>Outline mode</strong> — write each section yourself under its heading, or let AI write the article from this outline.</span>
+                <button onClick={expandOutline} disabled={loading} data-testid="expand-outline" style={{ padding:"6px 12px", borderRadius:6, border:"none", background:provider.color, color:"#0e0f11", fontSize:11, fontWeight:700, cursor:"pointer" }}>{provider.logo} Write full article from outline</button>
+                <button onClick={() => setDraft(d => ({ ...d, outline: false }))} style={{ padding:"6px 12px", borderRadius:6, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:11, cursor:"pointer" }}>I'll write it myself ✓</button>
+              </div>
+            )}
             <div style={{ marginBottom:12 }}>
               <label style={{ display:"block", fontSize:10, fontWeight:700, letterSpacing:"0.1em", textTransform:"uppercase", color:"var(--muted)", marginBottom:6 }}>Title</label>
               <input style={iS} value={draft.title} onChange={e=>setDraft(d=>({...d,title:e.target.value}))}
@@ -5059,7 +5211,7 @@ Titles and descriptions MUST be under their character limits. EVERY title in the
           confirmLabel={promptPreview.confirmLabel}
           accentColor={promptPreview.accentColor}
           onCancel={() => setPromptPreview(null)}
-          onConfirm={() => generateFromBrief({ system: promptPreview.system, user: promptPreview.user })}
+          onConfirm={() => (promptPreview.mode === "outline" ? generateOutline : generateFromBrief)({ system: promptPreview.system, user: promptPreview.user })}
         />
       )}
     </div>
@@ -6453,8 +6605,7 @@ Be specific and actionable, grounded in this brand's real topics and voice. Vary
   "contentIdeas": ["...", "..."]
 }`,
         `Research social media opportunities for: ${topic}\nExisting posts: ${posts.slice(0,5).map(p=>p.title).join(", ")}`,
-        apiKeys[activeProvider]
-      );
+        apiKeys[activeProvider], 1500);
       setResults(parseAIJson(text));
     } catch(e) { setError(e.message); }
     setLoading(false);
@@ -6662,22 +6813,50 @@ function summaryToNotes(s, url) {
   ].filter(Boolean).join("\n\n");
 }
 
+// Summaries are remembered (per link, one week) so leaving this tab and coming
+// back — or pasting the same link again — shows the stored result instead of
+// paying for the AI a second time. The write happens as soon as the summary
+// exists, even if the user has already navigated away mid-request.
+const SUMMARY_CACHE_KEY = "bb_summary_cache";
+const SUMMARY_CACHE_TTL = 7 * 24 * 3600 * 1000;
+const summaryCacheId = (u) => { try { const x = new URL(u.trim()); x.hash = ""; [...x.searchParams.keys()].filter(k => /^(utm_|fbclid|gclid|mc_)/.test(k)).forEach(k => x.searchParams.delete(k)); return x.toString(); } catch { return u.trim(); } };
+function readSummaryCache() { try { const c = JSON.parse(localStorage.getItem(SUMMARY_CACHE_KEY) || "{}"); return c && typeof c === "object" ? c : {}; } catch { return {}; } }
+function cachedSummaryFor(id) { const e = readSummaryCache()[id]; return e && Date.now() - e.at < SUMMARY_CACHE_TTL ? e : null; }
+function writeSummaryCache(id, result) {
+  try {
+    const c = readSummaryCache();
+    c[id] = { result, at: Date.now() };
+    const keep = Object.entries(c).filter(([, v]) => Date.now() - v.at < SUMMARY_CACHE_TTL).sort((a, b) => b[1].at - a[1].at).slice(0, 25);
+    localStorage.setItem(SUMMARY_CACHE_KEY, JSON.stringify(Object.fromEntries(keep)));
+    localStorage.setItem(SUMMARY_CACHE_KEY + "_last", id);
+  } catch {}
+}
+
 function ArticleSummarizer({ activeProvider, activeModel, apiKeys, tierConfig, onSave, dark = true }) {
-  const [url, setUrl]           = useState("");
+  // Come back to the most recent summary instead of an empty screen.
+  const last = (() => { try { const id = localStorage.getItem(SUMMARY_CACHE_KEY + "_last"); const e = id && cachedSummaryFor(id); return e ? { id, ...e } : null; } catch { return null; } })();
+  const [url, setUrl]           = useState(last && !last.id.startsWith("text:") ? last.id : "");
   const [pasted, setPasted]     = useState("");
   const [pasteMode, setPasteMode] = useState(false);
   const [loading, setLoading]   = useState(false);
   const [loadMsg, setLoadMsg]   = useState("");
   const [error, setError]       = useState("");
-  const [result, setResult]     = useState(null); // { title, siteName, url, summary }
+  const [result, setResult]     = useState(last ? last.result : null); // { title, siteName, url, summary }
+  const [fromCache, setFromCache] = useState(!!last);
   const [saved, setSaved]       = useState(false);
   const [copied, setCopied]     = useState(false);
   const iS = { width:"100%", padding:"10px 14px", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-elevated)", color:"var(--text)", fontSize:13, fontFamily:"var(--font-body)", outline:"none", boxSizing:"border-box" };
 
   if (!tierConfig?.urlSummarizer) return <TierLockedNotice feature="The article summarizer" />;
 
-  const run = async () => {
-    setLoading(true); setError(""); setResult(null); setSaved(false);
+  const run = async ({ refresh = false } = {}) => {
+    setError(""); setSaved(false);
+    const cacheId = pasteMode ? `text:${pasted.trim().length}:${pasted.trim().slice(0, 80)}${pasted.trim().slice(-80)}` : summaryCacheId(url);
+    if (!refresh && (pasteMode ? pasted.trim() : url.trim())) {
+      const hit = cachedSummaryFor(cacheId);
+      if (hit) { setResult(hit.result); setFromCache(true); return; } // already paid for — show it
+    }
+    setLoading(true); setResult(null); setFromCache(false);
     try {
       let art;
       if (pasteMode) {
@@ -6700,7 +6879,9 @@ function ArticleSummarizer({ activeProvider, activeModel, apiKeys, tierConfig, o
       const raw = await callAI(activeProvider, activeModel, SUMMARIZER_SYSTEM,
         `Title: ${art.title || "(untitled)"}\nSite: ${art.siteName || "(unknown)"}\n\n<article>\n${text}\n</article>`,
         apiKeys[activeProvider], SUMMARIZER_MAX_TOKENS);
-      setResult({ title: art.title || "", siteName: art.siteName || "", url: art.url || url.trim(), summary: normalizeSummary(raw) });
+      const fresh = { title: art.title || "", siteName: art.siteName || "", url: art.url || url.trim(), summary: normalizeSummary(raw) };
+      writeSummaryCache(cacheId, fresh);
+      setResult(fresh);
     } catch (e) { setError(e.message || "Something went wrong."); }
     setLoading(false); setLoadMsg("");
   };
@@ -6740,7 +6921,7 @@ function ArticleSummarizer({ activeProvider, activeModel, apiKeys, tierConfig, o
           </div>
         )}
         <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:12, flexWrap:"wrap" }}>
-          <button onClick={run} disabled={loading} data-testid="summarize-run"
+          <button onClick={() => run()} disabled={loading} data-testid="summarize-run"
             style={{ padding:"9px 20px", borderRadius:8, border:"none", background:loading?"var(--bg-elevated)":"var(--amber)", color:loading?"var(--muted)":(dark?"#0e0f11":"#fff"), fontSize:13, fontWeight:700, cursor:loading?"wait":"pointer", fontFamily:"var(--font-body)" }}>
             {loading ? (loadMsg || "Working…") : "✂ Summarize"}
           </button>
@@ -6774,8 +6955,10 @@ function ArticleSummarizer({ activeProvider, activeModel, apiKeys, tierConfig, o
               {saved ? "✓ Saved to Inspiration" : "Save to Inspiration"}
             </button>
             <button onClick={copy} style={{ padding:"8px 14px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>{copied ? "Copied" : "Copy"}</button>
+            {fromCache && <button onClick={() => run({ refresh: true })} disabled={loading} style={{ padding:"8px 14px", borderRadius:8, border:"1px solid var(--border)", background:"transparent", color:"var(--text-secondary)", fontSize:12, cursor:"pointer", fontFamily:"var(--font-body)" }}>↻ Re-summarize (uses words)</button>}
             {result.url && <a href={result.url} target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:"var(--text-secondary)" }}>Open original ↗</a>}
           </div>
+          {fromCache && <p style={{ fontSize:11, color:"var(--green)", margin:"12px 0 0" }}>Showing your saved summary of this article — no words used.</p>}
           <p style={{ fontSize:11, color:"var(--muted)", margin:"12px 0 0" }}>Use this as research — write your own take rather than republishing the original, and link back to the source.</p>
         </div>
       )}
@@ -6884,8 +7067,7 @@ function HashtagOptimizer({ activeProvider, activeModel, apiKeys, brandGuide = n
 }
 primary = 5 high-volume (100k-1M posts), niche = 8 medium-volume (10k-100k), trending = 5 current trends, branded = 3-4 brand-specific`,
         `Topic: ${topic}\nPlatform: ${platform}`,
-        apiKeys[activeProvider]
-      );
+        apiKeys[activeProvider], 900);
       setResults(parseAIJson(text));
     } catch(e) { setError(e.message); }
     setLoading(false);
@@ -7012,8 +7194,12 @@ function SocialImageStudio({ activeProvider, activeModel, apiKeys, brandGuide = 
     if (!topic.trim() || !provider) return;
     setLoading(true); setError("");
     try {
-      const aiPrompt = `Generate an image prompt for a ${platform} post for this brand: ${buildBrandImageContext(brandGuide) || "a lifestyle brand"}. Style (keep fixed): ${styleMap[style]}. This one should use: ${randomImageVariety()}. Topic: ${topic}. Return ONLY the prompt, no explanation.`;
-      const generatedPrompt = await callAI(activeProvider, activeModel, "You generate concise, vivid image prompts. Vary the specific scene and composition each time — never repeat the same setup twice in a row. Return only the prompt string.", aiPrompt, apiKeys[activeProvider], 1500, 1.0);
+      const aiPrompt = `Generate an image prompt for a ${platform} post for this brand: ${buildBrandImageContext(brandGuide) || "a lifestyle brand"}. Style (keep fixed): ${styleMap[style]}. Topic: ${topic}. Return ONLY the prompt, no explanation.`;
+      const generatedPrompt = await aiWriteImagePrompt({
+        provider: activeProvider, model: activeModel, apiKey: apiKeys[activeProvider],
+        system: "You generate concise, vivid image prompts. The brand and style describe the LOOK, not the subject — show what the shot plan calls for and tie it to the topic. Return only the prompt string.",
+        user: aiPrompt,
+      });
       setDraftPrompt(generatedPrompt.trim());
       setPreviewOpen(true);
     } catch(e) { setError(e.message); }
@@ -7494,8 +7680,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       const text = await callAI(activeProvider, activeModel,
         `${buildBrandContext(brandGuide)}You are a social strategist for this brand, matching the brand guide above. Suggest ONE compelling, specific social post idea. Return ONLY the topic/concept as a single sentence, nothing else.`,
         `Platforms: ${idea.platforms.join(", ")}. Suggest a fresh post idea that works across all of them.`,
-        apiKeys[activeProvider]
-      );
+        apiKeys[activeProvider], 120);
       setIdea(i => ({ ...i, topic: text.trim() }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
@@ -7523,8 +7708,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       const text = await callAI(activeProvider, activeModel,
         captionPromptFor(plat),
         `Write a ${platId} caption (post type: ${idea.type}) about: ${idea.topic}`,
-        apiKeys[activeProvider]
-      );
+        apiKeys[activeProvider], 700);
       setCaptions(c => ({ ...c, [platId]: { text: stripHashtags(text.trim()) } }));
     } catch(e) { setError(e.message); }
     setLoading(false); setLoadMsg("");
@@ -7538,8 +7722,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
         const text = await callAI(activeProvider, activeModel,
           captionPromptFor(plat),
           `Write a ${plat.id} caption (post type: ${idea.type}) about: ${idea.topic}`,
-          apiKeys[activeProvider]
-        );
+          apiKeys[activeProvider], 700);
         setCaptions(c => ({ ...c, [plat.id]: { text: stripHashtags(text.trim()) } }));
       } catch(e) { setError(`${plat.label}: ${e.message}`); }
     }
@@ -7554,8 +7737,7 @@ function SocialPipeline({ activeProvider, activeModel, apiKeys, dark, metaConfig
       const text = await callAI(activeProvider, activeModel,
         `${buildBrandContext(brandGuide)}You are a hashtag strategist for this brand, matching the brand guide above. Return ONLY valid JSON (no fences): {"primary":[{"tag":"#tag1","score":65}],"niche":[{"tag":"#tag1","score":35}],"branded":[{"tag":"#${(brandGuide?.brandName||"YourBrand").replace(/[^a-zA-Z0-9]/g,"")}","score":15}],"full_set":"all hashtags as one space-separated string"}. primary=5 tags, niche=6 tags, branded=2-3 tags. "score" is your honest best estimate of reach potential from 1-100 (higher = broader audience but more competition to be seen; lower = smaller but more targeted audience) — most hashtags genuinely score in the 20-60 range once real competition is accounted for; reserve 80+ for a tag that's both high-volume and realistically attainable for a small-to-mid account. The example scores above are illustrations of realistic scoring, not a target.`,
         `Topic: ${idea.topic}\nPlatforms: ${idea.platforms.join(", ")}`,
-        apiKeys[activeProvider]
-      );
+        apiKeys[activeProvider], 900);
       const parsed = parseAIJson(text);
       // Normalize to {tag, score} objects — tolerate the AI occasionally returning plain strings
       for (const key of ["primary","niche","branded"]) {
@@ -8917,11 +9099,11 @@ function EmailNewsletterStudio({ activeProvider, activeModel, apiKeys, posts, br
         callAI(activeProvider, activeModel,
           `${brandCtx}You write compelling email newsletter subject lines for bloggers. Return ONLY the subject line, nothing else. Max 60 characters. No quotes.`,
           `Write an email subject line for this newsletter: ${context}`,
-          apiKeys[activeProvider]),
+          apiKeys[activeProvider], 60),
         callAI(activeProvider, activeModel,
           `${brandCtx}You write engaging email newsletters for bloggers. Write in a warm, personal voice — like writing to a friend. Structure: greeting → hook → main content → call to action → sign-off. Include a clear CTA to read the full post. Use plain text formatting only. 200-350 words.`,
           `Write an email newsletter. ${context}${selectedPost && wsUrl ? `\nLink to post: [Read the full post →](https://${wsUrl.replace(/^https?:\/\//,"").replace(/\/$/,"")}/blog/${selectedPost.title?.toLowerCase().replace(/\s+/g,"-")})` : ""}`,
-          apiKeys[activeProvider]),
+          apiKeys[activeProvider], 800),
       ]);
 
       setSubject(subjectResult.trim());
@@ -9064,8 +9246,7 @@ function PinterestStudio({ activeProvider, activeModel, apiKeys, posts, brandGui
         `${brandCtx}You are a Pinterest strategy expert. Create 3 Pinterest pin ideas for a blog post or topic. Pinterest is a SEARCH ENGINE — optimize for discoverability. Return ONLY valid JSON array (no fences):
 [{"title":"pin title under 100 chars","description":"pin description 200-500 chars with keywords","keywords":["keyword1","keyword2","keyword3","keyword4","keyword5"],"board":"suggested board name","imageDescription":"describe the ideal pin image in 1 sentence","type":"standard|idea|video"}]`,
         `Create 3 Pinterest pins for: ${context}`,
-        apiKeys[activeProvider]
-      );
+        apiKeys[activeProvider], 1100);
       setPins(parseAIJson(text));
     } catch(e) { setError(e.message); }
     setLoading(false);
@@ -12948,8 +13129,10 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
   const openPromptPreview = async () => {
     setLoading(true); setError("");
     try {
-      let draftedPrompt = prompt;
-      if (!draftedPrompt) {
+      // Always rebuilt — reusing the previous prompt here is why "↻ New" kept
+      // producing the same-looking headline image.
+      let draftedPrompt = "";
+      {
         // Built directly from the title + an excerpt of the actual post body
         // — no extra AI call needed. The title alone was the real cause of
         // same-looking headline images: two posts with similar titles (or
@@ -12962,6 +13145,7 @@ function HeadlineImagePanel({ title, body, activeProvider, activeModel, apiKeys,
         const topic = (title || "").replace(/[#*\n]/g, " ").trim();
         const excerpt = contentExcerptFor(body, 180);
         draftedPrompt = `${topic}${excerpt ? ` — specifically: ${excerpt}` : ""}, ${style}, ${randomImageVariety()}, wide landscape banner, professional photography, 16:9 aspect ratio`;
+        recordImagePrompt(draftedPrompt);
       }
       setDraftPrompt(draftedPrompt);
       setPreviewOpen(true);

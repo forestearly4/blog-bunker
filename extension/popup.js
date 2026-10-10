@@ -6,7 +6,22 @@ const store = {
   set: (v) => chrome.storage.local.set(v),
   clear: () => chrome.storage.local.clear(),
 };
-let cfg = {}, pageData = null, summary = null;
+let cfg = {}, pageData = null, summary = null, entryKey = null, watching = null;
+
+// ── Per-page summary cache ─────────────────────────────────────────────────
+// Chrome closes this popup whenever focus leaves it, so nothing here survives
+// a tab switch. Results are therefore stored (by the background worker) under
+// a key for the page, and reopening the popup on the same article just reads
+// the stored summary — no new AI call, no extra words used.
+const djb2 = (str) => { let h = 5381; for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0; return h.toString(36); };
+function pageKey(p) {
+  let u = p.url;
+  try { const x = new URL(p.url); x.hash = ""; [...x.searchParams.keys()].filter(k => /^(utm_|fbclid|gclid|mc_)/.test(k)).forEach(k => x.searchParams.delete(k)); u = x.toString(); } catch {}
+  return djb2(u) + (p.usingSelection ? "-s" + djb2(p.text) : "");
+}
+const entryStorageKey = () => "sum:" + entryKey;
+async function getEntry() { const k = entryStorageKey(); return (await chrome.storage.local.get(k))[k] || null; }
+async function patchEntry(patch) { const k = entryStorageKey(); const cur = (await chrome.storage.local.get(k))[k] || {}; await chrome.storage.local.set({ [k]: { ...cur, ...patch } }); }
 
 function say(msg, isError = false) { const el = $("status"); el.textContent = msg || ""; el.className = isError ? "error" : ""; }
 
@@ -74,6 +89,9 @@ async function showMain() {
     const b = document.createElement("b"); b.textContent = pageData.title || pageData.url;
     const s = document.createElement("span"); s.textContent = pageData.usingSelection ? `${pageData.siteName} · using your selected text` : pageData.siteName;
     box.append(b, s);
+    entryKey = pageKey(pageData);
+    watchEntry();
+    applyEntry(await getEntry(), true);
   } catch (e) { say(e.message, true); $("summarize").disabled = true; }
   // Refresh the workspace list in the background (new workspaces appear without re-pairing).
   api({ action: "whoami" }).then(async d => {
@@ -105,19 +123,49 @@ $("disconnect").onclick = async () => {
   say("Disconnected from this browser. Use “Disconnect all browsers” in Blog Bunker settings to fully revoke the code.");
 };
 
+function renderSummary(sm) {
+  summary = sm;
+  $("tldr").textContent = sm.tldr;
+  fillList($("points"), sm.key_points, "li");
+  $("angles-box").hidden = !sm.angles.length;
+  fillList($("angles"), sm.angles.map(a => "→ " + a), "div");
+  $("result").hidden = false;
+}
+
+// Brings the popup in line with whatever is stored for this page.
+function applyEntry(entry, reopened = false) {
+  const btn = $("summarize");
+  if (!entry) { btn.disabled = false; btn.textContent = "✂ Summarize this page"; return; }
+  if (entry.status === "pending") { btn.disabled = true; btn.textContent = "Summarizing…"; say("Summarizing — you can switch tabs, it will finish in the background."); return; }
+  if (entry.status === "error") { btn.disabled = false; btn.textContent = "✂ Summarize this page"; say(entry.error, true); return; }
+  // done
+  renderSummary(entry.summary);
+  btn.disabled = false; btn.textContent = "↻ Summarize again (uses words)";
+  const saved = entry.saved;
+  $("save").disabled = !!saved;
+  $("save").textContent = saved ? "✓ Saved to Blog Bunker" : "Save to Blog Bunker";
+  say(saved ? "Already saved. No words used for this view." : (reopened || entry.cached ? "Showing the summary you already made — no words used." : "Summary ready."));
+}
+
+// Follow this page's stored entry while the popup is open (the background
+// worker writes the result, even if the popup was closed and reopened).
+function watchEntry() {
+  if (watching) chrome.storage.onChanged.removeListener(watching);
+  const k = entryStorageKey();
+  watching = (changes, area) => { if (area === "local" && changes[k]) applyEntry(changes[k].newValue || null); };
+  chrome.storage.onChanged.addListener(watching);
+}
+
 $("summarize").onclick = async () => {
   if (!pageData) return;
-  const btn = $("summarize"); btn.disabled = true; say("Summarizing…"); $("result").hidden = true;
-  try {
-    const d = await api({ action: "summarize", text: pageData.text, title: pageData.title, siteName: pageData.siteName });
-    summary = d.summary;
-    $("tldr").textContent = summary.tldr;
-    fillList($("points"), summary.key_points, "li");
-    $("angles-box").hidden = !summary.angles.length;
-    fillList($("angles"), summary.angles.map(a => "→ " + a), "div");
-    $("result").hidden = false; say("");
-  } catch (e) { say(e.message, true); }
-  btn.disabled = false;
+  const existing = await getEntry();
+  const fresh = !!(existing && existing.status === "done");   // only "Summarize again" re-runs
+  $("result").hidden = fresh ? $("result").hidden : true;
+  $("summarize").disabled = true; say("Summarizing…");
+  chrome.runtime.sendMessage({
+    type: "summarize", entryKey, base: cfg.base, token: cfg.token, fresh,
+    payload: { text: pageData.text, title: pageData.title, siteName: pageData.siteName },
+  }).catch?.(() => {});
 };
 
 $("save").onclick = async () => {
@@ -127,7 +175,10 @@ $("save").onclick = async () => {
     const workspaceId = $("workspace").value, target = $("target").value;
     await api({ action: "save", workspaceId, target, title: pageData.title, siteName: pageData.siteName, url: pageData.url, summary });
     await store.set({ lastWorkspace: workspaceId, lastTarget: target });
+    await patchEntry({ saved: { workspaceId, target, at: Date.now() } });
+    $("save").textContent = "✓ Saved to Blog Bunker"; btn.disabled = true;
     say("✓ Saved. It will appear on that workspace's Inspiration board next time Blog Bunker is open.");
+    return;
   } catch (e) { say(e.message, true); }
   btn.disabled = false;
 };
